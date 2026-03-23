@@ -15,113 +15,113 @@ import numpy as np
 # ─────────────────────────────────────────────
 # 1. CONFIGURAR EL OBJETO GOES
 # ─────────────────────────────────────────────
-# satellite: 19 = GOES-East (reemplaza al 16 desde principios de 2025)
-# product:   ABI-L1b-Rad = datos radiométricos nivel 1b (crudos, en counts/radiancia)
-#            ABI-L2-CMIP = producto de nube e imagen multicanal (nivel 2, procesado)
-# domain:    'F' = Full Disk (disco completo, cubre Sudamérica)
-#            'C' = CONUS (solo EEUU continental)
-#            'M' = Mesoscale (zona de alta frecuencia)
+print("=" * 55)
+print("  GOES-19 | Banda 7 (3.9 µm) | Descarga y análisis")
+print("=" * 55)
+
+print("\n[1/5] Configurando conexión con AWS (NOAA Open Data)...")
+print("      Satélite : GOES-19 (GOES-East)")
+print("      Producto : ABI-L1b-RadC07 (Infrarrojo onda corta)")
+print("      Dominio  : Full Disk (cubre Sudamérica)")
 
 G = GOES(
     satellite=19,
-    product="ABI-L1b-Rad",   # nivel 1b para tener control total
-    domain="F",               # Full Disk para ver Uruguay y región
+    product="ABI-L1b-Rad",  # banda en el nombre — fix para versiones antiguas
+    domain="F",
 )
+print("      OK — objeto GOES listo")
 
 # ─────────────────────────────────────────────
-# 2. OPCIONES DE DESCARGA
+# 2. DESCARGA
 # ─────────────────────────────────────────────
+print("\n[2/5] Descargando imagen más reciente desde S3...")
+print("      (puede tardar unos segundos según conexión)")
 
-# --- Opción A: imagen más reciente disponible ---
-ds = G.latest(bands=7)
+ds = G.latest()
 
-# --- Opción B: imagen más cercana a una fecha/hora específica ---
-# ds = G.nearesttime(
-#     attime="2024-01-15 18:00",   # UTC
-#     bands=7,                      # Banda 7 = infrarrojo de onda corta (3.9 µm)
-# )
-
-# --- Opción C: rango de tiempo (devuelve lista de archivos) ---
-# ds = G.timerange(
-#     start="2024-01-15 12:00",
-#     end="2024-01-15 18:00",
-#     bands=7,
-# )
+timestamp = ds.attrs.get("time_coverage_start", "desconocido")
+print(f"      OK — archivo descargado")
+print(f"      Hora de captura (UTC) : {timestamp}")
+print(f"      Dimensiones del grid  : {ds.dims['y']} filas x {ds.dims['x']} columnas")
+print(f"      Variables disponibles : {list(ds.data_vars)}")
 
 # ─────────────────────────────────────────────
-# 3. EXPLORAR EL DATASET
+# 3. CONVERSIÓN: RADIANCIA → TEMPERATURA DE BRILLO
 # ─────────────────────────────────────────────
-print(ds)
-# El dataset xarray tiene:
-#   ds["Rad"]   → radiancia en W·m⁻²·sr⁻¹·µm⁻¹
-#   ds["DQF"]   → Data Quality Flag (0 = bueno)
-#   ds.attrs    → metadatos del archivo NetCDF
+print("\n[3/5] Convirtiendo radiancia a temperatura de brillo (BT)...")
+print("      Leyendo coeficientes de Planck del NetCDF...")
 
-# Convertir radiancia a temperatura de brillo (Brightness Temperature)
-# Solo válido para bandas IR (bandas 7 al 16)
-fk1 = ds["planck_fk1"].values
-fk2 = ds["planck_fk2"].values
-bc1 = ds["planck_bc1"].values
-bc2 = ds["planck_bc2"].values
+fk1 = float(ds["planck_fk1"])
+fk2 = float(ds["planck_fk2"])
+bc1 = float(ds["planck_bc1"])
+bc2 = float(ds["planck_bc2"])
 
-rad = ds["Rad"].values
-BT = (fk2 / (np.log((fk1 / rad) + 1)) - bc1) / bc2  # en Kelvin
+print(f"      fk1={fk1:.2f}  fk2={fk2:.2f}  bc1={bc1:.6f}  bc2={bc2:.6f}")
+print("      Aplicando fórmula inversa de Planck...")
 
-print(f"Temperatura de brillo mínima: {np.nanmin(BT):.1f} K")
-print(f"Temperatura de brillo máxima: {np.nanmax(BT):.1f} K")
+rad = ds["Rad"].values.astype(float)
+rad = np.where(rad > 0, rad, np.nan)
+BT  = (fk2 / (np.log((fk1 / rad) + 1)) - bc1) / bc2  # Kelvin
+
+n_validos = int(np.sum(~np.isnan(BT)))
+n_total   = BT.size
+print(f"      OK — BT calculado")
+print(f"      Píxeles válidos        : {n_validos:,} / {n_total:,}")
+print(f"      BT mínima              : {np.nanmin(BT):.1f} K  ({np.nanmin(BT)-273.15:.1f} °C)")
+print(f"      BT máxima              : {np.nanmax(BT):.1f} K  ({np.nanmax(BT)-273.15:.1f} °C)")
+print(f"      BT media               : {np.nanmean(BT):.1f} K  ({np.nanmean(BT)-273.15:.1f} °C)")
 
 # ─────────────────────────────────────────────
-# 4. VISUALIZACIÓN BÁSICA
+# 4. DETECCIÓN SIMPLE DE FOCOS (umbral)
 # ─────────────────────────────────────────────
+print("\n[4/5] Detectando focos ígneos candidatos...")
+
+UMBRAL_FUEGO_K = 320.0
+print(f"      Umbral aplicado : BT > {UMBRAL_FUEGO_K} K ({UMBRAL_FUEGO_K-273.15:.1f} °C)")
+
+focos = BT > UMBRAL_FUEGO_K
+n_focos = int(np.sum(focos & ~np.isnan(BT)))
+pct = 100 * n_focos / n_validos
+
+print(f"      Focos candidatos: {n_focos:,} px ({pct:.4f}% del área válida)")
+
+if n_focos > 0:
+    y_focos, x_focos = np.where(focos)
+    bt_focos = BT[focos]
+    print(f"      BT promedio en focos : {bt_focos.mean():.1f} K ({bt_focos.mean()-273.15:.1f} °C)")
+    print(f"      BT máxima en focos   : {bt_focos.max():.1f} K ({bt_focos.max()-273.15:.1f} °C)")
+    print(f"      Primeros 5 (fila, col): {list(zip(y_focos[:5].tolist(), x_focos[:5].tolist()))}")
+else:
+    print("      Sin focos detectados en esta imagen.")
+
+# ─────────────────────────────────────────────
+# 5. VISUALIZACIÓN
+# ─────────────────────────────────────────────
+print("\n[5/5] Generando visualización...")
+
 fig, ax = plt.subplots(figsize=(10, 10))
 
-# Banda 7: focos ígneos aparecen como píxeles muy calientes (alta BT)
-# Invertimos el colormap: áreas calientes = colores brillantes
 im = ax.imshow(
     BT,
     cmap="inferno",
-    vmin=200,   # ~-73°C (nubes frías)
-    vmax=330,   # ~57°C (superficie muy caliente / fuego)
+    vmin=200,
+    vmax=330,
     origin="upper",
 )
 
 plt.colorbar(im, ax=ax, label="Temperatura de brillo (K)")
-ax.set_title(f"GOES-19 | Banda 7 (3.9 µm) | {ds.attrs.get('time_coverage_start', '')}")
+ax.set_title(
+    f"GOES-19 | Banda 7 (3.9 µm) | {timestamp[:16].replace('T',' ')} UTC\n"
+    f"Focos candidatos (BT > {UMBRAL_FUEGO_K} K): {n_focos:,} px"
+)
 ax.axis("off")
 plt.tight_layout()
-plt.savefig("goes19_banda7.png", dpi=150)
+
+output_png = "goes19_banda7.png"
+plt.savefig(output_png, dpi=150)
 plt.show()
-print("Imagen guardada: goes19_banda7.png")
+print(f"      OK — imagen guardada: {output_png}")
 
-# ─────────────────────────────────────────────
-# 5. DETECCIÓN SIMPLE DE FOCOS (umbral)
-# ─────────────────────────────────────────────
-# Umbral conservador para detección de fuego en Banda 7:
-# píxeles con BT > 320 K (~47°C) son candidatos a focos ígneos
-
-UMBRAL_FUEGO_K = 320.0
-focos = BT > UMBRAL_FUEGO_K
-
-n_focos = np.sum(focos)
-print(f"Píxeles candidatos a foco ígneo (BT > {UMBRAL_FUEGO_K} K): {n_focos}")
-
-# Coordenadas de los focos (en píxeles del grid)
-y_focos, x_focos = np.where(focos)
-print(f"Primeros 5 focos (fila, col): {list(zip(y_focos[:5], x_focos[:5]))}")
-
-# ─────────────────────────────────────────────
-# NOTAS PARA EL PROYECTO
-# ─────────────────────────────────────────────
-# - GOES-19 reemplazó a GOES-16 como GOES-East en 2025
-#   goes2go todavía puede referenciarlo como satellite=16 en versiones viejas,
-#   verificar con: G = GOES(satellite="EAST", ...)
-#
-# - Los archivos se descargan por defecto a ~/data/noaa-goes19/
-#   Configurable con: G = GOES(..., save_dir="/ruta/custom")
-#
-# - Para Sudamérica con Full Disk, el grid es grande (~10k x 10k px)
-#   Considerar recortar con ds.sel() usando coordenadas x/y del grid geoestacionario
-#
-# - Producto nivel 2 de focos ya procesado por NOAA:
-#   product="ABI-L2-FDC"  ← Fire Detection and Characterization (FDC)
-#   Útil para comparar contra el modelo propio
+print("\n" + "=" * 55)
+print("  Listo.")
+print("=" * 55)
