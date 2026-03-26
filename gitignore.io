@@ -1,1 +1,2 @@
 .env
+obtencion_de_imagenes/dataset_focos_igeos/
