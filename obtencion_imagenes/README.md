@@ -133,6 +133,39 @@ Esto muestra cuántos archivos se descargaron por producto y si hay timestamps i
 ✅ Timestamps completos (todos los productos): 48
 ```
 
+### 6. Ver estadísticas de fuego
+
+```bash
+python pipeline.py fire-stats --region uruguay
+```
+
+Muestra cuántos timestamps tienen fuego detectado, el porcentaje, y un ranking de los 10 con más píxeles de fuego:
+
+```
+🔥 ESTADÍSTICAS DE FUEGO — uruguay
+=============================================
+  Total timestamps analizados : 48
+  Con fuego detectado         : 12  (25.0%)
+  Sin fuego                   : 36  (75.0%)
+
+🔝 Top 10 timestamps con más píxeles de fuego:
+  Timestamp              Píxeles fuego
+  -----------------------------------
+  20250915_1400                    143
+  20250912_1600                     87
+  ...
+```
+
+### 7. Visualizar una imagen y su máscara
+
+```bash
+python pipeline.py visualize --region uruguay --timestamp 20250901_1200
+```
+
+Abre una ventana con dos paneles: la imagen de la Banda 7 (infrarrojo térmico) a la izquierda y la máscara de fuego a la derecha. Útil para inspeccionar visualmente el dataset antes de entrenar.
+
+Si no sabés qué timestamps tienen fuego, primero corré `fire-stats` para ver el ranking.
+
 ---
 
 ## ¿Dónde se guardan los archivos?

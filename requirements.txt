@@ -1,7 +1,10 @@
 goes2go
 pyproj
 pyyaml
-numpy
+numpy<2
 pandas
 matplotlib
+torch
+torchvision
+segmentation-models-pytorch
 huggingface_hub

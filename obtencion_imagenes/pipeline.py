@@ -95,6 +95,85 @@ def cmd_list_products(cfg):
         print(f"  {p['id']:<30}  {band}  {p['description']}")
 
 
+def cmd_visualize(args, cfg):
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    output_root = os.path.join(cfg["output_root"], args.region)
+    ts          = args.timestamp  # e.g. "20250901_1200"
+
+    rad_path  = os.path.join(output_root, "ABI-L1b-Rad-B07", f"{ts}.npy")
+    mask_path = os.path.join(output_root, "ABI-L2-FDCF",     f"{ts}.npy")
+
+    if not os.path.exists(rad_path):
+        print(f"❌ No se encontró la imagen de radiancia para {ts}")
+        print(f"   Buscando en: {rad_path}")
+        return
+
+    rad  = np.load(rad_path)
+    mask = np.load(mask_path) if os.path.exists(mask_path) else None
+
+    fig, axes = plt.subplots(1, 2 if mask is not None else 1, figsize=(14, 6))
+    fig.suptitle(f"GOES-19 — {args.region} — {ts}", fontsize=14)
+
+    ax_rad = axes[0] if mask is not None else axes
+    im1 = ax_rad.imshow(np.log1p(rad), cmap="magma")
+    ax_rad.set_title("Banda 7 — Infrarrojo (firma térmica)")
+    ax_rad.axis("off")
+    plt.colorbar(im1, ax=ax_rad, label="log(1 + Rad)")
+
+    if mask is not None:
+        fuego = (mask == 0).astype(int)
+        im2   = axes[1].imshow(fuego, cmap="Reds", vmin=0, vmax=1)
+        axes[1].set_title(f"Máscara de fuego — {int(fuego.sum())} píxeles detectados")
+        axes[1].axis("off")
+        plt.colorbar(im2, ax=axes[1])
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def cmd_fire_stats(args, cfg):
+    import numpy as np
+    output_root  = os.path.join(cfg["output_root"], args.region)
+    mask_folder  = os.path.join(output_root, "ABI-L2-FDCF")
+
+    if not os.path.exists(mask_folder):
+        print(f"❌ No se encontró la carpeta de máscaras: {mask_folder}")
+        print("   Asegurate de haber descargado el producto ABI-L2-FDCF.")
+        return
+
+    archivos = sorted([f for f in os.listdir(mask_folder) if f.endswith(".npy")])
+    if not archivos:
+        print("⚠️  No hay máscaras descargadas todavía.")
+        return
+
+    con_fuego, sin_fuego, detalles = [], [], []
+    for f in archivos:
+        mask = np.load(os.path.join(mask_folder, f))
+        n    = int(np.sum(mask == 0))  # DQF=0 → high confidence fire
+        if n > 0:
+            con_fuego.append(f)
+            detalles.append((f.replace(".npy", ""), n))
+        else:
+            sin_fuego.append(f)
+
+    total = len(archivos)
+    print(f"\n🔥 ESTADÍSTICAS DE FUEGO — {args.region}")
+    print(f"{'='*45}")
+    print(f"  Total timestamps analizados : {total}")
+    print(f"  Con fuego detectado         : {len(con_fuego)}  ({100*len(con_fuego)/total:.1f}%)")
+    print(f"  Sin fuego                   : {len(sin_fuego)}  ({100*len(sin_fuego)/total:.1f}%)")
+
+    if detalles:
+        detalles.sort(key=lambda x: x[1], reverse=True)
+        print(f"\n🔝 Top 10 timestamps con más píxeles de fuego:")
+        print(f"  {'Timestamp':<20} {'Píxeles fuego':>15}")
+        print(f"  {'-'*35}")
+        for ts, n in detalles[:10]:
+            print(f"  {ts:<20} {n:>15,}")
+
+
 def cmd_list_regions(cfg):
     print("\n🗺  Regiones disponibles en config.yaml:\n")
     for name, coords in cfg["regions"].items():
@@ -124,6 +203,15 @@ def main():
     sub.add_parser("list-products", help="List all products defined in config.yaml")
     sub.add_parser("list-regions",  help="List all regions defined in config.yaml")
 
+    # visualize
+    viz = sub.add_parser("visualize", help="Show Band 7 image and fire mask for a timestamp")
+    viz.add_argument("--region",    required=True, help="Region key from config.yaml")
+    viz.add_argument("--timestamp", required=True, help='Timestamp to visualize, e.g. "20250901_1200"')
+
+    # fire-stats
+    fs = sub.add_parser("fire-stats", help="Show fire detection statistics for a region")
+    fs.add_argument("--region", required=True, help="Region key from config.yaml")
+
     args = parser.parse_args()
     cfg  = load_config(os.path.join(os.path.dirname(__file__), "config.yaml"))
 
@@ -135,6 +223,10 @@ def main():
         cmd_list_products(cfg)
     elif args.command == "list-regions":
         cmd_list_regions(cfg)
+    elif args.command == "fire-stats":
+        cmd_fire_stats(args, cfg)
+    elif args.command == "visualize":
+        cmd_visualize(args, cfg)
     else:
         parser.print_help()
 
