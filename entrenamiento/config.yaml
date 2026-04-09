@@ -1,0 +1,24 @@
+# Configuración del entrenamiento
+
+data:
+  dataset_root: ../obtencion_imagenes/dataset/uruguay
+  bands:
+    - ABI-L1b-Rad-B07
+  mask_product: ABI-L2-FDCF
+  val_split: 0.2        # 20% de los datos para validación
+  image_size: 256       # las imágenes se recortan a 256x256
+
+model:
+  architecture: Unet
+  encoder: resnet34     # encoder preentrenado en ImageNet
+  encoder_weights: imagenet
+
+training:
+  epochs: 30
+  batch_size: 8
+  learning_rate: 0.0001
+  device: auto          # auto detecta MPS, CUDA o CPU
+
+output:
+  checkpoint_dir: checkpoints
+  best_model: checkpoints/best_model.pth

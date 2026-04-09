@@ -12,6 +12,9 @@ obtencion_imagenes/dataset/
 # Entorno virtual
 .venv/
 
+# Checkpoints del modelo
+entrenamiento/checkpoints/
+
 # Caché de Python
 __pycache__/
 *.pyc
