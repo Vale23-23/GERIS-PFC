@@ -15,7 +15,7 @@ OUTPUT_DIR = "dataset_focos_igeos"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ── Helper: recorte a Uruguay (igual que antes) ────────────────────────────────
+# ── Helper: recorte a Uruguay ────────────────────────────────
 def goes_xy_slices(ds, lat_min, lat_max, lon_min, lon_max):
     proj_info  = ds["goes_imager_projection"]
     lon_origin = float(proj_info.longitude_of_projection_origin)

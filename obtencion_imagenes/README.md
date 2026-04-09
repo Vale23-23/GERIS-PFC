@@ -1,62 +1,268 @@
-# GOES-19 Fire Dataset Builder (Uruguay)
-Este proyecto permite la construcción de un dataset incremental y multiespectral utilizando datos del satélite GOES-19 para la detección de incendios forestales mediante redes de segmentación (U-Net).
+# Obtención de Imágenes GOES-19
 
-1. Estructura del Dataset
-El sistema utiliza un enfoque de almacenamiento desacoplado. Cada producto y banda se guarda en su propia carpeta para permitir la expansión del dataset (agregar nuevas bandas) sin necesidad de descargar o procesar nuevamente los datos existentes.
+Este módulo descarga imágenes satelitales del satélite GOES-19 y las guarda en tu computadora para usarlas en el entrenamiento de modelos de detección.
 
-Plaintext
-dataset_focos_igeos/
-├── ABI-L1b-Rad-B07/   # Infrarrojo de onda corta (3.9 µm) - Entrada principal
-├── ABI-L1b-Rad-B14/   # Infrarrojo de onda larga (11.2 µm) - Contexto térmico
-└── ABI-L2-FDCF/       # Fire Detection Product - Máscaras (Ground Truth)
-2. Generación del Dataset
-El script principal crear_dataset.py permite descargas paralelas e incrementales.
+---
 
-Cómo usarlo:
-Configurar el rango: Define las fechas y las bandas deseadas en el bloque if __name__ == "__main__":.
+## ¿Qué hace esto?
 
-Ejecutar: ```bash
-python crear_dataset.py
+El satélite GOES-19 toma fotos de Sudamérica cada hora. Este código descarga esas imágenes, las recorta a la región que nos interesa (por ejemplo, Uruguay), y las guarda ordenadas por carpetas.
 
-Actualización: Si ya descargaste la Banda 7 y ahora quieres la 14, simplemente añade ("ABI-L1b-Rad", 14) a la lista de configuración y vuelve a correr el script. El código detectará los archivos existentes y solo descargará lo faltante.
+Cada imagen se guarda como un archivo `.npy` (formato numérico de Python). Hay un archivo por hora, por producto.
 
-Cuidados y Limitaciones:
-Uso de Memoria: El script guarda archivos .npy (NumPy). Son rápidos pero no comprimen tanto como los .npz. Asegúrate de tener espacio en disco (~1-2 MB por imagen recortada).
+---
 
-Cuotas de Red: La descarga es paralela (max_workers). No excedas de 4-8 hilos para evitar bloqueos por parte de los servidores de Amazon S3 (donde residen los datos de GOES).
+## Archivos del proyecto
 
-Alineación Espacial: El script asume que todas las bandas tienen la misma resolución (2 km para B7 y B14). Si agregas bandas visibles (B2), estas tienen 500m y requerirán un re-escalado (resizing) antes de guardarlas.
+```
+obtencion_imagenes/
+├── config.yaml      ← Configuración: qué descargar y de qué región
+├── pipeline.py      ← El script principal que vas a usar
+├── downloader.py    ← Lógica interna de descarga (no tocar)
+├── manifest.py      ← Registro de qué se descargó (no tocar)
+```
 
-3. Entrenamiento de la Red (U-Net)
-Para entrenar una U-Net con estos datos, sigue este flujo lógico:
+Los demas archivos son legacy.
+---
 
-Carga de Datos (Data Loader)
-No cargues todas las carpetas a la vez. Crea un Dataset de PyTorch que reciba una lista de timestamps y busque los archivos correspondientes en las subcarpetas:
+## Antes de empezar
 
-Python
-# Ejemplo de lógica interna en __getitem__
-b7 = np.load(f"path/ABI-L1b-Rad-B07/{timestamp}.npy")
-b14 = np.load(f"path/ABI-L1b-Rad-B14/{timestamp}.npy")
-input_tensor = np.stack([b7, b14], axis=0) # Shape: (2, H, W)
-Preprocesamiento Crítico:
-Normalización: Los valores de radiancia varían mucho entre el día y la noche. Se recomienda convertir a Temperatura de Brillo o normalizar por estadísticas locales (media/desviación).
+Asegurate de tener las dependencias instaladas. Usar un evironment. Desde la carpeta raíz del proyecto:
 
-Máscaras Binarias: El producto FDC tiene varios códigos. Para un entrenamiento binario, transforma la máscara:
+```bash
+pip install goes2go pyproj pyyaml numpy
+```
+o
 
-Fuego = 1 si el valor original es 0.
+```bash
+pip install -r requirements.txt
+```
 
-No Fuego = 0 para cualquier otro valor.
+Todos los comandos se corren desde dentro de la carpeta `obtencion_imagenes/`:
 
-Estrategia de Entrenamiento:
-Pérdida (Loss): Dado que los incendios son eventos "raros" (pocos píxeles positivos), no uses MSE o Accuracy. Usa Dice Loss o Binary Cross Entropy con pesos, dándole mucho más peso a los píxeles de fuego.
+```bash
+cd obtencion_imagenes
+```
 
-Muestreo: Entrena con un mix de 50% imágenes con fuego y 50% imágenes sin fuego para evitar que la red aprenda a predecir siempre "cero".
+---
 
-4. Próximos Pasos
-[ ] Implementar normalización Min-Max por banda.
+## Uso básico
 
-[ ] Agregar scripts de visualización para inspeccionar las muestras .npy.
+### 1. Ver qué productos están disponibles
 
-[ ] Integrar segmentation-models-pytorch para el entrenamiento rápido.
+```bash
+python pipeline.py list-products
+```
 
-EL MAS ACTUALIZADO ES crear_dataset_imagenes_2.py
+Esto muestra los productos configurados, por ejemplo:
+
+```
+📡 Productos disponibles en config.yaml:
+
+  ABI-L1b-Rad-B07     B07  Shortwave IR 3.9µm - fire thermal signature
+  ABI-L1b-Rad-B14     B14  Longwave IR 11.2µm - thermal context
+  ABI-L2-FDCF           -  Fire detection mask - ground truth label
+```
+
+### 2. Ver qué regiones están disponibles
+
+```bash
+python pipeline.py list-regions
+```
+
+### 3. Descargar imágenes
+
+```bash
+python pipeline.py download \
+  --region uruguay \
+  --start "2025-09-01 00:00" \
+  --end "2025-09-02 23:00" \
+  --products ABI-L1b-Rad-B07 ABI-L2-FDCF
+```
+
+Esto descarga la Banda 7 y la máscara de fuego para Uruguay, hora por hora, entre el 1 y el 2 de septiembre de 2025.
+
+Start of operational data: April 7, 2025 
+
+Mientras descarga, vas a ver algo así:
+
+```
+🚀 Descargando 48 archivos con 4 workers...
+
+  💾 20250901_0000  ABI-L1b-Rad-B07    downloaded
+  💾 20250901_0000  ABI-L2-FDCF        downloaded
+  ✅ 20250901_0100  ABI-L1b-Rad-B07    exists
+  ...
+
+✔ Descargados: 40  |  Ya existían: 8  |  Errores: 0
+```
+
+- 💾 = descargado ahora
+- ✅ = ya existía, no se volvió a descargar
+- ⚠️ = no había datos para esa hora
+- ❌ = error de conexión u otro problema
+
+### 4. Agregar una banda nueva sin re-descargar todo
+
+Si ya tenés la Banda 7 descargada y querés agregar la Banda 14, simplemente corrés el mismo comando con el nuevo producto. El script detecta automáticamente qué ya existe y solo descarga lo que falta:
+
+```bash
+python pipeline.py download \
+  --region uruguay \
+  --start "2025-09-01 00:00" \
+  --end "2025-09-02 23:00" \
+  --products ABI-L1b-Rad-B14
+```
+
+### 5. Verificar el estado del dataset
+
+```bash
+python pipeline.py status \
+  --region uruguay \
+  --products ABI-L1b-Rad-B07 ABI-L1b-Rad-B14 ABI-L2-FDCF
+```
+
+Esto muestra cuántos archivos se descargaron por producto y si hay timestamps incompletos (horas donde falta algún producto):
+
+```
+📦 Estado por producto:
+  ABI-L1b-Rad-B07     ✅ 48  ❌ 0
+  ABI-L1b-Rad-B14     ✅ 48  ❌ 0
+  ABI-L2-FDCF         ✅ 48  ❌ 0
+
+✅ Timestamps completos (todos los productos): 48
+```
+
+---
+
+## ¿Dónde se guardan los archivos?
+
+Los archivos se guardan en una carpeta `dataset/` dentro de `obtencion_imagenes/`, organizada así:
+
+```
+dataset/
+└── uruguay/
+    ├── ABI-L1b-Rad-B07/
+    │   ├── 20250901_0000.npy
+    │   ├── 20250901_0100.npy
+    │   └── ...
+    ├── ABI-L1b-Rad-B14/
+    │   └── ...
+    ├── ABI-L2-FDCF/
+    │   └── ...
+    └── manifest.json   ← registro de todo lo descargado
+```
+
+Cada archivo `.npy` es una imagen recortada a la región elegida, guardada como una matriz numérica.
+
+El archivo `manifest.json` es un registro automático de todo lo que se descargó, con estado y dimensiones. No hace falta abrirlo manualmente.
+
+---
+
+## Agregar un nuevo producto o región
+
+### Nuevo producto (banda)
+
+Abrí `config.yaml` y agregá un bloque nuevo bajo `products`:
+
+```yaml
+  - id: ABI-L1b-Rad-B02
+    product: ABI-L1b-Rad
+    band: 2
+    variable: Rad
+    dtype: float32
+    description: "Visible 0.64µm - luz visible"
+```
+
+Después podés descargarlo con `--products ABI-L1b-Rad-B02` sin tocar ningún otro archivo.
+
+### Nueva región
+
+Agregá una entrada bajo `regions` en `config.yaml`:
+
+```yaml
+  patagonia:
+    lat_min: -55.0
+    lat_max: -40.0
+    lon_min: -75.0
+    lon_max: -60.0
+```
+
+Y usala con `--region patagonia`.
+
+---
+
+## Opciones avanzadas
+
+| Opción | Descripción | Default |
+|---|---|---|
+| `--interval N` | Descargar cada N horas en vez de cada 1 | 1 |
+| `--workers N` | Cuántas descargas en paralelo | 4 (config.yaml) |
+
+Ejemplo: descargar cada 3 horas con 6 workers:
+
+```bash
+python pipeline.py download \
+  --region uruguay \
+  --start "2025-09-01 00:00" \
+  --end "2025-09-30 23:00" \
+  --products ABI-L1b-Rad-B07 ABI-L2-FDCF \
+  --interval 3 \
+  --workers 6
+```
+
+> ⚠️ No uses más de 8 workers. Los servidores de NOAA pueden bloquear conexiones si se hacen demasiadas descargas simultáneas.
+
+---
+
+## Sincronizar el dataset con Hugging Face
+
+El dataset se almacena de forma compartida en Hugging Face para que todo el equipo pueda acceder a él sin necesidad de descargar todo desde cero.
+
+### ¿Cuándo usar este script?
+
+Usá `sync_hf.py` cada vez que descargues datos nuevos con `pipeline.py` y quieras que el resto del equipo los tenga disponibles. El flujo típico es:
+
+1. Descargás datos nuevos con `pipeline.py`
+2. Verificás que todo esté bien con `pipeline.py status`
+3. Subís los cambios a Hugging Face con `sync_hf.py`
+
+Solo la persona que descargó los datos necesita correr este script. Los demás simplemente descargan desde HF.
+
+### Subir datos a Hugging Face
+
+Desde la raíz del proyecto:
+
+```bash
+.venv/bin/python obtencion_imagenes/sync_hf.py
+```
+
+Vas a ver algo así:
+
+```
+📦 Repositorio listo: https://huggingface.co/datasets/tu-usuario/goes19-uruguay-fires
+⬆️  Subiendo dataset/ → tu-usuario/GERIS-Goes19-uruguay-fires ...
+
+✅ Dataset sincronizado correctamente.
+   Ver en: https://huggingface.co/datasets/tu-usuario/GERIS-Goes19-uruguay-fires
+```
+
+El script solo sube los archivos nuevos o modificados, no vuelve a subir lo que ya estaba.
+
+### Descargar el dataset (para el resto del equipo)
+
+Si sos un compañero que quiere tener el dataset localmente, desde la raíz del proyecto:
+
+```bash
+.venv/bin/python -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='valentina2323/GERIS-Goes19-uruguay-fires',
+    repo_type='dataset',
+    local_dir='obtencion_imagenes/dataset',
+    token='hf_tu_token'
+)
+"
+```
+
+> ⚠️ El token de Hugging Face es personal y privado. No lo compartas ni lo subas a GitHub. Ya está protegido en el archivo `.env` que está en el `.gitignore`.

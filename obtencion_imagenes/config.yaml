@@ -1,0 +1,38 @@
+satellite: 19
+domain: F
+max_workers: 4
+output_root: dataset
+
+regions:
+  uruguay:
+    lat_min: -35.5
+    lat_max: -29.5
+    lon_min: -59.0
+    lon_max: -52.0
+  rio_de_la_plata:
+    lat_min: -38.0
+    lat_max: -28.0
+    lon_min: -62.0
+    lon_max: -48.0
+
+products:
+  - id: ABI-L1b-Rad-B07
+    product: ABI-L1b-Rad
+    band: 7
+    variable: Rad
+    dtype: float32
+    description: "Shortwave IR 3.9µm - fire thermal signature"
+
+  - id: ABI-L1b-Rad-B14
+    product: ABI-L1b-Rad
+    band: 14
+    variable: Rad
+    dtype: float32
+    description: "Longwave IR 11.2µm - thermal context"
+
+  - id: ABI-L2-FDCF
+    product: ABI-L2-FDCF
+    band: null
+    variable: DQF
+    dtype: int8
+    description: "Fire detection mask - ground truth label"

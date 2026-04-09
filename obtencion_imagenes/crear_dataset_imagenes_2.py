@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import pyproj  # ← ESTE FALTABA — causa de todos los errores
+import pyproj  
 from datetime import datetime, timedelta
 from goes2go import GOES
 from concurrent.futures import ThreadPoolExecutor
