@@ -167,7 +167,7 @@ Un IoU de 1.0 significa predicción perfecta. Un IoU de 0.0 significa que no hub
 
 ### Normalización por banda
 
-Cada banda satelital tiene su propia escala de valores (radiancia, temperatura, etc.). Antes de pasarle los datos al modelo, se normalizan restando la media y dividiendo por la desviación estándar, calculadas sobre todo el dataset de entrenamiento. Esto estabiliza el entrenamiento y hace que el modelo no dependa de las unidades físicas de cada sensor.
+Cada banda satelital tiene su propia escala de valores (radiancia, temperatura, etc.). Antes de pasarle los datos al modelo, se normalizan restando la media y dividiendo por la desviación estándar, calculadas **solo sobre el dataset de entrenamiento**. Esas mismas stats se reusan para normalizar el dataset de validación — nunca se calculan sobre los datos de validación, ya que eso sería data leakage (el modelo estaría indirectamente "viendo" información del conjunto de evaluación). Esto estabiliza el entrenamiento y hace que el modelo no dependa de las unidades físicas de cada sensor.
 
 ### Scheduler de learning rate
 

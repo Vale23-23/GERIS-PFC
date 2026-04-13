@@ -12,13 +12,16 @@ from torch.utils.data import Dataset
 
 
 class GOESFireDataset(Dataset):
-    def __init__(self, timestamps, dataset_root, bands, mask_product, image_size=256):
+    def __init__(self, timestamps, dataset_root, bands, mask_product, image_size=256, stats=None):
         """
         timestamps:   list of timestamp strings, e.g. ["20250901_1100", ...]
         dataset_root: path to dataset/uruguay/
         bands:        list of band folder names, e.g. ["ABI-L1b-Rad-B07"]
         mask_product: folder name for the fire mask, e.g. "ABI-L2-FDCF"
         image_size:   crop size (H, W) — all images resized to this
+        stats:        optional pre-computed normalization stats (from training set).
+                      If None, stats are computed from this dataset's timestamps.
+                      Always pass train_ds.stats to validation/test datasets to avoid data leakage.
         """
         self.timestamps   = timestamps
         self.dataset_root = dataset_root
@@ -26,8 +29,8 @@ class GOESFireDataset(Dataset):
         self.mask_product = mask_product
         self.image_size   = image_size
 
-        # Compute per-band normalization stats from the full dataset
-        self.stats = self._compute_stats()
+        # Use provided stats (from train set) or compute from this dataset's timestamps
+        self.stats = stats if stats is not None else self._compute_stats()
 
     def _compute_stats(self):
         """Compute mean and std per band across all timestamps."""
@@ -129,5 +132,6 @@ def build_datasets(cfg):
     print(f"📊 Dataset: {len(all_ts)} timestamps  |  train: {len(train_ts)}  |  val: {len(val_ts)}")
 
     train_ds = GOESFireDataset(train_ts, root, bands, mask_product, image_size)
-    val_ds   = GOESFireDataset(val_ts,   root, bands, mask_product, image_size)
+    # Pass train stats to val dataset to avoid data leakage
+    val_ds   = GOESFireDataset(val_ts, root, bands, mask_product, image_size, stats=train_ds.stats)
     return train_ds, val_ds
