@@ -403,8 +403,3 @@ for(i = 0..L-1):
                     )
 
 
-#=========FASE 2===========#
-#Loop sobre posibles incendios
-#Clasificacion y filtrado
-#==========================#
-

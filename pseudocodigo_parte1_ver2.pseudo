@@ -1,0 +1,318 @@
+#Pseudocodigo algoritmo NOAA
+#Todas las temperaturas estan expresadas en K y los grados en º
+
+#La LUT de TPW tiene la siguiente estructura:
+#+----------------------------+---Angulo Zenit Satelite para Bin 1 de TPW (7 columnas)---+---Angulos para bin 2---+---...---+Angulos para bin 5---+
+#|TPW (1-5)                   |                                                          |                        |         |                     |
+#|Offset radianza             |                                                          |                        |         |                     |
+#|Transmitancia ch7 (trans_7) |                                                          |                        |         |                     |
+#|Transmitancia ch14          |                                                          |                        |         |                     |
+#|Offset absorcion ch7 (ext_7)|                                                          |                        |         |                     |
+#|Offset absorcion ch14       |                                                          |                        |         |                     |
+#+----------------------------+----------------------------------------------------------+------------------------+---------+---------------------+
+
+
+#=========CONSTANTES===========#
+#W = ancho de imagen, L = largo de imagen
+#BR_TEMP_MISS_VAL
+#SAT_TEMP = temperatura de saturacion
+#SAT_BUFF = 5
+#FPT_TRHESHOLD = 90
+
+#=========INPUTS===========#
+#Datos de bandas del ABI
+array[L,W] bTemp7, rad7 #Temperaturas de brillo y radianzas de banda 7 (3.9 um)
+array[L,W] bTemp14, rad14 #Idem para banda 14 (11.2 um)
+array[L,W] bTemp13, rad13 #Idem para banda 13 (10.3 um)
+array[L,W] bTemp15, rad15 #Idem para banda 15 (12.3 um)
+array[L,W] refl2 #Reflectancia banda 2 (0.62 um)
+#Datos auxiliares
+array[L,W] longitudes, latitudes 
+array[L,W] ang_cenital_sol #Angulos cenitales del sol
+array[L,W] ang_resp_sol #Angulos de resplandor del sol 
+array[L,W] ang_cenital_local
+array[L,W] azimut_relativo
+array[L,W] angulo_relativo 
+array[L,W] data_quality
+float FPT #Focal Point Temperature
+#Datos auxilaires dinamicos 
+array[L,W] tpw #Total Precipitable Water, modelo ncep gfs 
+array[L,W] emisividad7, emisividad14 #Emisividades de bandas 7 y 14, UW Baseline Fit 
+array[L,W] mascara_fuego_anterior 
+#Datos auxiliares estaticos 
+array[L,W] cobertura_terrestre
+array[L,W] mascara_tierra_mar
+array[L,W] mascara_desierto #No se usa para uruguay, supongo
+table LUT_TPW #LUT para offset de tpw
+#==========================#
+
+
+#=============================================================FASE 1===============================================================#
+#Loop sobre todos los pixeles
+#Identificacion  de candidatos a fuego y correccion de distorsiones (atmosferica, solar,etc)
+#==================================================================================================================================#
+
+#==FUNCIONES  AUXILIARES==#
+#Dada una temperatura de brillo en la banda src_band, calcula la radianza equivalente en dst_band mediante la funcion de planck
+float temp_to_rad(src_band,dst_band,temp)
+#Dada una radianza en src_band, devuelve su temperatura de brillo equivalente en dst_band
+float rad_to_temp(src_band,dst_band,rad)
+#Devuelve true si el pixel en (i,j) es un pixel de dia 
+bool dia(i,j):
+    return 0 <= ang_cenital_sol[i,j] <= 85
+#=========================#
+
+#====PREPROCESAMIENTO====#
+
+#Seccion 3.4.2.2: Calculate radiance differences and apply focal plane temperature mitigation
+array[L,W] rad14_a_7 #Radianzas de canal 14 pasadas a banda 7
+array[L,W] rad13_a_7 
+for(i in 0..L-1):
+    for(j in 0..W-1):
+        rad13_a_7[i,j] = temp_to_rad(13,7,bTemp13[i,j])
+        rad14_a_7[i,j] = temp_to_rad(14,7,bTemp14[i,j])
+refl = rad7 - rad14_a_7
+refl13 = rad7-rad13_a_7
+if(FPT > FPT_THRESHOLD): #Si temp. de sensor demasiado alta, creo banda hibrida
+    for(i in 0..L-1):
+        for(j in 0..W-1):
+            refl[i,j] = min(abs(refl[i,j]), abs(refl_7_13[i,j]))
+
+
+#Creo e inicializo mascaras de fuego y de flags
+array[L,W] mascara_fuego
+array[L,W] fail_char
+for(i in 0..L-1):
+    for(j in 0..W-1):
+        fail_char[i,j] = -1
+        if(#Pixel de espacio??):
+            mascara_fuego[i,j] = 40
+        else:
+            mascara_fuego[i,j] = 100
+
+
+
+
+if(refl2 != NULL):
+    array[L,W] albedo
+    array[L,W] vis_brightness
+    for(i in 0..L-1):
+        for(j in 0..W-1):
+            albedo[i,j] = refl2[i,j]/cos(ang_cenital_sol[i,j])
+            vis_brightness[i,j] = 255*int(sqrt(refl2[i,j]))
+#========================#
+
+
+
+#==LOOP SOBRE TODOS LOS PIXELES==#
+int cantidad_candidatos = 0 #Contador de posibles pixeles de fuego detectados
+for(i in 0..L-1):
+    for(j in 0..W-1):
+
+        #Seccion 3.4.2.3: Test data against thresholds
+        #Tests iniciales
+        if(ang_cenital_sol[i,j] > 80): #Test de zenit solar
+            mascara_fuego[i,j] = 50
+        if(ang_cenital_sol[i,j] < 10 or ang_resp_sol[i,j] < 10):
+            mascara_fuego[i,j] = 60
+        if(bTemp7[i,j] == BR_TEMP_MISS_VAL): #Pixel "malo" (missing value)
+            mascara_fuego[i,j] = 120 
+        if(bTemp14[i,j] == BR_TEMP_MISS_VAL):
+            mascara_fuego[i,j] = 121
+        if(bTemp7[i,j] > SAT_TEMP + SAT_BUFF): #Pixel "malo" (saturacion)
+            mascara_fuego[i,j] = 123
+        if(bTemp14[i,j] > SAT_TEMP + SAT_BUFF):
+            mascara_fuego[i,j] = 124
+        if(bTemp7[i,j] < 200): #Pixel inutilizable
+            mascara_fuego[i,j] = 126
+        if(bTemp14[i,j] z 200): 
+            mascara_fuego[i,j] = 127
+
+        #===========================#
+        #ACA IRIA TEST ECOSISTEMAS#
+        #===========================#
+
+        #Minimo umbral para actividad de fuego
+        if(rad7[i,j] < 0 or rad14[i,j] < 0):
+            mascara_fuego[i,j] = 125
+            continue #Salto al siguiente pixel 
+        if((bTemp7[i,j] > 273 or bTemp14[i,j] > 273) and (abs(bTemp7[i,j]-bTemp14[i,j]) <= 2)):
+            mascara_fuego[i,j] = 100
+            continue       
+        if(abs(bTemp7[i,j]-bTemp14[i,j]) < 2 and (bTemp7[i,j]<= 273 or bTemp14[i,j]<=273)):
+            mascara_fuego[i,j] = 201 #Se asume que el pixel es demasiado frio
+
+
+        #Para los siguientes tests se definen algunos umbrales que dependen de si el pixel es de dia 
+        offset_7 = offset_7_refl = 0
+        if(dia(i,j)):
+            offset_7 = 15*cos(ang_cenital_sol[i,j])
+            offset_7_refl = 5*cocs(ang_cenital_sol[i,j])
+        #Defino umbrales 
+        bTemp7_min = 285 + offset7 
+        bTemp7_refl_threshold = 315 + offset_7_refl
+        #Test de nubes
+        #Solo se evalua al pixel si mantiene codigo 100
+        array[L,W] mascara_nubes,mascara_saturados
+        for(i in 0..L-1):
+            for(j in 0..W-1):
+                mascara_nubes[i,j] = false
+                mascara_saturados[i,j] = false
+        if(mascara_fuego[i,j] == 100):
+            if(bTemp14[i,j] < 270):
+                mascara_fuego[i,j] = 200
+                mascara_nubes[i,j] = true 
+            if(bTemp7[i,j]-bTemp14[i,j] < -4):
+                mascara_fuegp[i,j] = 205
+                mascara_nubes[i,j] = true 
+            if(dia(i,j)):
+                if(ang_cenital_sol[i,j] <= 70 
+                   or (ang_cenital_sol[i,j] <= 60 and ang_cenital_local[i,j] <= 60)
+                ):
+                    if(albedo[i,j]  > 0.38):
+                        mascara_fuego[i,j] = 215 
+                        mascara_nubes[i,j] = true
+            if(bTemp15 != NULL):
+                if(bTemp15[i,j]<=265):
+                    mascara_fuego[i,j] = 220
+                    mascara_nubes[i,j] = true 
+                if(bTemp14[i,j] < 270): 
+                    if(bTmep14[i,j]-bTemp15[i,j]<-4):
+                        mascara_fuego[i,j] = 225
+                        mascara_nubes[i,j] = true 
+                    if(bTemp14[i,j]-bTemp15[i,j]>60):
+                        mascara_fuego[i,j] = 230
+                        mascara_nubes[i,j] = true
+
+        
+
+        #Seccion 3.4.2.4: Along scan reflectivity test
+        #Test de deteccion de bordes de nubes 
+        #NOTA: en esta parte hay que cuidar el loop en los bordes de la imagen, no lo incluyo para simplfiicar
+        if(dia(i,j)):
+            if(albedo[i,j] >= 0.38 and bTemp7[i,j] < 230):
+                if(refl[i,j-3]<0.2 or refl[i,j+3]<0.2):
+                    mascara_fuego[i,j] = 245
+                    continue 
+        else:
+            if(bTemp7 < bTemp7_min and bTemp7 > 150 and 
+               refl[i,j-3]<0.2 or refl[i,j+3]<0.2
+            ):
+                mascara_fuego[i,j] = 240
+                continue
+        #Test de saturacion 
+        if(bTemp7[i,j] >= 411.76 or bTemp14[i,j] >= 339.9):
+            mascara_saturados[i,j] = true
+            fail_char[i,j] = 7 #Flag = 7 significa pixel saturado
+
+
+
+        #Seccion 3.4.2.5: Determine background condition stadistics
+        #Creo una ventana alrededor del pixel y la expando hasta que un 20% de la misma contenga pixeles validos 
+        #Maximo 10 expansiones 
+        iter = 0
+        tam_ventana = 5 #Comienzo con 5 pixeles en cada direccion, o sea, 11x11
+        fin = false 
+        while( !fin and iter < 10):
+            pixeles_validos = 0
+            for(x in i-tam_ventana..i+tam_ventana):
+                for(y in j-tam_ventana..j+tam_ventana):
+                    #Reviso si el pixel es valido
+                    #Valido = pixel de tierra, ni muy frio, ni muy calido y ni muy reflectivo
+                    muy_calido = (bTemp7[x,y] > 310 and !dia(x,y)) or (dia(x,y) and bTemp7[x,y] > 310 + 25*cos(angulo_zenit_sol[x,y]))
+                    muy_frio = brTemp_ch7[x,y] < 270 and brTemp_ch14[x,y] < 270
+                    if(mascara_tierra_mar[x,y] and !muy_calido and !muy_frio and 
+                       vis_brightness[i,j] >= 1 and albedo[i,j] < 0.38
+                    ):
+                        pixeles_validos += 1 
+                    #Si tengo 20% de validos entonces ya tengo mi tam_ventana
+                    #Para tamaño de ventana se cuentan los pixeles que se salgan de la imagen 
+                    if(validos == 0.2*(2*tam_ventana+1)**2): #No se si no llevaria un -1 aca para no contar el centro
+                        fin = true 
+                        break 
+                if(fin):
+                    break 
+            iter += 1
+            #Si no llegue al 20%, agrando la ventana 
+            if(!fin) 
+                tam_ventana += 5
+        
+        if(!fin): 
+            mascara_fuego[i,j] = 170 #Si e llego al max de iteraciones sin encontrar 20% de validos 
+            continue #Avanzo al siguiente pixel 
+
+        rango_ventana = (i-tam_ventana:i+tam_ventana,j-tam_ventana:j+tam_ventana)
+        reflb = #Calcularlo afuera del loop principal
+            
+
+        temp7_bkg_mean = mean(bTemp7[rango_ventana]) #Temperatura media en canal 7
+        temp14_bkg_mean = mean(bTemp14[rango_ventana]) #Temperatura media en canal 14
+        vis_mean_bkg = mean(vis_brightness[rango_ventana]) #Brillo visible medio             temp7_bkg_std_dev = std_dev(bTemp7[rango_ventana]) #Desviacion estandar de canal 7
+        temp14_bkg_std_dev = std_dev(bTemp14[rango_ventana]) #Desviacion estandar de canal 14
+        vis_bkg_histogram_stddev = ... 
+        histogram_bin_largest_count = ...
+        number_passes_in_bkg_stadistics = iter #Cantidad de incrementos de ventana
+        sum_of_values_comp_bkg_temp7 = sum(bTemp7[rango_ventana]) #Suma de temperaturas canal 7
+        sum_of_values_comp_bkg_temp14 = sum(bTemp14[rango_ventana]) #Suma de temperaturas canal 14
+        idx_cld_bkg = ...
+        bkg_count_idx = ...
+        temp4_bkg_histogram = ...
+        temp11_bkg_histogram = ...
+        temp4_bkg_histogram_stddev = ...
+        temp11_bkg_histogram_stddev = ...
+        std_dev_7_14_temp_diff = stddev(bTemp7[rango_ventana] - bTemp14[rango_ventana])
+        vis_diff_histogram = ...
+        vis_histogram_variance = ...
+        vis_histogram_stddev = ...
+        temp4_bkg_avg = ... #A cual vecindad se refiere??
+        temp4_stddev = ...
+        temp11_bkg_avg = ...
+        temp11_stddeve = ...
+        rad_4mu_11mu_avg_diff = ...
+        rad_diff_sigma = ...
+
+        #Si no se determina nada, amscara = 170 ???????
+            
+
+        #Seccion 3.4.2.6: Determine contextual thresholds 
+
+        #Se calcula un offset para tener en cuenta del tamaño de la ventana 
+        offset_ventana = min(5,number_passes_in_bkg_stadistics/3)
+        #Se calculan algunos umbrales
+        std_dev_7b_14b_test_threshold = min(4,3*std_dev(temp7_bkg_mean-temp14_bkg_mean))
+        std_dev_7b_test_threshold = min(10,max(4,3.75*std_dev(temp7_bkg_mean) + offset_ventana))
+        std_dev_reflb_test_threshold = min(1.0,min(0.25,3.0*std_dev(reflb[i,j])))
+        std_dev_refelb_max_test_threshold = ...
+        bool along_scan_line_test(i,j)
+
+        if(dia(i,j)): #Si es un pixel de dia calculo el albedo del fondo
+            albedo_bkg = ((vis_brightness[i,j]/25.5)**2)/(100*cos(ang_cenital_sol[i,j]))
+
+        
+        
+        #Seccion 3.2.4.7: Apply thresholds to identify fire pixels
+
+        #Si el pixel esta saturado o se paso de las 10 expansiones de ventana hago los siguientes tests 
+        if(
+            bTemp7[i,j] - bTemp14[i,j] < std_dev_7b_14b_test_threshold 
+            and 
+            bTemp7[i,j] - temp7_bkg_mean < std_dev_7b_test_threshold
+        ):
+            continue       
+        #Hay que definir estos arrays antes 
+        fire_size[i,j] = 0 
+        pixel_area[i,j] = 0 
+        if(mascara_saturados[i,j]):
+            temp_fuego[i,j] = 0
+        else:
+            temp_fuego[i,j] = -9.05
+        
+        #Tests para descartar pixel como pixel de fuego 
+        if((refl[i,j] < std_dev_reflb_test_threshold and bTemp7[i,j] < 320)
+            and 
+            (bTemp7[i,j] - bTemp14[i,j] < 0 or bTemp7[i,j] - temp7_bkg_mean < 0)
+        ):
+            continue #Se descarta que sea pixel de fuego. No se usa flag para indicar por que
+            
+            
+#================================#
