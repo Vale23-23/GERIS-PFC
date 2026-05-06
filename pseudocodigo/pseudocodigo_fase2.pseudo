@@ -1,0 +1,87 @@
+#=========FASE 2===========#
+#Loop sobre posibles incendios
+#Clasificacion y filtrado
+#==========================#
+
+#==========================#
+          INPUTS
+#==========================#
+list lista_candidatos #Lista con datos de posibles pixeles de incendio
+#==========================#
+
+#==========================#
+#Seccion 3.4.2.14
+#==========================#
+#Eliminar falsas alarmas
+#==========================#
+foreach (candidato in lista_candidatos) {
+    brTemp_ch7 = candidato.brTemp_ch7 
+    brTemp_ch14 = candidato.brTemp_ch14
+    brTemp_ch7_bkg = candidato.brTemp_ch7_bkg
+    refl = candidato.refl 
+    reflb = candidato.reflb
+    num_pasadas = candidato.number_passes_in_bkg_stadistics
+
+    ajuste_dia = 0 #Si es de dia algunos tests requeiren sumar un offset 
+    if(dia(candidato)):
+        ajuste_dia = 20*cos(candidato.angulo_zenit_sol)
+
+    #Realizo tres pruebas, si el pixel pasa alguna entonces lo elimino de la lista 
+    #OJO: threshold de refl-reflb es otro esta vez
+    std_dev_reflb_parte2 = ...
+    if( (brTemp_ch7 - brTemp_ch7_bkg < 2 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test)) or 
+        (brTemp_ch7 < 290 + ajuste_dia and brTemp_ch7-brTemp_ch7_bkg<10 and brTemp_ch7-brTemp_ch14 < 25 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test)) or 
+        (brTemp_ch7 < 290 + ajuste_diaand and brTemp_ch7_bkg < 280 + ajuste_dia and num_pasadas >= 10 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test))
+    ): 
+        lista_candidatos.remove(candidato)
+    
+    #Realizo otro test sobre bordes de nubes 
+    albedo = candidato.albedo 
+    albedo_bkg = candidato.albedo_bkg
+    if((albedo > 0.25 or albedo -albedo_bkg >= 0.1) and brTemp_ch7 < 292.5 + ajuste_dia and #Flag que indica por que no se proceso subpixel = 9 o 10):
+        #Flag por no procesar subpixel setada a 11
+
+    
+}
+
+#==========================#
+#Seccion 3.4.2.15
+#==========================#
+#Determinar categoria de fuego
+#==========================#
+#10 o 30: procesado para estimacion subpixel de tamaño de incendio y temperatura
+#11 o 31: pixel saturado  
+#12 o 32: pixel parcialmente con nube o pixel con humo 
+#13 o 33: probabilidad alta  de incendio
+#14 o 34: probabilidad media de incendio 
+#15 o 35: probabilidad baja de incendio 
+#==========================#
+...
+...
+...
+
+#==========================#
+#Seccion 3.4.2.16
+#==========================#
+#Filtrado temporal
+#==========================#
+
+#Si se detecto un incendio cerca del pixel en las ultimas 12 horas se le agrega un codigo de mascara que indica que se filtro temporalmente  al pixel
+
+
+
+
+#==========================#
+           OUTPUT
+#==========================#
+res = (
+    mascara_fuego, #Array WxL
+    tamano_fuegos_subpixel, #Array WxL 
+    temperatura_fuego_subpixel, #Array WxL
+    FRP_subpixel, #Array WxL 
+    mascara_fuego_anterior, #Array full disk 
+    quality_assurance_flags, #Array WxL 
+    metadata #27 valores, 12 strings 
+)
+
+return res 
