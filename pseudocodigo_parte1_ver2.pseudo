@@ -2,14 +2,14 @@
 #Todas las temperaturas estan expresadas en K y los grados en º
 
 #La LUT de TPW tiene la siguiente estructura:
-#+----------------------------+---Angulo Zenit Satelite para Bin 1 de TPW (7 columnas)---+---Angulos para bin 2---+---...---+Angulos para bin 5---+
-#|TPW (1-5)                   |                                                          |                        |         |                     |
-#|Offset radianza             |                                                          |                        |         |                     |
-#|Transmitancia ch7 (trans_7) |                                                          |                        |         |                     |
-#|Transmitancia ch14          |                                                          |                        |         |                     |
-#|Offset absorcion ch7 (ext_7)|                                                          |                        |         |                     |
-#|Offset absorcion ch14       |                                                          |                        |         |                     |
-#+----------------------------+----------------------------------------------------------+------------------------+---------+---------------------+
+#+-+----------------------------+---Angulo Zenit Satelite para Bin 1 de TPW (7 columnas)---+---Angulos para bin 2---+---...---+Angulos para bin 5---+
+#|0|TPW (1-5)                   |                                                          |                        |         |                     |
+#|1|Offset radianza             |                                                          |                        |         |                     |
+#|2|Transmitancia ch7 (trans_7) |                                                          |                        |         |                     |
+#|3|Transmitancia ch14          |                                                          |                        |         |                     |
+#|4|Offset absorcion ch7 (ext_7)|                                                          |                        |         |                     |
+#|5|Offset absorcion ch14       |                                                          |                        |         |                     |
+#+-+----------------------------+----------------------------------------------------------+------------------------+---------+---------------------+
 
 
 #=========CONSTANTES===========#
@@ -310,9 +310,137 @@ for(i in 0..L-1):
         #Tests para descartar pixel como pixel de fuego 
         if((refl[i,j] < std_dev_reflb_test_threshold and bTemp7[i,j] < 320)
             and 
-            (bTemp7[i,j] - bTemp14[i,j] < 0 or bTemp7[i,j] - temp7_bkg_mean < 0)
+           (bTemp7[i,j] - bTemp14[i,j] < 0 or bTemp7[i,j] - temp7_bkg_mean < 0)
         ):
             continue #Se descarta que sea pixel de fuego. No se usa flag para indicar por que
             
-            
+        if(
+            (bTemp7[i,j] - bTemp14[i,j] < std_dev_7b_14b_test_threshold)
+            and 
+            (refl[i,j] <std_dev_refelb_max_test_threshold or along_scan_line_test(i,j))
+        ):
+            #Asignar flag =  1 
+             
+        if(
+            (bTemp7[i,j] - temp7_bkg_mean <std_dev_7b_test_threshold)
+            and 
+            (refl[i,j] <std_dev_refelb_max_test_threshold or along_scan_line_test(i,j))
+        ):
+            #Asignar flag = 2
+        
+
+
+        #Seccion 3.4.2.8 Apply corrections and adjustments
+
+        #Correccion de temperatura debido a transmitancia atmosferica
+        #Ver estructura de la LUT al comienzo del archivo
+        bin_tpw = round(tpw/10) #Debe ser entre 1 y 5
+        bin_ang_cenital = round(ang_cenital_local[i,j]/10) #Debe ser entre 1 y 7
+        indice_col = 7*(bin_tpw - 1) + bin_ang_cenital
+
+
+        rad7 = temp_to_rad(7,7,bTemp7[i,j])
+        rad14 = temp_to_rad(14,14,bTemp14[i,j])
+        
+        ext7 = LUT_TPW.lookup(line = 4, column = indice_col ) #Linea 4 (comienzan en 0)
+        ext14 = LUT_TPW.lookup(5,indice_col)
+        trans7 = LUT_TPW.lookup(2,indice_col)
+        trans14 = LUT_TPW.lookup(3,indice_col)
+
+        rad7_corr = (rad7 - rad7*ext7)/trans7
+        rad14_corr = (rad14 - rad14*ext14)trans14 
+        bTemp7_corr = rad_to_temp(7,7,rad7_corr)
+        bTmep14_corr = rad_to_temp(14,14,rad14_corr)
+
+        if(rad7_corr < 0 or rad14_corr < 0 or bTemp7_corr < 0 or bTmep14_corr < 0):
+            mascara_fuego[i,j] = 180
+            continue #Paso a siguiente pixel
+        
+        #Correccion por nubes o humo semitransparentes 
+        if(dia(i,j) and 0.025 < albedo[i,j] - albedo_bkg < 0.07):
+            albedo_diff = albedo[i,j] - albedo_bkg
+            bTemp7[i,j] += 10*albedo_diff
+            bTemp14[i,j] += 30*albedo_diff
+            if(albedo[i,j] > 0.38 or albedo_diff > 0.38):
+                bTemp7[i,j] += 0.7
+                bTemp14[i,j] += 2.1
+                #Setear flag indicando la condicion del if 
+        
+        #Correccion por la emisividad de la superficie 
+        rad7_corr_emiss = rad7_corr/emisividad7[i,j]
+        rad14_corr_emiss = rad14_corr/emisividad14[i,j]     
+        
+        #Correccion de reflectividad solar
+        rad7_bkg_corr = (temp7_bkg_mean-temp7_bkg_mean*ext7)/trans7
+        rad14_bkg_corr = (temp14_bkg_mean-temp14_bkg_mean*ext14)/trans14 
+        rad7from14 = temp_to_rad(14,7,rad_to_temp(14,14,rad14_corr_emiss))
+        rad7from14_bkg_corr = (rad7from14 - rad7from14*ext7)/trans7
+
+        
+        rad_solar = rad7_bkg_corr - emisividad7[i,j]*rad7from14_bkg_corr
+
+        rad7_corr_solar = (rad7_corr_emiss - rad_solar)/emisividad7[i,j]
+        
+        if(#alguna de las temps corregidas < 0):
+            mascara_fuego[i,j]  = 180 
+            continue 
+        
+        #Correccion por difraccion 
+        rad7_diff = (rad7_corr_solar - 0.15*rad7from14_bkg_corr)/0.85
+        rad14_diff = (rad14_corr - 0.3*rad14_bkg_corr)/0.7
+
+        #Convierto de vuelta a temperatura 
+        bTemp7_corr = rad_to_temp(7,7,rad7_diff)
+        bTemp14_corr = rad_to_temp(14,14,rad14_diff)
+        bTemp_bkg_corr = rad_to_temp(7,7,rad7_bkg_corr) #se usa ese valor de rad?
+        
+
+        #Seccion 3.4.2.9 Post correction tests
+        offset_dia = 0
+        if(dia(i,j)):
+            offset_dia = 15*cos(ang_cenital_sol[i,j])
+        
+        if(bTemp14_corr < 285 or bTemp7_corr < 285 + offset_dia)
+            #flag = 3
+        if(bTemp14_corr - bTemp_bkg_corr < 0.25):
+            if((albedo[i,j] > 0.15 or mascara_nubes[i,j]) and bTemp7_corr-bTemp_bkg_corr > 10):
+                #Flag = 10
+            else:
+                #Flag = 4
+        if(bTemp7_corr - bTemp_bkg_corr < 2):
+            #Flag = 5
+
+
+        #Falta flag = 8, supuestamente en seccion 3.4.2.8
+
+
+
+        #Seccion 3.4.2.10 Sub-pixel characterization: Dozier 
+
+        #Seccion 3.4.2.11 Last chance fire tests
+
+        if(
+            (bTemp7[i,j]-temp7_bkg_mean>=std_dev_7b_test_threshold and bTemp14-temp14_bkg_mean >= -20)
+            or 
+            (refl[i,j] -reflb >= std_dev_refelb_max_test_threshold and along_scan_line_test(i,j))
+        ):
+            subpixel_fire_size[i,j] = 0 #hay que definir array antes
+            if(350 < fire_temperature[i,j] <= 400):
+                fire_temperature[i,j] *= -1
+            else:
+                fire_temperature[i,j] = -999
+
+        #Tests de area de pixel 
+
+        #Seccion 3.4.2.12: Subpixel characterization: FRP 
+
+
+        #Seccion 3.4.2.13 End part I
+
+        if(#Potencial pixel de fuego):
+            cantidad_candidatos += 1 
+            pixeles_fuego.insert(
+                ...
+            )
+
 #================================#
