@@ -98,6 +98,8 @@ def cmd_list_products(cfg):
 def cmd_visualize(args, cfg):
     import numpy as np
     import matplotlib.pyplot as plt
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
 
     output_root = os.path.join(cfg["output_root"], args.region)
     ts          = args.timestamp  # e.g. "20250901_1200"
@@ -113,22 +115,74 @@ def cmd_visualize(args, cfg):
     rad  = np.load(rad_path)
     mask = np.load(mask_path) if os.path.exists(mask_path) else None
 
-    fig, axes = plt.subplots(1, 2 if mask is not None else 1, figsize=(14, 6))
+    # Obtener el extent geográfico de la región desde config.yaml
+    # Esto le dice a cartopy dónde está el array en el mapa del mundo
+    region_cfg = cfg["regions"][args.region]
+    lon_min = region_cfg["lon_min"]
+    lon_max = region_cfg["lon_max"]
+    lat_min = region_cfg["lat_min"]
+    lat_max = region_cfg["lat_max"]
+    extent  = [lon_min, lon_max, lat_min, lat_max]
+
+    # Proyección PlateCarree: lat/lon directo, sin distorsión — la más simple
+    proj = ccrs.PlateCarree()
+
+    n_panels = 2 if mask is not None else 1
+    fig, axes = plt.subplots(
+        1, n_panels,
+        figsize=(7 * n_panels, 6),
+        subplot_kw={"projection": proj},  # todos los ejes usan la misma proyección
+    )
+    if n_panels == 1:
+        axes = [axes]  # normalizar a lista para iterar igual en ambos casos
+
     fig.suptitle(f"GOES-19 — {args.region} — {ts}", fontsize=14)
 
-    ax_rad = axes[0] if mask is not None else axes
-    im1 = ax_rad.imshow(np.log1p(rad), cmap="magma")
-    ax_rad.set_title("Banda 7 — Infrarrojo (firma térmica)")
-    ax_rad.axis("off")
-    plt.colorbar(im1, ax=ax_rad, label="log(1 + Rad)")
+    def add_map_features(ax):
+        """Agrega costas, fronteras y grilla de lat/lon a un eje de cartopy."""
+        # Limitar la vista al extent de la región
+        ax.set_extent(extent, crs=proj)
 
+        # Costas con resolución de 10m (la más detallada disponible en Natural Earth)
+        ax.add_feature(cfeature.COASTLINE.with_scale("10m"), linewidth=0.8, color="white")
+
+        # Fronteras nacionales
+        ax.add_feature(cfeature.BORDERS.with_scale("10m"), linewidth=0.6, color="white", linestyle="--")
+
+        # Grilla de lat/lon con etiquetas
+        gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="white", alpha=0.5, linestyle=":")
+        gl.top_labels   = False  # solo etiquetas abajo y a la izquierda
+        gl.right_labels = False
+
+    # ── Panel 1: Banda 7 (infrarrojo térmico) ───────────────────────────────
+    # imshow con transform=proj y extent le dice a cartopy que el array cubre
+    # exactamente el bounding box de la región
+    im1 = axes[0].imshow(
+        np.log1p(rad),
+        origin="upper",       # fila 0 = norte (convención de imágenes satelitales)
+        extent=extent,
+        transform=proj,
+        cmap="magma",
+    )
+    axes[0].set_title("Banda 7 — Infrarrojo (firma térmica)")
+    add_map_features(axes[0])
+    plt.colorbar(im1, ax=axes[0], label="log(1 + Rad)", shrink=0.7)
+
+    # ── Panel 2: Máscara de fuego ────────────────────────────────────────────
     if mask is not None:
-        fuego = (mask == 0).astype(int)
-        im2   = axes[1].imshow(fuego, cmap="Reds", vmin=0, vmax=1)
+        fuego = (mask == 0).astype(float)  # DQF=0 → fuego de alta confianza
+        im2 = axes[1].imshow(
+            fuego,
+            origin="upper",
+            extent=extent,
+            transform=proj,
+            cmap="Reds",
+            vmin=0, vmax=1,
+        )
         axes[1].set_title(f"Máscara de fuego — {int(fuego.sum())} píxeles detectados")
-        axes[1].axis("off")
-        plt.colorbar(im2, ax=axes[1])
-    
+        add_map_features(axes[1])
+        plt.colorbar(im2, ax=axes[1], shrink=0.7)
+
     plt.tight_layout()
     plt.show()
 

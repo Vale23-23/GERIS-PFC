@@ -4,6 +4,7 @@ pyyaml
 numpy<2
 pandas
 matplotlib
+cartopy
 torch
 torchvision
 segmentation-models-pytorch
