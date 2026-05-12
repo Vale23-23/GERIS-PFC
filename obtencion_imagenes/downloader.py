@@ -57,7 +57,7 @@ def check_s3_exists(product_cfg, timestamp):
     if s3_product == "ABI-L1b-Rad":
         s3_product = "ABI-L1b-RadF"
         
-    path = f"noaa-goes19/{s3_product}/{year}/{julian_day}/{hour}/"
+    path = f"{s3_product}/{year}/{julian_day}/{hour}/"
     
     try:
         files = fs.ls(path)
@@ -125,5 +125,6 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
             "substatus": status_msg,
             "product": product_id,
             "timestamp": timestamp.strftime("%Y%m%d_%H%M"), 
-            "error": error_detail
+            "error": error_detail,
+            "product_path": s3_path  # Agregado para que pipeline.py pueda acceder
         }

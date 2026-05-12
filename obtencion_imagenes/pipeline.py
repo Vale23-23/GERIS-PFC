@@ -92,8 +92,16 @@ def cmd_download(args, cfg):
             except Exception as e:
                 # Esto atrapa errores inesperados del downloader
                 print(f"  ❌ Error crítico en descarga: {e}")
-                
-    manifest.update(output_root, results)
+
+    # 1. Obtenemos los IDs de los productos configurados para verificar integridad
+    all_product_ids = [p["id"] for p in products] 
+    
+    # 2. Obtenemos la configuración geográfica de la región para calcular coordenadas
+    region_cfg = cfg["regions"][args.region] 
+    
+    # 3. Llamamos al nuevo manifest con los 4 argumentos requeridos
+    manifest.update(output_root, results, all_product_ids, region_cfg)
+
 
     downloaded = sum(1 for r in results if r["status"] == "downloaded")
     skipped    = sum(1 for r in results if r["status"] == "exists")
@@ -106,6 +114,7 @@ def cmd_status(args, cfg):
     output_root = os.path.join(cfg["output_root"], args.region)
     required    = args.products if args.products else None
     manifest.status_report(output_root, required_products=required)
+    manifest.export_metadata_csv(output_root)
 
 
 def cmd_list_products(cfg):
@@ -190,7 +199,13 @@ def cmd_visualize(args, cfg):
 
     # ── Panel 2: Máscara de fuego ────────────────────────────────────────────
     if mask is not None:
-        fuego = (mask == 0).astype(float)  # DQF=0 → fuego de alta confianza
+        mask_int = mask.astype(np.int8)
+        # Fuego = DQF==0 (buena calidad), pero solo si no es un archivo todo-ceros
+        if np.all(mask_int == 0):
+            print("⚠️  Este timestamp tiene una máscara inválida (toda la imagen es DQF=0, región no procesada)")
+            fuego = np.zeros_like(mask_int, dtype=float)
+        else:
+            fuego = (mask_int == 0).astype(float)
         im2 = axes[1].imshow(
             fuego,
             origin="upper",
@@ -222,22 +237,32 @@ def cmd_fire_stats(args, cfg):
         print("⚠️  No hay máscaras descargadas todavía.")
         return
 
-    con_fuego, sin_fuego, detalles = [], [], []
+    con_fuego, sin_fuego, invalidos, detalles = [], [], [], []
     for f in archivos:
-        mask = np.load(os.path.join(mask_folder, f))
-        n    = int(np.sum(mask == 0))  # DQF=0 → high confidence fire
-        if n > 0:
-            con_fuego.append(f)
-            detalles.append((f.replace(".npy", ""), n))
+        mask = np.load(os.path.join(mask_folder, f)).astype(np.int8)
+        # Detectar archivos inválidos: toda la imagen es DQF=0 (región no procesada)
+        # Esto pasa con timestamps anteriores a la operación del satélite
+        if np.all(mask == 0):
+            invalidos.append(f)
         else:
-            sin_fuego.append(f)
+            # DQF=0 → fuego de buena calidad
+            fire_pixels = int(np.sum(mask == 0))
+            if fire_pixels > 0:
+                con_fuego.append(f)
+                detalles.append((f.replace(".npy", ""), fire_pixels))
+            else:
+                sin_fuego.append(f)
 
+    total_validos = len(con_fuego) + len(sin_fuego)
     total = len(archivos)
     print(f"\n🔥 ESTADÍSTICAS DE FUEGO — {args.region}")
     print(f"{'='*45}")
-    print(f"  Total timestamps analizados : {total}")
-    print(f"  Con fuego detectado         : {len(con_fuego)}  ({100*len(con_fuego)/total:.1f}%)")
-    print(f"  Sin fuego                   : {len(sin_fuego)}  ({100*len(sin_fuego)/total:.1f}%)")
+    print(f"  Total archivos              : {total}")
+    if invalidos:
+        print(f"  ⚠️  Inválidos (no procesados): {len(invalidos)}")
+    print(f"  Timestamps válidos          : {total_validos}")
+    print(f"  Con fuego detectado         : {len(con_fuego)}  ({100*len(con_fuego)/total_validos:.1f}%)" if total_validos else "")
+    print(f"  Sin fuego                   : {len(sin_fuego)}  ({100*len(sin_fuego)/total_validos:.1f}%)" if total_validos else "")
 
     if detalles:
         detalles.sort(key=lambda x: x[1], reverse=True)
@@ -315,7 +340,15 @@ def cmd_retry(args, cfg):
             icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
             print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
 
-    manifest.update(output_root, results)
+    # 1. Obtenemos todos los IDs definidos en el config.yaml para esta región
+    all_ids = [p["id"] for p in cfg["products"]]
+    
+    # 2. Obtenemos la configuración de la región
+    region_cfg = cfg["regions"][args.region]
+    
+    # 3. Actualizamos el manifest
+    manifest.update(output_root, results, all_ids, region_cfg)
+
 
     downloaded = sum(1 for r in results if r["status"] == "downloaded")
     skipped    = sum(1 for r in results if r["status"] == "exists")
@@ -361,6 +394,10 @@ def main():
     rt.add_argument("--products", nargs="+", help="Limit retry to these product IDs")
     rt.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
 
+    sp = sub.add_parser("spatial-report", help="Muestra el fuego por departamento para un timestamp")
+    sp.add_argument("--region", required=True, help="Región (ej: uruguay)")
+    sp.add_argument("--timestamp", required=True, help="Timestamp (ej: 20250926_1900)")
+
     args = parser.parse_args()
     cfg  = load_config(os.path.join(os.path.dirname(__file__), "config.yaml"))
 
@@ -376,9 +413,40 @@ def main():
         cmd_fire_stats(args, cfg)
     elif args.command == "retry":
         cmd_retry(args, cfg)
+    elif args.command == "spatial-report":
+        cmd_spatial_report(args, cfg)
+    elif args.command == "visualize":     
+        cmd_visualize(args, cfg)
     else:
         parser.print_help()
+    
 
+def cmd_spatial_report(args, cfg):
+    import numpy as np
+    output_root = os.path.join(cfg["output_root"], args.region)
+    ts = args.timestamp
+    mask_path = os.path.join(output_root, "ABI-L2-FDCF", f"{ts}.npy")
+
+    if not os.path.exists(mask_path):
+        print(f"❌ No se encontró la máscara para {ts}")
+        return
+
+    mask = np.load(mask_path)
+    region_cfg = cfg["regions"][args.region]
+    
+    # Esta función ahora está integrada en tu manifest.py
+    # Simplemente consultamos el manifest ya actualizado
+    data = manifest.load(output_root)
+    ts_data = data.get(ts, {})
+    report = ts_data.get("fire", {}).get("spatial_report", {})
+
+    print(f"\n📍 REPORTE ESPACIAL — {args.region.upper()} — {ts}")
+    print("="*45)
+    if not report:
+        print("✅ No se detectaron focos de fuego en este timestamp.")
+    else:
+        for depto, count in sorted(report.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {depto:<20} {count:>5} píxeles")
 
 if __name__ == "__main__":
     main()

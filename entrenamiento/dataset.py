@@ -80,14 +80,20 @@ class GOESFireDataset(Dataset):
     def _load_mask(self, ts):
         """
         Carga la máscara de fuego del producto ABI-L2-FDCF.
-        El campo DQF (Data Quality Flag) indica la confianza de detección:
-            DQF = 0 → fuego detectado con alta confianza → marcamos como 1
-            cualquier otro valor → sin fuego o baja confianza → marcamos como 0
+
+        El campo DQF (Data Quality Flag) del producto FDCF indica:
+            DQF = 0: fuego detectado con buena calidad → marcamos como 1
+            DQF = 1: píxel de tierra sin fuego (buena calidad)
+            DQF = 2: inválido por nube opaca
+            DQF = 3: inválido por tipo de superficie o sun glint
+            DQF = 4: inválido por datos de entrada malos
+            DQF = 5: inválido por fallo del algoritmo
+
         Devuelve un array binario (H, W): 1 = fuego, 0 = no fuego.
         """
         path = os.path.join(self.dataset_root, self.mask_product, f"{ts}.npy")
         mask = np.load(path).astype(np.int8)
-        return (mask == 0).astype(np.float32)  # DQF=0 → fuego confirmado
+        return (mask == 0).astype(np.float32)  # DQF=0 → fuego de buena calidad
 
     def _crop_or_pad(self, arr, target):
         """
@@ -180,6 +186,27 @@ def build_datasets(cfg):
 
     if not all_ts:
         raise RuntimeError(f"No se encontraron timestamps completos en {root}")
+
+    # Filtrar timestamps inválidos: archivos FDCF donde toda la imagen es DQF=0
+    # Esto ocurre cuando el satélite no estaba operacional (pre-abril 2025).
+    # Un archivo todo-ceros se interpreta erróneamente como "todo es fuego".
+    valid_ts = []
+    invalid_count = 0
+    for ts in all_ts:
+        mask_path = os.path.join(root, mask_product, f"{ts}.npy")
+        mask = np.load(mask_path)
+        if np.all(mask == 0):
+            invalid_count += 1
+        else:
+            valid_ts.append(ts)
+
+    if invalid_count > 0:
+        print(f"⚠️  {invalid_count} timestamps descartados (máscara inválida — región no procesada)")
+
+    all_ts = valid_ts
+
+    if not all_ts:
+        raise RuntimeError(f"No se encontraron timestamps válidos en {root}")
 
     # Mezcla aleatoria antes de dividir para evitar sesgos temporales
     random.shuffle(all_ts)

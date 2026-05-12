@@ -1,97 +1,150 @@
-"""
-manifest.py — tracks downloaded files and dataset integrity.
-
-The manifest is a JSON file at {output_root}/manifest.json.
-Schema per entry:
-  {
-    "timestamp": "20250901_1100",
-    "product":   "ABI-L1b-Rad-B07",
-    "status":    "downloaded" | "error" | "empty" | "exists",
-    "path":      "dataset/ABI-L1b-Rad-B07/20250901_1100.npy",
-    "shape":     [H, W],          # only when status == downloaded/exists
-    "error":     "...",           # only when status == error
-  }
-"""
-
 import json
 import os
-from datetime import datetime
-
+import numpy as np
+import geopandas as gpd
+from shapely.geometry import Point
 
 MANIFEST_FILE = "manifest.json"
-
-
-def _manifest_path(output_root):
-    return os.path.join(output_root, MANIFEST_FILE)
-
+GEOJSON_PATH = os.path.join(os.path.dirname(__file__), "departamentos.geojson")
 
 def load(output_root):
-    path = _manifest_path(output_root)
-    if not os.path.exists(path):
-        return []
-    with open(path) as f:
-        return json.load(f)
-
+    path = os.path.join(output_root, MANIFEST_FILE)
+    if not os.path.exists(path): 
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return {} # Reset si detecta formato viejo
+            return data
+    except:
+        return {}
 
 def save(output_root, entries):
-    path = _manifest_path(output_root)
+    path = os.path.join(output_root, MANIFEST_FILE)
     os.makedirs(output_root, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(entries, f, indent=2)
 
-
-def update(output_root, new_results):
-    """Merge new download results into the manifest (upsert by timestamp+product)."""
-    entries = load(output_root)
-
-    # Build lookup for fast upsert
-    index = {(e["timestamp"], e["product"]): i for i, e in enumerate(entries)}
-
-    for result in new_results:
-        key = (result["timestamp"], result["product"])
-        if key in index:
-            entries[index[key]] = result
-        else:
-            entries.append(result)
-            index[key] = len(entries) - 1
-
-    save(output_root, entries)
-    return entries
-
-
-def status_report(output_root, required_products=None):
+def update(output_root, new_results, all_required_ids, region_cfg):
     """
-    Print a summary of the manifest.
-    If required_products is given, also reports timestamps with incomplete coverage.
+    Actualiza el manifest con bandas, estadísticas de fuego y reporte por departamento.
     """
-    entries = load(output_root)
-    if not entries:
-        print("Manifest vacío o no encontrado.")
+    manifest = load(output_root)
+    
+    # Intentamos cargar el mapa oficial una sola vez para esta tanda
+    gdf_deptos = None
+    if os.path.exists(GEOJSON_PATH):
+        try:
+            gdf_deptos = gpd.read_file(GEOJSON_PATH)
+        except Exception as e:
+            print(f"⚠️ Error cargando GeoJSON: {e}")
+
+    for res in new_results:
+        ts = res["timestamp"]
+        prod_id = res["product"]
+        
+        if ts not in manifest:
+            manifest[ts] = {"status": "incomplete", "bands": {}}
+
+        shape = res.get("shape")
+        if shape is None:
+            shape = manifest[ts]["bands"].get(prod_id, {}).get("shape")
+
+        band_data = {
+            "status": res["status"],
+            "path": res.get("path"), 
+            "shape": shape,
+            "error": res.get("error")
+        }
+
+        # --- Lógica de Fuego y Espacial ---
+        if prod_id == "ABI-L2-FDCF" and res["status"] in ("downloaded", "exists"):
+            file_path = res.get("path")
+            if file_path and os.path.exists(file_path):
+                mask = np.load(file_path)
+                
+                # En este pipeline, ABI-L2-FDCF ya viene codificado como 0 = fuego de alta confianza.
+                # Por eso aquí debemos buscar el valor 0, no los códigos GOES-R originales.
+                fire_pixels = int(np.sum(mask == 0))
+                has_fire = fire_pixels > 0
+                        
+                fire_meta = {
+                    "fire_pixels": fire_pixels,
+                    "has_fire": has_fire,
+                    "class_label": "fire" if has_fire else "clear"
+                }
+                
+                # Si hay fuego, calculamos en qué departamentos cayó
+                if has_fire and gdf_deptos is not None:
+                    rows, cols = np.where(mask == 0)
+                    h, w = mask.shape
+                    
+                    # Interpolación de coordenadas según config.yaml
+                    lats = region_cfg['lat_max'] - (rows / h) * (region_cfg['lat_max'] - region_cfg['lat_min'])
+                    lons = region_cfg['lon_min'] + (cols / w) * (region_cfg['lon_max'] - region_cfg['lon_min'])
+                    
+                    points = [Point(xy) for xy in zip(lons, lats)]
+                    gdf_fire = gpd.GeoDataFrame(geometry=points, crs="EPSG:4326")
+                    
+                    # Unión espacial con los departamentos
+                    joined = gpd.sjoin(gdf_fire, gdf_deptos, predicate='within')
+                    
+                    # Usamos 'admlnm' que es la clave en tu archivo departamentos.geojson
+                    if not joined.empty:
+                        spatial_report = joined['admlnm'].value_counts().to_dict()
+                        fire_meta["spatial_report"] = spatial_report
+                
+                manifest[ts]["fire"] = fire_meta
+
+        manifest[ts]["bands"][prod_id] = band_data
+
+    # Recalcular integridad del timestamp
+    for ts, data in manifest.items():
+        ok_products = {p for p, info in data["bands"].items() if info["status"] in ("downloaded", "exists")}
+        data["status"] = "complete" if all(pid in ok_products for pid in all_required_ids) else "incomplete"
+
+    save(output_root, manifest)
+    export_metadata_csv(output_root) # Genera automáticamente el CSV para Hugging Face
+    return manifest
+
+def export_metadata_csv(output_root):
+    """Aplatana el JSON a un CSV de 19 columnas (departamentos) para Hugging Face."""
+    import csv
+    data = load(output_root)
+    if not data: 
         return
 
-    from collections import defaultdict
-    by_product = defaultdict(lambda: {"downloaded": 0, "error": 0, "empty": 0, "exists": 0})
-    by_ts      = defaultdict(set)
+    # Lista exacta de tu GeoJSON
+    deptos = [
+        'Artigas', 'Canelones', 'Cerro Largo', 'Colonia', 'Durazno', 'Flores', 
+        'Florida', 'Lavalleja', 'Maldonado', 'Montevideo', 'Paysandú', 'Rivera', 
+        'Rocha', 'Río Negro', 'Salto', 'San José', 'Soriano', 'Tacuarembó', 'Treinta y tres'
+    ]
 
-    for e in entries:
-        st = e.get("status", "error")
-        by_product[e["product"]][st] += 1
-        if st in ("downloaded", "exists"):
-            by_ts[e["timestamp"]].add(e["product"])
+    csv_path = os.path.join(output_root, "metadata.csv")
+    fieldnames = ['timestamp', 'status', 'total_fire_pixels'] + deptos
 
-    print("\n📦 Estado por producto:")
-    for prod, counts in sorted(by_product.items()):
-        ok    = counts["downloaded"] + counts["exists"]
-        fails = counts["error"] + counts["empty"]
-        print(f"  {prod:<30} ✅ {ok}  ❌ {fails}")
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for ts, info in sorted(data.items()):
+            fire = info.get("fire", {})
+            spatial = fire.get("spatial_report", {})
+            row = {
+                'timestamp': ts,
+                'status': info.get('status', 'incomplete'),
+                'total_fire_pixels': fire.get("fire_pixels", 0)
+            }
+            for d in deptos:
+                row[d] = spatial.get(d, 0)
+            writer.writerow(row)
 
-    if required_products:
-        req = set(required_products)
-        complete   = [ts for ts, prods in by_ts.items() if req.issubset(prods)]
-        incomplete = [ts for ts, prods in by_ts.items() if not req.issubset(prods)]
-        print(f"\n✅ Timestamps completos (todos los productos): {len(complete)}")
-        if incomplete:
-            print(f"⚠️  Timestamps incompletos: {len(incomplete)}")
-            for ts in sorted(incomplete)[:10]:
-                missing = req - by_ts[ts]
-                print(f"    {ts}  falta: {', '.join(missing)}")
+def status_report(output_root, required_products=None):
+    manifest = load(output_root)
+    if not manifest:
+        print("Manifest vacío.")
+        return
+    total = len(manifest)
+    complete = sum(1 for v in manifest.values() if v.get("status") == "complete")
+    print(f"\n📊 Estado en {output_root}: {complete}/{total} completos.")

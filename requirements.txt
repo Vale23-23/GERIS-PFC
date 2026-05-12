@@ -9,3 +9,5 @@ torch
 torchvision
 segmentation-models-pytorch
 huggingface_hub
+geopandas
+shapely

@@ -10,6 +10,14 @@ El satélite GOES-19 toma fotos de Sudamérica cada hora. Este código descarga 
 
 Cada imagen se guarda como un archivo `.npy` (formato numérico de Python). Hay un archivo por hora, por producto.
 
+
+ El campo DQF (Data Quality Flag) del producto FDCF indica:
+            DQF = 0: fuego detectado con buena calidad → marcamos como 1
+            DQF = 1: píxel de tierra sin fuego (buena calidad)
+            DQF = 2: inválido por nube opaca
+            DQF = 3: inválido por tipo de superficie o sun glint
+            DQF = 4: inválido por datos de entrada malos
+            DQF = 5: inválido por fallo del algoritmo
 ---
 
 ## Archivos del proyecto
@@ -173,6 +181,9 @@ Muestra cuántos timestamps tienen fuego detectado, el porcentaje, y un ranking 
   ...
 ```
 
+
+python pipeline.py spatial-report --region uruguay --timestamp 20250926_1900
+
 ### 8. Visualizar una imagen y su máscara
 
 ```bash
@@ -206,6 +217,31 @@ dataset/
 Cada archivo `.npy` es una imagen recortada a la región elegida, guardada como una matriz numérica.
 
 El archivo `manifest.json` es un registro automático de todo lo que se descargó, con estado y dimensiones. No hace falta abrirlo manualmente.
+
+Ejemplo de estructura:
+
+{
+  "20250901_1100": {
+    "status": "complete",
+    "fire": {
+      "fire_pixels": 42,
+      "has_fire": true,
+      "class_label": "fire"
+    },
+    "bands": {
+      "ABI-L1b-Rad-B07": {
+        "status": "exists",
+        "path": "dataset/uruguay/ABI-L1b-Rad-B07/20250901_1100.npy",
+        "shape": [500, 700]
+      },
+      "ABI-L2-FDCF": {
+        "status": "downloaded",
+        "path": "dataset/uruguay/ABI-L2-FDCF/20250901_1100.npy",
+        "fire_pixels": 42
+      }
+    }
+  }
+}
 
 ---
 
