@@ -40,35 +40,44 @@ def goes_xy_slices(ds, lat_min, lat_max, lon_min, lon_max):
     return x_slice, y_slice
 
 def check_s3_exists(product_cfg, timestamp):
-    """Verifica si existen archivos en S3 para cualquier producto configurado."""
-    import s3fs
-    fs = s3fs.S3FileSystem(anon=True)
-    
-    # Extraemos los datos del timestamp
+    """Verifica existencia en S3 usando boto3 (más rápido y confiable que s3fs)."""
+    import boto3
+    from botocore import UNSIGNED
+    from botocore.config import Config
+
     julian_day = timestamp.strftime('%j')
     hour = timestamp.strftime('%H')
     year = timestamp.strftime('%Y')
     
-    # El 'product' en AWS suele ser el prefijo del ID (ej: ABI-L1b-Rad)
-    # pero sin la banda específica. Lo tomamos directamente del config.
     s3_product = product_cfg["product"] 
-    
-    # Ajuste para productos Full Disk (RadF)
     if s3_product == "ABI-L1b-Rad":
         s3_product = "ABI-L1b-RadF"
         
-    path = f"{s3_product}/{year}/{julian_day}/{hour}/"
-    
+    prefix = f"{s3_product}/{year}/{julian_day}/{hour}/"
+    bucket = "noaa-goes19" # O el que estés usando
+
     try:
-        files = fs.ls(path)
-        # Filtramos para asegurarnos que haya archivos de la banda correcta si es L1b
+        # Configuración de timeout estricta
+        s3 = boto3.client('s3', config=Config(connect_timeout=2, read_timeout=2, retries={'max_attempts': 0}), region_name='us-east-1')
+        
+        # Listar solo 1 objeto para verificar existencia
+        response = s3.list_objects_v2(
+            Bucket=bucket, 
+            Prefix=prefix, 
+            MaxKeys=5, 
+            RequestPayer='requester' # A veces necesario, o usar Config(signature_version=UNSIGNED)
+        )
+        
+        files = response.get('Contents', [])
         if "band" in product_cfg:
             band_str = f"M6C{product_cfg['band']:02d}"
-            files = [f for f in files if band_str in f]
+            exists = any(band_str in f['Key'] for f in files)
+        else:
+            exists = len(files) > 0
             
-        return len(files) > 0, path
+        return exists, f"{bucket}/{prefix}"
     except:
-        return False, path
+        return False, f"{bucket}/{prefix}"
 
 
 def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, output_root):
@@ -77,6 +86,8 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
 
     Returns a dict with status and metadata, never raises.
     """
+    import time
+    
     product_id = product_cfg["id"]
     folder     = os.path.join(output_root, product_id)
     os.makedirs(folder, exist_ok=True)
@@ -88,26 +99,61 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
                 "timestamp": timestamp.strftime("%Y%m%d_%H%M")}
 
     try:
+        print(f"    📥 Descargando {timestamp.strftime('%Y%m%d_%H%M')} {product_id}...", end="", flush=True)
+        start_time = time.time()
+        
         band = product_cfg.get("band")
         g    = GOES(satellite=satellite, product=product_cfg["product"], domain=domain,
-                    bands=band if band else None)
+                    bands=band if band else None, timeout=30)  # Timeout directo en GOES
         ds   = g.nearesttime(timestamp)
 
         xs, ys = goes_xy_slices(ds, **region_cfg)
         data   = ds.sel(x=xs, y=ys)[product_cfg["variable"]].values
 
+        ds.close()
+
         if data.size == 0:
+            print(f" ⚠️  vacío ({time.time()-start_time:.1f}s)")
             return {"status": "empty", "path": None, "product": product_id,
                     "timestamp": timestamp.strftime("%Y%m%d_%H%M")}
 
         dtype  = np.float32 if product_cfg["dtype"] == "float32" else np.int8
         np.save(file_path, data.astype(dtype))
 
+        elapsed = time.time() - start_time
+        print(f" ✅ ({elapsed:.1f}s, shape={list(data.shape)})")
         return {"status": "downloaded", "path": file_path, "product": product_id,
                 "timestamp": timestamp.strftime("%Y%m%d_%H%M"), "shape": list(data.shape)}
 
     except Exception as e:
+        elapsed = time.time() - start_time if 'start_time' in locals() else 0
+        print(f" ❌ ({elapsed:.1f}s)")
+        
+        # Verificación S3 simplificada y más rápida
+        try:
+            exists_on_s3, s3_path = check_s3_exists(product_cfg, timestamp)
+            if not exists_on_s3:
+                status_msg = "error_aws_gap"
+                error_detail = f"Data Gap en AWS: No hay archivos para {product_id} en s3://{s3_path}"
+            else:
+                status_msg = "error_local"
+                error_detail = f"Error local ({elapsed:.1f}s): {str(e)}"
+        except:
+            # Si la verificación S3 también falla, asumir error local
+            status_msg = "error_local"
+            error_detail = f"Error desconocido ({elapsed:.1f}s): {str(e)}"
+
+        return {
+            "status": "error", 
+            "substatus": status_msg,
+            "product": product_id,
+            "timestamp": timestamp.strftime("%Y%m%d_%H%M"), 
+            "error": error_detail,
+            "product_path": s3_path if 's3_path' in locals() else None
+        }
+    
         # Pasamos el config completo para que la verificación sea precisa por producto
+
         exists_on_s3, s3_path = check_s3_exists(product_cfg, timestamp)
         
         if not exists_on_s3:

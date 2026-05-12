@@ -1,11 +1,8 @@
 import json
 import os
 import numpy as np
-import geopandas as gpd
-from shapely.geometry import Point
 
 MANIFEST_FILE = "manifest.json"
-GEOJSON_PATH = os.path.join(os.path.dirname(__file__), "departamentos.geojson")
 
 def load(output_root):
     path = os.path.join(output_root, MANIFEST_FILE)
@@ -28,17 +25,9 @@ def save(output_root, entries):
 
 def update(output_root, new_results, all_required_ids, region_cfg):
     """
-    Actualiza el manifest con bandas, estadísticas de fuego y reporte por departamento.
+    Actualiza el manifest con bandas y estadísticas de fuego.
     """
     manifest = load(output_root)
-    
-    # Intentamos cargar el mapa oficial una sola vez para esta tanda
-    gdf_deptos = None
-    if os.path.exists(GEOJSON_PATH):
-        try:
-            gdf_deptos = gpd.read_file(GEOJSON_PATH)
-        except Exception as e:
-            print(f"⚠️ Error cargando GeoJSON: {e}")
 
     for res in new_results:
         ts = res["timestamp"]
@@ -58,14 +47,12 @@ def update(output_root, new_results, all_required_ids, region_cfg):
             "error": res.get("error")
         }
 
-        # --- Lógica de Fuego y Espacial ---
         if prod_id == "ABI-L2-FDCF" and res["status"] in ("downloaded", "exists"):
             file_path = res.get("path")
             if file_path and os.path.exists(file_path):
                 mask = np.load(file_path)
                 
                 # En este pipeline, ABI-L2-FDCF ya viene codificado como 0 = fuego de alta confianza.
-                # Por eso aquí debemos buscar el valor 0, no los códigos GOES-R originales.
                 fire_pixels = int(np.sum(mask == 0))
                 has_fire = fire_pixels > 0
                         
@@ -74,26 +61,6 @@ def update(output_root, new_results, all_required_ids, region_cfg):
                     "has_fire": has_fire,
                     "class_label": "fire" if has_fire else "clear"
                 }
-                
-                # Si hay fuego, calculamos en qué departamentos cayó
-                if has_fire and gdf_deptos is not None:
-                    rows, cols = np.where(mask == 0)
-                    h, w = mask.shape
-                    
-                    # Interpolación de coordenadas según config.yaml
-                    lats = region_cfg['lat_max'] - (rows / h) * (region_cfg['lat_max'] - region_cfg['lat_min'])
-                    lons = region_cfg['lon_min'] + (cols / w) * (region_cfg['lon_max'] - region_cfg['lon_min'])
-                    
-                    points = [Point(xy) for xy in zip(lons, lats)]
-                    gdf_fire = gpd.GeoDataFrame(geometry=points, crs="EPSG:4326")
-                    
-                    # Unión espacial con los departamentos
-                    joined = gpd.sjoin(gdf_fire, gdf_deptos, predicate='within')
-                    
-                    # Usamos 'admlnm' que es la clave en tu archivo departamentos.geojson
-                    if not joined.empty:
-                        spatial_report = joined['admlnm'].value_counts().to_dict()
-                        fire_meta["spatial_report"] = spatial_report
                 
                 manifest[ts]["fire"] = fire_meta
 
@@ -109,35 +76,41 @@ def update(output_root, new_results, all_required_ids, region_cfg):
     return manifest
 
 def export_metadata_csv(output_root):
-    """Aplatana el JSON a un CSV de 19 columnas (departamentos) para Hugging Face."""
+    """Aplatana el JSON a un CSV completo con toda la información disponible."""
     import csv
     data = load(output_root)
-    if not data: 
+    if not data:
         return
 
-    # Lista exacta de tu GeoJSON
-    deptos = [
-        'Artigas', 'Canelones', 'Cerro Largo', 'Colonia', 'Durazno', 'Flores', 
-        'Florida', 'Lavalleja', 'Maldonado', 'Montevideo', 'Paysandú', 'Rivera', 
-        'Rocha', 'Río Negro', 'Salto', 'San José', 'Soriano', 'Tacuarembó', 'Treinta y tres'
-    ]
-
     csv_path = os.path.join(output_root, "metadata.csv")
-    fieldnames = ['timestamp', 'status', 'total_fire_pixels'] + deptos
+    fieldnames = [
+        'timestamp', 'status', 'has_fire', 'class_label', 'total_fire_pixels',
+        'ABI-L1b-Rad-B07_status', 'ABI-L1b-Rad-B07_shape', 'ABI-L1b-Rad-B07_path',
+        'ABI-L1b-Rad-B14_status', 'ABI-L1b-Rad-B14_shape', 'ABI-L1b-Rad-B14_path',
+        'ABI-L2-FDCF_status', 'ABI-L2-FDCF_shape', 'ABI-L2-FDCF_path'
+    ]
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for ts, info in sorted(data.items()):
             fire = info.get("fire", {})
-            spatial = fire.get("spatial_report", {})
             row = {
                 'timestamp': ts,
                 'status': info.get('status', 'incomplete'),
+                'has_fire': fire.get("has_fire", False),
+                'class_label': fire.get("class_label", "unknown"),
                 'total_fire_pixels': fire.get("fire_pixels", 0)
             }
-            for d in deptos:
-                row[d] = spatial.get(d, 0)
+
+            # Agregar información de cada banda
+            bands = info.get("bands", {})
+            for band_id in ['ABI-L1b-Rad-B07', 'ABI-L1b-Rad-B14', 'ABI-L2-FDCF']:
+                band_info = bands.get(band_id, {})
+                row[f'{band_id}_status'] = band_info.get("status", "missing")
+                row[f'{band_id}_shape'] = str(band_info.get("shape", "N/A"))
+                row[f'{band_id}_path'] = band_info.get("path", "N/A")
+
             writer.writerow(row)
 
 def status_report(output_root, required_products=None):
