@@ -133,7 +133,24 @@ Esto muestra cuántos archivos se descargaron por producto y si hay timestamps i
 ✅ Timestamps completos (todos los productos): 48
 ```
 
-### 6. Ver estadísticas de fuego
+### 6. Reintentar descargar imagenes que dan error
+
+Con esto puedes ejecutar:
+```bash
+python pipeline.py retry --region uruguay --products ABI-L1b-Rad-B07 ABI-L2-FDCF
+```
+```bash
+o simplemente:
+python pipeline.py retry --region uruguay
+```
+
+Si la terminal devuelve algo como:
+❌ 20250922_1600  ABI-L1b-Rad-B07                 error
+❌ 20250922_1600 -> error_aws_gap
+
+significa que el error es que no se encuentra el archivo en AWS.
+
+### 7. Ver estadísticas de fuego
 
 ```bash
 python pipeline.py fire-stats --region uruguay
@@ -156,7 +173,7 @@ Muestra cuántos timestamps tienen fuego detectado, el porcentaje, y un ranking 
   ...
 ```
 
-### 7. Visualizar una imagen y su máscara
+### 8. Visualizar una imagen y su máscara
 
 ```bash
 python pipeline.py visualize --region uruguay --timestamp 20250901_1200
@@ -299,3 +316,17 @@ snapshot_download(
 ```
 
 > ⚠️ El token de Hugging Face es personal y privado. No lo compartas ni lo subas a GitHub. Ya está protegido en el archivo `.env` que está en el `.gitignore`.
+
+
+### Manejo de Errores y Gaps de Datos
+
+Notas sobre la disponibilidad de datos (Gaps):
+Es posible que algunos comandos de descarga devuelvan errores de tipo FileNotFound o IndexError. Esto no siempre indica un fallo en el script, sino que refleja la falta de datos operativos en los servidores de NOAA (AWS). El satélite GOES-19 comenzó su fase operativa el 7 de abril de 2025; cualquier fecha anterior resultará en error.
+
+Si un timestamp de 2025 falla persistentemente, podés verificar la existencia del archivo directamente en el bucket de AWS S3 usando el siguiente comando (requiere AWS CLI):
+
+```bash
+aws s3 ls s3://noaa-goes19/ABI-L1b-RadF/2025/265/17/ --no-sign-request
+```
+
+Si el comando devuelve una lista vacía, el dato es un Data Gap oficial del satélite y no está disponible para descarga.

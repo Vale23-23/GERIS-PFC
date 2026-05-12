@@ -39,6 +39,37 @@ def goes_xy_slices(ds, lat_min, lat_max, lon_min, lon_max):
     )
     return x_slice, y_slice
 
+def check_s3_exists(product_cfg, timestamp):
+    """Verifica si existen archivos en S3 para cualquier producto configurado."""
+    import s3fs
+    fs = s3fs.S3FileSystem(anon=True)
+    
+    # Extraemos los datos del timestamp
+    julian_day = timestamp.strftime('%j')
+    hour = timestamp.strftime('%H')
+    year = timestamp.strftime('%Y')
+    
+    # El 'product' en AWS suele ser el prefijo del ID (ej: ABI-L1b-Rad)
+    # pero sin la banda específica. Lo tomamos directamente del config.
+    s3_product = product_cfg["product"] 
+    
+    # Ajuste para productos Full Disk (RadF)
+    if s3_product == "ABI-L1b-Rad":
+        s3_product = "ABI-L1b-RadF"
+        
+    path = f"noaa-goes19/{s3_product}/{year}/{julian_day}/{hour}/"
+    
+    try:
+        files = fs.ls(path)
+        # Filtramos para asegurarnos que haya archivos de la banda correcta si es L1b
+        if "band" in product_cfg:
+            band_str = f"M6C{product_cfg['band']:02d}"
+            files = [f for f in files if band_str in f]
+            
+        return len(files) > 0, path
+    except:
+        return False, path
+
 
 def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, output_root):
     """
@@ -76,7 +107,23 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
                 "timestamp": timestamp.strftime("%Y%m%d_%H%M"), "shape": list(data.shape)}
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"status": "error", "path": None, "product": product_id,
-                "timestamp": timestamp.strftime("%Y%m%d_%H%M"), "error": str(e)}
+        # Pasamos el config completo para que la verificación sea precisa por producto
+        exists_on_s3, s3_path = check_s3_exists(product_cfg, timestamp)
+        
+        if not exists_on_s3:
+            status_msg = "error_aws_gap"
+            error_detail = f"Data Gap en AWS: No hay archivos para {product_id} en s3://{s3_path}"
+        else:
+            status_msg = "error_local"
+            error_detail = f"Error local: El archivo existe en S3 pero falló el proceso. {str(e)}"
+
+        # Imprimimos un mensaje claro en la terminal
+        print(f"  ❌ {timestamp.strftime('%Y%m%d_%H%M')} -> {status_msg}")
+        
+        return {
+            "status": "error", 
+            "substatus": status_msg,
+            "product": product_id,
+            "timestamp": timestamp.strftime("%Y%m%d_%H%M"), 
+            "error": error_detail
+        }

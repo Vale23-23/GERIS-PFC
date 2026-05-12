@@ -11,6 +11,7 @@ Usage:
 import argparse
 import yaml
 import os
+import json
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -21,6 +22,14 @@ import manifest
 def load_config(path="config.yaml"):
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def load_manifest(output_root):
+    path = os.path.join(output_root, "manifest.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def get_timestamps(start_str, end_str, interval_hours=1):
@@ -68,11 +77,22 @@ def cmd_download(args, cfg):
             for ts, prod in tasks
         }
         for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
-            print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
-
+            try:
+                result = future.result()
+                results.append(result)
+                icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
+                
+                if result["status"] == "error":
+                    # Mensaje personalizado cuando falla el reintento
+                    print(f"  ❌ {result['timestamp']}  {result['product']:<30}  ERROR DE AWS")
+                    print(f"     👉 Probá: aws s3 ls s3://noaa-goes19/{result['product_path']} --no-sign-request")
+                else:
+                    print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
+            
+            except Exception as e:
+                # Esto atrapa errores inesperados del downloader
+                print(f"  ❌ Error crítico en descarga: {e}")
+                
     manifest.update(output_root, results)
 
     downloaded = sum(1 for r in results if r["status"] == "downloaded")
@@ -235,6 +255,75 @@ def cmd_list_regions(cfg):
               f"lon [{coords['lon_min']}, {coords['lon_max']}]")
 
 
+def cmd_retry(args, cfg):
+    region = cfg["regions"].get(args.region)
+    if not region:
+        print(f"❌ Región '{args.region}' no encontrada en config.yaml")
+        return
+
+    output_root = os.path.join(cfg["output_root"], args.region)
+    manifest_entries = load_manifest(output_root)
+    if not manifest_entries:
+        print(f"❌ No se encontró manifest.json o está vacío en: {output_root}")
+        return
+
+    product_map = {p["id"]: p for p in cfg["products"]}
+    retry_entries = [
+        e for e in manifest_entries
+        if e["status"] in ("error", "empty")
+        and (not args.products or e["product"] in args.products)
+    ]
+
+    if not retry_entries:
+        print("✅ No hay descargas con error pendientes de reintento.")
+        return
+
+    if args.products:
+        unknown = set(args.products) - set(product_map)
+        if unknown:
+            print(f"⚠️  Productos desconocidos ignorados: {', '.join(unknown)}")
+
+    tasks = []
+    for entry in retry_entries:
+        prod = product_map.get(entry["product"])
+        if not prod:
+            print(f"⚠️  Producto no definido en config.yaml: {entry['product']}")
+            continue
+
+        # Convertimos el string "20250901_1200" a un objeto datetime
+        ts_obj = datetime.strptime(entry["timestamp"], "%Y%m%d_%H%M")
+        tasks.append((ts_obj, prod))
+    
+    if not tasks:
+        print("❌ No hay tareas válidas para reintentar.")
+        return
+
+    max_workers = args.workers or cfg["max_workers"]
+    print(f"🔁 Reintentando {len(tasks)} descargas con {max_workers} workers...\n")
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                downloader.download_and_save, ts, prod, region, cfg["satellite"], cfg["domain"], output_root
+            ): (ts, prod)
+            for ts, prod in tasks
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
+            print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
+
+    manifest.update(output_root, results)
+
+    downloaded = sum(1 for r in results if r["status"] == "downloaded")
+    skipped    = sum(1 for r in results if r["status"] == "exists")
+    errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
+    print(f"\n✔ Reintentos completados: descargados={downloaded}  |  ya existían={skipped}  |  errores={errors}")
+    print(f"📋 Manifest actualizado en: {output_root}/manifest.json")
+
+
 def main():
     parser = argparse.ArgumentParser(description="GOES dataset pipeline")
     sub    = parser.add_subparsers(dest="command")
@@ -266,6 +355,12 @@ def main():
     fs = sub.add_parser("fire-stats", help="Show fire detection statistics for a region")
     fs.add_argument("--region", required=True, help="Region key from config.yaml")
 
+    # retry
+    rt = sub.add_parser("retry", help="Retry downloads that failed previously")
+    rt.add_argument("--region",   required=True, help="Region key from config.yaml")
+    rt.add_argument("--products", nargs="+", help="Limit retry to these product IDs")
+    rt.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
+
     args = parser.parse_args()
     cfg  = load_config(os.path.join(os.path.dirname(__file__), "config.yaml"))
 
@@ -279,8 +374,8 @@ def main():
         cmd_list_regions(cfg)
     elif args.command == "fire-stats":
         cmd_fire_stats(args, cfg)
-    elif args.command == "visualize":
-        cmd_visualize(args, cfg)
+    elif args.command == "retry":
+        cmd_retry(args, cfg)
     else:
         parser.print_help()
 
