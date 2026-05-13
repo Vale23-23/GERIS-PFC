@@ -26,7 +26,17 @@ Dependencies (add to requirements.txt):
   scipy           # RegularGridInterpolator
   requests        # HTTP download
 """
+"""" Esto a agregar al pipeline de descarga:
+import tpw_downloader
+result = tpw_downloader.download_and_save(ts, region, output_root, goes_shape=None)
+results.append(result)
 
+Dependencias nuevas que hay que agregar al requirements.txt:
+cfgrib
+eccodes
+scipy
+eccodes puede requerir instalación del sistema también: sudo apt install libeccodes-dev en Linux.
+"""
 import os
 import re
 import tempfile
