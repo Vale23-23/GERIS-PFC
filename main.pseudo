@@ -1,0 +1,91 @@
+#Pseudocodigo algoritmo NOAA
+#Todas las temperaturas estan expresadas en K y los grados en º
+
+#La LUT de TPW tiene la siguiente estructura:
+#+-+----------------------------+---Angulo Zenit Satelite para Bin 1 de TPW (7 columnas)---+---Angulos para bin 2---+---...---+Angulos para bin 5---+
+#|0|TPW (1-5)                   |                                                          |                        |         |                     |
+#|1|Offset radianza             |                                                          |                        |         |                     |
+#|2|Transmitancia ch7 (trans_7) |                                                          |                        |         |                     |
+#|3|Transmitancia ch14          |                                                          |                        |         |                     |
+#|4|Offset absorcion ch7 (ext_7)|                                                          |                        |         |                     |
+#|5|Offset absorcion ch14       |                                                          |                        |         |                     |
+#+-+----------------------------+----------------------------------------------------------+------------------------+---------+---------------------+
+
+
+#=========CONSTANTES===========#
+#W = ancho de imagen, L = largo de imagen
+#BR_TEMP_MISS_VAL
+#SAT_TEMP = temperatura de saturacion
+#SAT_BUFF = 5
+#FPT_TRHESHOLD = 90
+
+#=========INPUTS===========#
+#Datos de bandas del ABI
+array[L,W] bTemp7, rad7 #Temperaturas de brillo y radianzas de banda 7 (3.9 um)
+array[L,W] bTemp14, rad14 #Idem para banda 14 (11.2 um)
+array[L,W] bTemp13, rad13 #Idem para banda 13 (10.3 um)
+array[L,W] bTemp15, rad15 #Idem para banda 15 (12.3 um)
+array[L,W] refl2 #Reflectancia banda 2 (0.62 um)
+#Datos auxiliares
+array[L,W] longitudes, latitudes 
+array[L,W] ang_cenital_sol #Angulos cenitales del sol
+array[L,W] ang_resp_sol #Angulos de resplandor del sol 
+array[L,W] ang_cenital_local
+array[L,W] azimut_relativo
+array[L,W] angulo_relativo 
+array[L,W] data_quality
+float FPT #Focal Point Temperature
+#Datos auxilaires dinamicos 
+array[L,W] tpw #Total Precipitable Water, modelo ncep gfs 
+array[L,W] emisividad7, emisividad14 #Emisividades de bandas 7 y 14, UW Baseline Fit 
+array[L,W] mascara_fuego_anterior 
+#Datos auxiliares estaticos 
+array[L,W] cobertura_terrestre
+array[L,W] mascara_tierra_mar
+array[L,W] mascara_desierto #No se usa para uruguay, supongo
+table LUT_TPW #LUT para offset de tpw
+#==========================#
+
+
+
+#========================================================PREPROCESAMIENTO==========================================================#
+#==================================================================================================================================#
+#==FUNCIONES  AUXILIARES==#
+#Dada una temperatura de brillo en la banda src_band, calcula la radianza equivalente en dst_band mediante la funcion de planck
+float temp_to_rad(src_band,dst_band,temp):
+#Dada una radianza en src_band, devuelve su temperatura de brillo equivalente en dst_band
+float rad_to_temp(src_band,dst_band,rad):
+#Devuelve true si el pixel en (i,j) es un pixel de dia 
+bool dia(i,j):
+#Computa la distancia entre dos pixeles usando la distancia de gran circulo
+float distancia(p1,p2)
+#==================================================================================================================================#
+
+
+
+
+#=============================================================FASE 1===============================================================#
+#Loop sobre todos los pixeles
+#Identificacion  de candidatos a fuego y correccion de distorsiones (atmosferica, solar,etc)
+#==================================================================================================================================#
+for(i in 0..L-1):
+    for(j in 0..W-1):
+
+        pasa_tests_iniciales = run_initial_tests(i,j) #Bool
+
+        pasa_test_borde_nubes = run_along_scan_reflectivity_test(i,j) #Bool 
+
+        fondo_valido, bkg_stats =  run_determine_bkg_condition_stats(i,j) #Bool, lista
+
+        es_candidato = apply_fire_thresholds(i,j) #Bool
+
+        valores_corregidos = appply_corrections(i,j)
+
+        run_post_correction_tests(i,j)
+
+        last_chance, p, T = dozier(i,j)
+
+        if(last_chance):
+            run_last_chance_tests(i,j)
+
+        res_fase_1 = get_phase_1_results(i,j)

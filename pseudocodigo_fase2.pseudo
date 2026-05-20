@@ -21,6 +21,7 @@ foreach (candidato in lista_candidatos) {
     refl = candidato.refl 
     reflb = candidato.reflb
     num_pasadas = candidato.number_passes_in_bkg_stadistics
+    flag = candidato.fail_char
 
     ajuste_dia = 0 #Si es de dia algunos tests requeiren sumar un offset 
     if(dia(candidato)):
@@ -34,12 +35,13 @@ foreach (candidato in lista_candidatos) {
         (brTemp_ch7 < 290 + ajuste_diaand and brTemp_ch7_bkg < 280 + ajuste_dia and num_pasadas >= 10 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test))
     ): 
         lista_candidatos.remove(candidato)
+        continue
     
     #Realizo otro test sobre bordes de nubes 
     albedo = candidato.albedo 
     albedo_bkg = candidato.albedo_bkg
-    if((albedo > 0.25 or albedo -albedo_bkg >= 0.1) and brTemp_ch7 < 292.5 + ajuste_dia and #Flag que indica por que no se proceso subpixel = 9 o 10):
-        #Flag por no procesar subpixel setada a 11
+    if((albedo > 0.25 or albedo -albedo_bkg >= 0.1) and brTemp_ch7 < 292.5 + ajuste_dia and (flag == 9 or flag == 10)):
+        flag = 11
 
     
 }
