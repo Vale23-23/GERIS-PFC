@@ -54,12 +54,33 @@ table LUT_TPW #LUT para offset de tpw
 
 #==FUNCIONES  AUXILIARES==#
 #Dada una temperatura de brillo en la banda src_band, calcula la radianza equivalente en dst_band mediante la funcion de planck
-float temp_to_rad(src_band,dst_band,temp)
+float temp_to_rad(src_band,dst_band,temp):
+    if(dst_band == 7):
+        lambda = 3.9e-6
+    else:
+        lambda = 11.2e-6
+    kB = 1.380649e-23 #Cte de Boltzmann ; h = 6.62607015e-34 #Cte de Planck ; c = 299792458 #Velocidad de la luz
+    return (2*h*c**2)/((exp(h*c/(lambda*kB*temp))-1)*lambda**5)
+
 #Dada una radianza en src_band, devuelve su temperatura de brillo equivalente en dst_band
-float rad_to_temp(src_band,dst_band,rad)
+float rad_to_temp(src_band,dst_band,rad):
+    if(dst_band == 7):
+        lambda = 3.9e-6
+    else:
+        lambda = 11.2e-6
+    kB = 1.380649e-23 #Cte de Boltzmann ; h = 6.62607015e-34 #Cte de Planck ; c = 299792458 #Velocidad de la luz
+    return (h*c/(kB*lambda))/ln(1+2*h*(c**2)/(rad*lambda**5))
+
 #Devuelve true si el pixel en (i,j) es un pixel de dia 
 bool dia(i,j):
     return 0 <= ang_cenital_sol[i,j] <= 85
+
+#Computa la distancia entre dos pixeles usando la distancia de gran circulo
+float distancia(p1,p2):
+    long1,long2 = longitudes[p1], longitudes[p2]
+    lat1,lat2 = latitudes[p1], latitudes[p2]
+    angulo_central =arccos(sin(lat1)*sin(lat2)+cos(long1)*cos(long2)*cos(abs(long2-long1)))
+    return 6378*angulo_central #Radio de la Tierra
 #=========================#
 
 #====PREPROCESAMIENTO====#
@@ -79,12 +100,16 @@ if(FPT > FPT_THRESHOLD): #Si temp. de sensor demasiado alta, creo banda hibrida
             refl[i,j] = min(abs(refl[i,j]), abs(refl_7_13[i,j]))
 
 
-#Creo e inicializo mascaras de fuego y de flags
+#Creo e inicializo mascaras 
+array[L,W] mascara_nubes
+array[L,W] mascara_saturados
 array[L,W] mascara_fuego
 array[L,W] fail_char
 for(i in 0..L-1):
     for(j in 0..W-1):
         fail_char[i,j] = -1
+        mascara_nubes[i,j] = false
+        mascara_saturados[i,j] = false
         if(#Pixel de espacio??):
             mascara_fuego[i,j] = 40
         else:
@@ -111,9 +136,10 @@ for(i in 0..L-1):
 
         #Seccion 3.4.2.3: Test data against thresholds
         #Tests iniciales
-        if(ang_cenital_sol[i,j] > 80): #Test de zenit solar
+        if(ang_cenital_local[i,j] > 80): #Test de zenit solar
             mascara_fuego[i,j] = 50
-        if(ang_cenital_sol[i,j] < 10 or ang_resp_sol[i,j] < 10):
+            continue #Avanzo a siguiente pixel 
+        if(ang_cenital_local[i,j] < 10 or ang_resp_sol[i,j] < 10):
             mascara_fuego[i,j] = 60
         if(bTemp7[i,j] == BR_TEMP_MISS_VAL): #Pixel "malo" (missing value)
             mascara_fuego[i,j] = 120 
@@ -128,9 +154,20 @@ for(i in 0..L-1):
         if(bTemp14[i,j] z 200): 
             mascara_fuego[i,j] = 127
 
-        #===========================#
-        #ACA IRIA TEST ECOSISTEMAS#
-        #===========================#
+        #Tests de ecosistemas
+        if(mascara_tierra_mar[i,j] in (7,6,0,3,5) or mascara_desierto[i,j] == 2):
+            mascara_fuego[i,j] = 150
+            continue 
+        if(#sea water):
+            mascara_fuego[i,j] = 151
+            continue 
+        if(#coast line fringe or compound coast line)
+            mascara_fuego[i,j] = 152
+            continue 
+        if(#inland water or water and island fringe or land,water and shore or land and water, rivers):
+            mascara_fuego[i,j] = 153
+            continue 
+
 
         #Minimo umbral para actividad de fuego
         if(rad7[i,j] < 0 or rad14[i,j] < 0):
@@ -141,24 +178,20 @@ for(i in 0..L-1):
             continue       
         if(abs(bTemp7[i,j]-bTemp14[i,j]) < 2 and (bTemp7[i,j]<= 273 or bTemp14[i,j]<=273)):
             mascara_fuego[i,j] = 201 #Se asume que el pixel es demasiado frio
-
+            continue
 
         #Para los siguientes tests se definen algunos umbrales que dependen de si el pixel es de dia 
         offset_7 = offset_7_refl = 0
         if(dia(i,j)):
             offset_7 = 15*cos(ang_cenital_sol[i,j])
-            offset_7_refl = 5*cocs(ang_cenital_sol[i,j])
+            offset_7_refl = 5*cos(ang_cenital_sol[i,j])
         #Defino umbrales 
         bTemp7_min = 285 + offset7 
         bTemp7_refl_threshold = 315 + offset_7_refl
         #Test de nubes
         #Solo se evalua al pixel si mantiene codigo 100
-        array[L,W] mascara_nubes,mascara_saturados
-        for(i in 0..L-1):
-            for(j in 0..W-1):
-                mascara_nubes[i,j] = false
-                mascara_saturados[i,j] = false
-        if(mascara_fuego[i,j] == 100):
+        
+        if(mascara_fuego[i,j] == 100): 
             if(bTemp14[i,j] < 270):
                 mascara_fuego[i,j] = 200
                 mascara_nubes[i,j] = true 
@@ -167,7 +200,8 @@ for(i in 0..L-1):
                 mascara_nubes[i,j] = true 
             if(dia(i,j)):
                 if(ang_cenital_sol[i,j] <= 70 
-                   or (ang_cenital_sol[i,j] <= 60 and ang_cenital_local[i,j] <= 60)
+                   or 
+                   (ang_cenital_sol[i,j] <= 60 and ang_cenital_local[i,j] <= 60)
                 ):
                     if(albedo[i,j]  > 0.38):
                         mascara_fuego[i,j] = 215 
@@ -189,8 +223,12 @@ for(i in 0..L-1):
         #Seccion 3.4.2.4: Along scan reflectivity test
         #Test de deteccion de bordes de nubes 
         #NOTA: en esta parte hay que cuidar el loop en los bordes de la imagen, no lo incluyo para simplfiicar
+
+
+
+
         if(dia(i,j)):
-            if(albedo[i,j] >= 0.38 and bTemp7[i,j] < 230):
+            if(albedo[i,j] >= 0.38 and bTemp7[i,j] < 320):
                 if(refl[i,j-3]<0.2 or refl[i,j+3]<0.2):
                     mascara_fuego[i,j] = 245
                     continue 
@@ -238,7 +276,7 @@ for(i in 0..L-1):
                 tam_ventana += 5
         
         if(!fin): 
-            mascara_fuego[i,j] = 170 #Si e llego al max de iteraciones sin encontrar 20% de validos 
+            mascara_fuego[i,j] = 170 #Si se llego al max de iteraciones sin encontrar 20% de validos 
             continue #Avanzo al siguiente pixel 
 
         rango_ventana = (i-tam_ventana:i+tam_ventana,j-tam_ventana:j+tam_ventana)
@@ -271,8 +309,7 @@ for(i in 0..L-1):
         rad_4mu_11mu_avg_diff = ...
         rad_diff_sigma = ...
 
-        #Si no se determina nada, amscara = 170 ???????
-            
+    
 
         #Seccion 3.4.2.6: Determine contextual thresholds 
 
@@ -283,7 +320,13 @@ for(i in 0..L-1):
         std_dev_7b_test_threshold = min(10,max(4,3.75*std_dev(temp7_bkg_mean) + offset_ventana))
         std_dev_reflb_test_threshold = min(1.0,min(0.25,3.0*std_dev(reflb[i,j])))
         std_dev_refelb_max_test_threshold = ...
-        bool along_scan_line_test(i,j)
+        pass_along_scan_line_test = true 
+        
+        if(abs(refl[i,j-2]) < std_dev_reflb_test_threshold and abs(refl[i,j+2]) < std_dev_reflb_test_threshold ):
+            if(bTemp7[i,j] < bTemp7_refl_threshold):
+                pass_along_scan_line_test = false
+        
+
 
         if(dia(i,j)): #Si es un pixel de dia calculo el albedo del fondo
             albedo_bkg = ((vis_brightness[i,j]/25.5)**2)/(100*cos(ang_cenital_sol[i,j]))
@@ -293,12 +336,13 @@ for(i in 0..L-1):
         #Seccion 3.2.4.7: Apply thresholds to identify fire pixels
 
         #Si el pixel esta saturado o se paso de las 10 expansiones de ventana hago los siguientes tests 
-        if(
-            bTemp7[i,j] - bTemp14[i,j] < std_dev_7b_14b_test_threshold 
-            and 
-            bTemp7[i,j] - temp7_bkg_mean < std_dev_7b_test_threshold
-        ):
-            continue       
+        if(mascara_saturados[i,j] or iter > 10):
+            if(
+                bTemp7[i,j] - bTemp14[i,j] < std_dev_7b_14b_test_threshold 
+                and 
+                bTemp7[i,j] - temp7_bkg_mean < std_dev_7b_test_threshold
+            ):
+                continue       
         #Hay que definir estos arrays antes 
         fire_size[i,j] = 0 
         pixel_area[i,j] = 0 
@@ -319,14 +363,14 @@ for(i in 0..L-1):
             and 
             (refl[i,j] <std_dev_refelb_max_test_threshold or along_scan_line_test(i,j))
         ):
-            #Asignar flag =  1 
+            fail_char[i,j] = 1 
              
         if(
             (bTemp7[i,j] - temp7_bkg_mean <std_dev_7b_test_threshold)
             and 
             (refl[i,j] <std_dev_refelb_max_test_threshold or along_scan_line_test(i,j))
         ):
-            #Asignar flag = 2
+            fail_char[i,j] = 2
         
 
 
@@ -357,14 +401,16 @@ for(i in 0..L-1):
             continue #Paso a siguiente pixel
         
         #Correccion por nubes o humo semitransparentes 
+        #Luego de este if habria que usar los valores _adj (adjusted)
         if(dia(i,j) and 0.025 < albedo[i,j] - albedo_bkg < 0.07):
             albedo_diff = albedo[i,j] - albedo_bkg
-            bTemp7[i,j] += 10*albedo_diff
-            bTemp14[i,j] += 30*albedo_diff
+            bTemp7_adj = bTemp7[i,j] + 10*albedo_diff
+            bTemp14_adj = bTemp14[i,j]+ 30*albedo_diff
             if(albedo[i,j] > 0.38 or albedo_diff > 0.38):
-                bTemp7[i,j] += 0.7
-                bTemp14[i,j] += 2.1
-                #Setear flag indicando la condicion del if 
+                bTemp7_adj = bTemp7[i,j] + 0.7
+                bTemp14_adj = bTemp14[i,j] + 2.1
+            #Setear flag indicando la condicion del if 
+            fail_char[i,j] = 8
         
         #Correccion por la emisividad de la superficie 
         rad7_corr_emiss = rad7_corr/emisividad7[i,j]
@@ -401,28 +447,141 @@ for(i in 0..L-1):
             offset_dia = 15*cos(ang_cenital_sol[i,j])
         
         if(bTemp14_corr < 285 or bTemp7_corr < 285 + offset_dia)
-            #flag = 3
+            fail_char[i,j]= 3
         if(bTemp14_corr - bTemp_bkg_corr < 0.25):
             if((albedo[i,j] > 0.15 or mascara_nubes[i,j]) and bTemp7_corr-bTemp_bkg_corr > 10):
-                #Flag = 10
+                fail_char[i,j] = 10
             else:
-                #Flag = 4
+                fail_char[i,j] = 4
         if(bTemp7_corr - bTemp_bkg_corr < 2):
-            #Flag = 5
+            fail_char[i,j] = 5
 
 
-        #Falta flag = 8, supuestamente en seccion 3.4.2.8
+        if(#sun glint):
+            fail_char[i,j] = 8
 
 
 
         #Seccion 3.4.2.10 Sub-pixel characterization: Dozier 
+        #Aca no deberian entrar pixeles con flag 3,4,5 o 10
+       
+
+        #Queremos hallar:
+        #p = proporcion de fuego en pixel
+        #Tt = temperatura real del pixel 
+        #Ecuacion de Dozier: A = B + C. 
+        #   A = radianza total ajustada. 
+        #   B = porcion de radianza debida al fuego subpixel a temp. Tt. 
+        #   C = porcion de radianza por el fondo (sin fuego) a temp. Tb = bTemp_bkg_corr
+
+        #Primer paso: biseccion sobre p con limites 1 y 0.000001 por 15 iteraciones 
+        p_upper = 1
+        p_lower = 0.000001
+
+        #Recibe la radianza total de un pixel, la radianza de fondo y la proporcion de incendio del pixel
+        #Devuelve la radianza emitida por un cuerpo a Tt en la banda correspondiente
+        #Esto viene de despejar uno de los factores de B en A = B + C
+        float rad_fuego(rad,rad_bkg,p):
+            return (rad - (1-p)*rad_bkg)/p
+        for(i in 1..15):
+            
+            p_intermediary = 10^(log10(p_lower)+(log10(p_upper)-log10(p_lower)/2)) #Punto medio del intervalo de biseccion (escala logaritmica)
+            #Para cada p calculo Tt
+            Tt7_fuego_lower  = rad_to_temp(rad_fuego(rad7_diff,rad7_bkg_corr,p_lower))
+            Tt7_fuego_intermediary  = rad_to_temp(rad_fuego(rad7_diff,rad7_bkg_corr,p_intermediary))
+            Tt7_fuego_upper  = rad_to_temp(rad_fuego(rad7_diff,rad7_bkg_corr,p_upper))
+            Tt14_fuego_lower  = rad_to_temp(rad_fuego(rad14_diff,rad14_bkg_corr,p_lower))
+            Tt14_fuego_intermediary  = rad_to_temp(rad_fuego(rad14_diff,rad14_bkg_corr,p_intermediary))
+            Tt14_fuego_upper  = rad_to_tempa(rad_fuego(rad14_diff,rad14_bkg_corr,p_upper))
+            #Calculo diferencias de temperaturas 
+            temp_diff_low = Tt7_fuego_lower - Tt14_fuego_lower
+            temp_diff_intermediary = Tt7_fuego_intermediary - Tt14_fuego_intermediary 
+            temp_diff_upper = Tt7_fuego_upper - Tt14_fuego_upper
+            #Actualizo limites
+            if(sign(temp_diff_intermediary) == sign(temp_diff_low)):
+                p_lower = p_intermediary
+            else:
+                p_upper = p_intermediary
+        
+        #Segundo paso: metodo de Newton para refinar la solucion
+        #Se busca un valor de B+C a menos de 10^-20 de A para ambas bandas.
+        p = p_intermediary
+        Tt = Tt7_fuego_intermediary #Creo que da igual si uso el 7 o el 14 porque la temp. de incendio es independiente de la banda 
+
+        A7 = rad7_diff
+        B7 = p*temp_to_rad(7,7,Tt)
+        C7 = (1-p)*temp_to_rad(bTemp_bkg_corr)
+        A14 = rad14_diff
+        B14 = p*temp_to_rad(14,14,Tt)
+        C14 = (1-p)*temp_to_rad(bTemp_bkg_corr)
+        f7 = B7+C7-A7 
+        f14 = B14 + C14 - A14
+        max_iters = ...
+        iters = 0
+        array[2,2] J #Jacobiano
+        array[2,1] dif #Vector de diferencias (delta_p, delta_T)
+        kB = 1.380649e-23 #Cte de Boltzmann 
+        h = 6.62607015e-34 #Cte de Planck 
+        c = 299792458 #Velocidad de la luz
+        cte1 = 2*h*(c**2) ; cte2 = h*c/kB #Constantes para simplificar
+        l7 = 3.9e-6 ; l14 = 11.2e-6 #Lambdas
+        
+        while(iters < max_iters and abs(f7) > 1e-20 and abs(f14) > 1e-20):
+            
+           
+            #Calculo el jacobiano de la funcion f = B+C-A para banda 7 en la primer fila y 14 en la segunda
+            J[0,0] = temp_to_rad(7,7,Tt) - temp_to_rad(bTemp_bkg_corr)
+            J[0,1] = (p*cte1*cte2/((l7**6)*Tt**2))*exp(cte2/(l7*Tt))/(exp(cte2/(l7*Tt))-1)
+            J[1,0] = temp_to_rad(14,14,Tt) - temp_to_rad(bTemp_bkg_corr)
+            J[1,1] = (p*cte1*cte2/((l14**6)*Tt**2))*exp(cte2/(l14*Tt))/(exp(cte2/(l14*Tt))-1)
+
+            #Calculo vector de diferencias:
+            dif = inv(J)*transpose([f7,f14]) #inv es la inversa matricial, transpose es la transpuesta
+
+
+            iters += 1
+            p += dif[0]
+            Tt += dif[1]
+            if(Tt < 0):
+                #last chance fire test
+                break
+            if(iters > max_iters or det(J) == 0):
+                #error, no se cual codigo
+                break
+            
+            A7 = rad7_diff
+            B7 = p*temp_to_rad(7,7,Tt)
+            C7 = (1-p)*temp_to_rad(bTemp_bkg_corr)
+            A14 = rad14_diff
+            B14 = p*temp_to_rad(14,14,Tt)
+            C14 = (1-p)*temp_to_rad(bTemp_bkg_corr)
+            f7 = B7+C7-A7 
+            f14 = B14 + C14 - A14
+
+        #Calculo del area del pixel
+        #Defino bloque de pixeles 
+        lado_a = distancia((i-2j-2),(i+2,j-2)) / 4 #Ecuacion del circulo maximo
+        lado_b = distancia((i+2,j-2),(i+2,j+2)) / 4
+        largo_diagonal = distnacia((i-2,j-2),(i+2,j+2)) / 4
+        #Formula de Heron para area de paralelogramo
+        s = (lado_a + lado_b + diagonal) / 2
+        area_pixel = 2*sqrt(s*(s-lado_a)*(s-lado_b)*(s-largo_diagonal))
+        
+        
+        #Calculos finales 
+        area_incendio = p*area_pixel 
+        sigma = 5.67e-8 #constante de Stefan-Boltzmann
+        frp_mir = area_pixel*sigma*(rad_mir-rad_bkg_mir) #Cuales valores de rad?
+
+
+
 
         #Seccion 3.4.2.11 Last chance fire tests
 
         if(
             (bTemp7[i,j]-temp7_bkg_mean>=std_dev_7b_test_threshold and bTemp14-temp14_bkg_mean >= -20)
             or 
-            (refl[i,j] -reflb >= std_dev_refelb_max_test_threshold and along_scan_line_test(i,j))
+            (refl[i,j] -reflb >= std_dev_refelb_max_test_threshold and pass_along_scan_line_test)
         ):
             subpixel_fire_size[i,j] = 0 #hay que definir array antes
             if(350 < fire_temperature[i,j] <= 400):
@@ -433,7 +592,7 @@ for(i in 0..L-1):
         #Tests de area de pixel 
 
         #Seccion 3.4.2.12: Subpixel characterization: FRP 
-
+        
 
         #Seccion 3.4.2.13 End part I
 
