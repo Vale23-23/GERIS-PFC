@@ -250,9 +250,9 @@ for(i in 0..L-1):
         #Maximo 10 expansiones 
         iter = 0
         tam_ventana = 5 #Comienzo con 5 pixeles en cada direccion, o sea, 11x11
-        fin = false 
+        fin = false
+        pixeles_validos = 0
         while( !fin and iter < 10):
-            pixeles_validos = 0
             for(x in i-tam_ventana..i+tam_ventana):
                 for(y in j-tam_ventana..j+tam_ventana):
                     #Reviso si el pixel es valido
@@ -263,6 +263,9 @@ for(i in 0..L-1):
                        vis_brightness[i,j] >= 1 and albedo[i,j] < 0.38
                     ):
                         pixeles_validos += 1 
+
+
+
                     #Si tengo 20% de validos entonces ya tengo mi tam_ventana
                     #Para tamaño de ventana se cuentan los pixeles que se salgan de la imagen 
                     if(validos == 0.2*(2*tam_ventana+1)**2): #No se si no llevaria un -1 aca para no contar el centro
@@ -280,36 +283,80 @@ for(i in 0..L-1):
             continue #Avanzo al siguiente pixel 
 
         rango_ventana = (i-tam_ventana:i+tam_ventana,j-tam_ventana:j+tam_ventana)
-        reflb = #Calcularlo afuera del loop principal
-            
+        
+        #Histogramas 
+        hist_bTemp7 = zeroes[] #No estoy seguro el tamaño
+        hist_bTemp14 = zeroes[]
+        hist_temp_diff = zeroes[]
+        hist_vis = zeroes[]
+        for(x in i-tam_ventana..i+tam_ventana):
+                for(y in j-tam_ventana..j+tam_ventana):
+                    if(mascara_tierra_mar[x,y] and !muy_calido and !muy_frio and 
+                       vis_brightness[i,j] >= 1 and albedo[i,j] < 0.38
+                    ):
+                            hist_bTemp7[round(bTemp7[x,y])] += 1
+                            hist_bTemp14[round(bTemp14[x,y])] += 1
+                            hist_temp_diff[round(bTemp7[x,y]-bTemp14[x,y])] += 1
+                            hist_vis[vis_brightness[x,y]] += 1 #Ya es entero por la forma en que lo calculo
 
+                    
+        highest_freq_bin = arg_max(hist_temp_diff)
+        highest_freq_bin_vis = arg_max(hist_vis)
+        list_temp7 = []
+        list_temp14 = []
+        list_vis_diff = []
+        list_vis = []
+
+
+        for(x in i-tam_ventana..i+tam_ventana):
+                for(y in j-tam_ventana..j+tam_ventana):
+                    if(mascara_tierra_mar[x,y] and !muy_calido and !muy_frio and 
+                       vis_brightness[i,j] >= 1 and albedo[i,j] < 0.38
+                    ):
+                        if(round(bTemp7[x,y] - bTemp14[x,y]) in (highest_freq_bin-1,highest_freq_bin,highest_freq_bin+1)):
+                            list_temp7.append(bTemp7[x,y])
+                            list_temp14.append(bTemp14[x,y])
+                            list_vis_diff.append(vis_brightness[x,y])
+                        if(round(vis_brightness[x,y]) in (highest_freq_bin_vis-1,highest_freq_bin_vis,highest_freq_bin_vis+1)):
+                            list_vis.append(vis_brightness[x,y])
+        
+        hist_bTemp7_mean = mean(list_temp7)
+        hist_bTemp14_mean = mean(list_temp14)
+        hist_bTemp7_std_dev = std_dev(list_temp7)
+        hist_bTemp14_std_dev = std_dev(list_tmep14)
+        hist_vis_mean = mean(list_vis_diff)
+        hist_vis_std_dev = std_dev(list_vis_diff)
+
+        
+        #ACA HAY QUE CONSIDERAR SOLO LOS VALIDOS!!!
         temp7_bkg_mean = mean(bTemp7[rango_ventana]) #Temperatura media en canal 7
         temp14_bkg_mean = mean(bTemp14[rango_ventana]) #Temperatura media en canal 14
-        vis_mean_bkg = mean(vis_brightness[rango_ventana]) #Brillo visible medio             temp7_bkg_std_dev = std_dev(bTemp7[rango_ventana]) #Desviacion estandar de canal 7
+        vis_mean_bkg = mean(vis_brightness[rango_ventana]) #Brillo visible medio             
+        temp7_bkg_std_dev = std_dev(bTemp7[rango_ventana]) #Desviacion estandar de canal 7
         temp14_bkg_std_dev = std_dev(bTemp14[rango_ventana]) #Desviacion estandar de canal 14
-        vis_bkg_histogram_stddev = ... 
-        histogram_bin_largest_count = ...
+        vis_bkg_histogram_stddev = std_dev(list_vis)
+        histogram_bin_largest_count = arg_max(hist_vis)
         number_passes_in_bkg_stadistics = iter #Cantidad de incrementos de ventana
         sum_of_values_comp_bkg_temp7 = sum(bTemp7[rango_ventana]) #Suma de temperaturas canal 7
         sum_of_values_comp_bkg_temp14 = sum(bTemp14[rango_ventana]) #Suma de temperaturas canal 14
-        idx_cld_bkg = ...
-        bkg_count_idx = ...
-        temp4_bkg_histogram = ...
-        temp11_bkg_histogram = ...
-        temp4_bkg_histogram_stddev = ...
-        temp11_bkg_histogram_stddev = ...
-        std_dev_7_14_temp_diff = stddev(bTemp7[rango_ventana] - bTemp14[rango_ventana])
-        vis_diff_histogram = ...
-        vis_histogram_variance = ...
-        vis_histogram_stddev = ...
+        idx_cld_bkg = pixeles_validos
+        bkg_count_idx = pixeles_validos/((2*tam_ventana+1)**2)
+        temp7_bkg_histogram = hist_bTemp7_mean
+        temp14_bkg_histogram = hist_bTemp14_mean
+        temp4_bkg_histogram_stddev = hist_bTemp7_std_dev
+        temp11_bkg_histogram_stddev = hist_bTemp14_std_dev
+        std_dev_7_14_temp_diff = std_dev(bTemp7[rango_ventana] - bTemp14[rango_ventana])
+        vis_diff_histogram = hist_vis_mean
+        vis_histogram_variance = sqrt(hist_vis_std_dev)
+        vis_histogram_stddev = hist_vis_std_dev
         temp4_bkg_avg = ... #A cual vecindad se refiere??
         temp4_stddev = ...
         temp11_bkg_avg = ...
         temp11_stddeve = ...
-        rad_4mu_11mu_avg_diff = ...
+        rad_4mu_11mu_avg_diff = ... #Esto es el reflb
         rad_diff_sigma = ...
 
-    
+        reflb = rad_4mu_11mu_avg_diff 
 
         #Seccion 3.4.2.6: Determine contextual thresholds 
 
@@ -571,7 +618,7 @@ for(i in 0..L-1):
         #Calculos finales 
         area_incendio = p*area_pixel 
         sigma = 5.67e-8 #constante de Stefan-Boltzmann
-        frp_mir = area_pixel*sigma*(rad_mir-rad_bkg_mir) #Cuales valores de rad?
+        
 
 
 
@@ -593,7 +640,14 @@ for(i in 0..L-1):
 
         #Seccion 3.4.2.12: Subpixel characterization: FRP 
         
+        frp = -99
 
+        if(mascara_fuego[i,j] not in (11,12,15) and iter <= 10):
+            frp = area_pixel*sigma*(rad_mir-rad_bkg_mir) #Cuales valores de rad?
+        else:
+            frp = -9
+
+        frp_mir = area_pixel*sigma*(rad_mir-rad_bkg_mir) #Cuales valores de rad?
         #Seccion 3.4.2.13 End part I
 
         if(#Potencial pixel de fuego):

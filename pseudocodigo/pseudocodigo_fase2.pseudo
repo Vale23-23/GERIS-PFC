@@ -14,10 +14,10 @@ list lista_candidatos #Lista con datos de posibles pixeles de incendio
 #==========================#
 #Eliminar falsas alarmas
 #==========================#
-foreach (candidato in lista_candidatos) {
-    brTemp_ch7 = candidato.brTemp_ch7 
-    brTemp_ch14 = candidato.brTemp_ch14
-    brTemp_ch7_bkg = candidato.brTemp_ch7_bkg
+foreach (candidato in lista_candidatos) 
+    bTemp7 = candidato.bTemp7 
+    bTemp14 = candidato.brTemp_ch14
+    bTemp7_bkg = candidato.bTemp7_bkg
     refl = candidato.refl 
     reflb = candidato.reflb
     num_pasadas = candidato.number_passes_in_bkg_stadistics
@@ -29,10 +29,10 @@ foreach (candidato in lista_candidatos) {
 
     #Realizo tres pruebas, si el pixel pasa alguna entonces lo elimino de la lista 
     #OJO: threshold de refl-reflb es otro esta vez
-    std_dev_reflb_parte2 = ...
-    if( (brTemp_ch7 - brTemp_ch7_bkg < 2 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test)) or 
-        (brTemp_ch7 < 290 + ajuste_dia and brTemp_ch7-brTemp_ch7_bkg<10 and brTemp_ch7-brTemp_ch14 < 25 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test)) or 
-        (brTemp_ch7 < 290 + ajuste_diaand and brTemp_ch7_bkg < 280 + ajuste_dia and num_pasadas >= 10 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test))
+    std_dev_reflb_parte2 = max(2.5, 2.5*std_dev(reflb))
+    if( (bTemp7 - bTemp7_bkg < 2 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test)) or 
+        (bTemp7 < 290 + ajuste_dia and bTemp7-bTemp7_bkg<10 and bTemp7-brTemp_ch14 < 25 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test)) or 
+        (bTemp7 < 290 + ajuste_diaand and bTemp7_bkg < 280 + ajuste_dia and num_pasadas >= 10 and (refl - reflb < std_dev_reflb_parte2 or #pasar along scan_line test))
     ): 
         lista_candidatos.remove(candidato)
         continue
@@ -40,41 +40,76 @@ foreach (candidato in lista_candidatos) {
     #Realizo otro test sobre bordes de nubes 
     albedo = candidato.albedo 
     albedo_bkg = candidato.albedo_bkg
-    if((albedo > 0.25 or albedo -albedo_bkg >= 0.1) and brTemp_ch7 < 292.5 + ajuste_dia and (flag == 9 or flag == 10)):
+    if((albedo > 0.25 or albedo -albedo_bkg >= 0.1) and bTemp7 < 292.5 + ajuste_dia and (flag == 9 or flag == 10)):
         flag = 11
 
     
-}
-
-#==========================#
-#Seccion 3.4.2.15
-#==========================#
-#Determinar categoria de fuego
-#==========================#
-#10 o 30: procesado para estimacion subpixel de tamaño de incendio y temperatura
-#11 o 31: pixel saturado  
-#12 o 32: pixel parcialmente con nube o pixel con humo 
-#13 o 33: probabilidad alta  de incendio
-#14 o 34: probabilidad media de incendio 
-#15 o 35: probabilidad baja de incendio 
-#==========================#
-...
-...
-...
-
-#==========================#
-#Seccion 3.4.2.16
-#==========================#
-#Filtrado temporal
-#==========================#
-
-#Si se detecto un incendio cerca del pixel en las ultimas 12 horas se le agrega un codigo de mascara que indica que se filtro temporalmente  al pixel
 
 
+    #==========================#
+    #Seccion 3.4.2.15
+    #==========================#
+    #Determinar categoria de fuego
+    #==========================#
+    #10 o 30: procesado para estimacion subpixel de tamaño de incendio y temperatura
+    #11 o 31: pixel saturado  
+    #12 o 32: pixel parcialmente con nube o pixel con humo 
+    #13 o 33: probabilidad alta  de incendio
+    #14 o 34: probabilidad media de incendio 
+    #15 o 35: probabilidad baja de incendio 
+    #==========================#
+    
+
+
+    winsize_offset = min(5,number_passes_in_bkg_stadistics/3)
+
+    first_high_threshold = max(7,winsize_offset + 5 + 2*candidato.bTemp_bkg_std_dev)
+    second_high_threshold = max(7,winsize_offset + 5 + (bTemp7-bTemp14) + 2*candidato.bTemp_diff_std_dev)
+    first_medium_threshold = max(5,winsize_offset + 3 + 2*candidato.bTemp_bkg_std_dev)
+    second_medium_threshold = max(5,winsize_offset + 3 + (bTemp7-bTemp14) + 2*candidato.bTemp_diff_std_dev)
+
+    if(flag in (3,4,6,8) and (refl-reflb >= std_dev_reflb_parte2 or pass_along_scan_line_test)):
+        if((bTemp7-bTemp7_bkg > first_high_threshold) and (bTemp7_bkg-bTemp14_bkg > second_high_threshold)):
+            flag += 30
+        else if((bTemp7-bTemp7_bkg > first_medium_threshold) and (bTemp7_bkg-bTemp14_bkg > second_medium_threshold)):
+            flag += 20
+
+
+
+    fire_temp = candidato.Tt
+    code = 0
+    if(fire_temp > 400):
+        code = 10
+    else if(fire_tmep == 0):
+        code = 11
+    else if(flag == 9 or flag == 10):
+        code = 12
+    else if((30 < flag < 40) and fire_temp < 0):
+        code = 13
+    else if((20 < flag < 30) and fire_temp < 0):
+        code = 14
+    else if( (flag == 11 or flag < 9) and fire_temp < 0):
+        code = 15
+    
+    #==========================#
+    #Seccion 3.4.2.16
+    #==========================#
+    #Filtrado temporal
+    #==========================#
+
+    #Si se detecto un incendio cerca del pixel en las ultimas 12 horas se le agrega un codigo de mascara que indica que se filtro temporalmente  al pixel
+    h,v = candidato.coord_h,candidato.coord_v
+    hora = get_time() #Hora actual 
+
+    for(i in -1..1):
+        for(j in -1..1):
+            if(distancia_horas(hora,mascara_fuego_anterior[h-i,v-j]) < 12):
+                code += 20
+
 
 
 #==========================#
-           OUTPUT
+        OUTPUT
 #==========================#
 res = (
     mascara_fuego, #Array WxL
