@@ -252,6 +252,8 @@ for(i in 0..L-1):
         tam_ventana = 5 #Comienzo con 5 pixeles en cada direccion, o sea, 11x11
         fin = false
         pixeles_validos = 0
+        coordenadas_validos = []
+        #Falta acuidar no salirme de rango de la ventana al iterar
         while( !fin and iter < 10):
             for(x in i-tam_ventana..i+tam_ventana):
                 for(y in j-tam_ventana..j+tam_ventana):
@@ -263,7 +265,7 @@ for(i in 0..L-1):
                        vis_brightness[i,j] >= 1 and albedo[i,j] < 0.38
                     ):
                         pixeles_validos += 1 
-
+                        coordenadas_validos.append((x,y))
 
 
                     #Si tengo 20% de validos entonces ya tengo mi tam_ventana
@@ -328,17 +330,17 @@ for(i in 0..L-1):
         hist_vis_std_dev = std_dev(list_vis_diff)
 
         
-        #ACA HAY QUE CONSIDERAR SOLO LOS VALIDOS!!!
-        temp7_bkg_mean = mean(bTemp7[rango_ventana]) #Temperatura media en canal 7
-        temp14_bkg_mean = mean(bTemp14[rango_ventana]) #Temperatura media en canal 14
-        vis_mean_bkg = mean(vis_brightness[rango_ventana]) #Brillo visible medio             
-        temp7_bkg_std_dev = std_dev(bTemp7[rango_ventana]) #Desviacion estandar de canal 7
-        temp14_bkg_std_dev = std_dev(bTemp14[rango_ventana]) #Desviacion estandar de canal 14
+
+        temp7_bkg_mean = mean(bTemp7[coordenadas_validos]) #Temperatura media en canal 7
+        temp14_bkg_mean = mean(bTemp14[coordenadas_validos]) #Temperatura media en canal 14
+        vis_mean_bkg = mean(vis_brightness[coordenadas_validos]) #Brillo visible medio             
+        temp7_bkg_std_dev = std_dev(bTemp7[coordenadas_validos]) #Desviacion estandar de canal 7
+        temp14_bkg_std_dev = std_dev(bTemp14[coordenadas_validos]) #Desviacion estandar de canal 14
         vis_bkg_histogram_stddev = std_dev(list_vis)
         histogram_bin_largest_count = arg_max(hist_vis)
         number_passes_in_bkg_stadistics = iter #Cantidad de incrementos de ventana
-        sum_of_values_comp_bkg_temp7 = sum(bTemp7[rango_ventana]) #Suma de temperaturas canal 7
-        sum_of_values_comp_bkg_temp14 = sum(bTemp14[rango_ventana]) #Suma de temperaturas canal 14
+        sum_of_values_comp_bkg_temp7 = sum(bTemp7[coordenadas_validos]) #Suma de temperaturas canal 7
+        sum_of_values_comp_bkg_temp14 = sum(bTemp14[coordenadas_validos]) #Suma de temperaturas canal 14
         idx_cld_bkg = pixeles_validos
         bkg_count_idx = pixeles_validos/((2*tam_ventana+1)**2)
         temp7_bkg_histogram = hist_bTemp7_mean
@@ -349,12 +351,12 @@ for(i in 0..L-1):
         vis_diff_histogram = hist_vis_mean
         vis_histogram_variance = sqrt(hist_vis_std_dev)
         vis_histogram_stddev = hist_vis_std_dev
-        temp4_bkg_avg = ... #A cual vecindad se refiere??
-        temp4_stddev = ...
-        temp11_bkg_avg = ...
-        temp11_stddeve = ...
-        rad_4mu_11mu_avg_diff = ... #Esto es el reflb
-        rad_diff_sigma = ...
+        temp7_bkg_avg = mean(bTemp7[rango_ventana])
+        temp7_stddev = std_dev(bTemp7[rango_ventana])
+        temp14_bkg_avg = mean(bTemp14[rango_ventana])
+        temp14_stddeve = std_dev(bTemp14[rango_ventana])
+        rad_4mu_11mu_avg_diff = mean(refl[rango_ventana]) #Esto es el reflb
+        rad_diff_sigma = std_dev(refl[rango_ventana])
 
         reflb = rad_4mu_11mu_avg_diff 
 
