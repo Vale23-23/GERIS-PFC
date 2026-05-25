@@ -157,7 +157,7 @@ def validate(model, loader, device):
     return total_loss / n, total_iou / n
 
 
-def main(cfg_path="config.yaml"):
+def main(cfg_path="config.yaml", limit=None):
     # ── 1. Cargar configuración ──────────────────────────────────────────────
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
@@ -168,7 +168,7 @@ def main(cfg_path="config.yaml"):
     # ── 2. Construir datasets y dataloaders ──────────────────────────────────
     # build_datasets descubre los timestamps válidos, divide train/val y
     # normaliza usando las stats del set de entrenamiento.
-    train_ds, val_ds = build_datasets(cfg)
+    train_ds, val_ds = build_datasets(cfg, limit=limit)
 
     # DataLoader se encarga de armar los batches y mezclar los datos en cada época
     train_loader = DataLoader(
@@ -240,5 +240,6 @@ def main(cfg_path="config.yaml"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--limit", type=int, default=None, help="Cantidad máxima de timestamps a usar")
     args = parser.parse_args()
-    main(args.config)
+    main(args.config, limit=args.limit)

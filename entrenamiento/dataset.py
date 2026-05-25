@@ -154,10 +154,10 @@ class GOESFireDataset(Dataset):
         )
 
 
-def build_datasets(cfg):
+def build_datasets(cfg, limit=None):
     """
     Construye los datasets de entrenamiento y validación a partir del config.
-
+    limit: Int opcional para usar solo una fracción del dataset (para pruebas).
     Flujo:
       1. Descubre todos los timestamps que tienen TODOS los archivos requeridos
       2. Los mezcla aleatoriamente y los divide en train/val según val_split
@@ -204,6 +204,10 @@ def build_datasets(cfg):
         print(f"⚠️  {invalid_count} timestamps descartados (máscara inválida — región no procesada)")
 
     all_ts = valid_ts
+
+    if limit is not None and limit < len(all_ts):
+        print(f"✂️  Limitando dataset a los primeros {limit} timestamps.")
+        all_ts = all_ts[:limit]
 
     if not all_ts:
         raise RuntimeError(f"No se encontraron timestamps válidos en {root}")
