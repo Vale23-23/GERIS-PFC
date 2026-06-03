@@ -77,6 +77,14 @@ def distancia(p1,p2):
     lat1,lat2 = latitudes[p1], latitudes[p2]
     angulo_central =arccos(sin(lat1)*sin(lat2)+cos(long1)*cos(long2)*cos(abs(long2-long1)))
     return 6378*angulo_central #Radio de la Tierra
+#==DEFINICIONES==#
+class output_phase1 #Se usa en build_phase1_output
+class output_phase2 #Se usa en build_output
+#==VARIABLES==#
+array[L,W] mascara_fuego
+array[L,W] fire_sizes
+array[L,W] fire_temps 
+array[L,W] frp
 #==================================================================================================================================#
 #3.4.2.2
 refl = calculate_refl() 
@@ -101,11 +109,12 @@ for(i in 0..L-1):
         area_pixel = -9
         fail_char = 0 #Flag
         codigo = 100
-        #Si es pixel de espacio deberia ser 40 el codigo
+        #Si es pixel de espacio deberia ser 40 el codigo, si solo vamos a ver Uruguay creo que no hace falta mirar esto
         
         #3.4.2.3
         codigo, pasa_tests_iniciales = run_initial_tests(i,j) 
         if(codigo in (50,60,120,121,122,123,124,126,127,150,151,152,153)):
+            mascara_fuego[i,j] = codigo
             continue #Avanzo al siguiente pixel
         bTemp7_min, bTemp7_refl_threshold = calculate_minumum_thresholds(i,j) 
         if(codigo == 100):
@@ -113,12 +122,14 @@ for(i in 0..L-1):
         #3.4.2.4
         codigo_along_scan = run_along_scan_reflectivity_test(i,j,bTemp7_min)
         if(codigo_along_scan  == 240 or codigo_along_scan == 245):
+            mascara_fuego[i,j] = codigo
             continue
         flag_saturacion, fail_char = check_for_saturation(i,j)
         #3.4.2.5
         estadisticas_fondo,iters,porcentaje_validos = calculate_bkg_stats(i,j,max_iters_bkg)
         if(iters > max_iters_bkg and porcentaje_validos < 0.2):
             codigo = 170
+            mascara_fuego[i,j] = codigo
             continue 
         temp7_bkg_mean, temp14_bkg_mean, vis_brightness = decide_bkg_method(estadisticas_fondo)
         #3.4.2.6
@@ -130,6 +141,7 @@ for(i in 0..L-1):
             temp_negativa, bTemp7_corr,bTemp14_corr,bTemp_bkg_corr = apply_corrections(i,j)
             if(temp_negativa):
                 codigo = 180
+                mascara_fuego[i,j] = codigo
                 continue 
             #3.4.2.9
             flag = run_post_correction_tests(i,j)
@@ -142,16 +154,21 @@ for(i in 0..L-1):
         if(last_chance_tests):
             falla_last_chance, temp_incendio,tam_incendio = run_last_chance_tests(i,j)
             if(falla_last_chance):
+                mascara_fuego[i,j] = codigo
                 continue
         if(last_chance_tests or last_chance_tests_desde_seccion_7):
             codigo, area_negativa = run_last_chance_tests_area(i,j,codigo,area_pixel)
             if(area_negativa):
                 code = 188
+                mascara_fuego[i,j] = codigo
                 continue
         #3.4.2.12
         frp = calculate_frp(i,j,codigo,iters)
+        frp[i,j] = frp
         #3.4.2.13
         lista_fase_1.append(build_phase1_output(i,j))
+        mascara_fuego[i,j] = codigo
+
         cant_candidatos += 1
 
 #=============================================================FASE 2===============================================================#
@@ -167,10 +184,18 @@ for candidato in lista_fase_1:
         lista_fase_1.remove(candidato)
     else:
         fail_char = 11
+        Tt = candidato.Tt 
+        if(Tt >= 400):
+            fire_sizes[i,j] = candidato.pixel_area*candidato.p
+            fire_temps[i,j] = Tt 
+        else:
+            fire_sizes[i,j] = fire_temps[i,j] = -999
     #3.4.2.15
     codigo, flag = determine_fire_category(i,j) 
     #3.4.2.16
     codigo = run_temporal_filter(i,j)
+
+    mascara_fuego[i,j] = codigo
 #3.4.2.17
 final_output = build_output()
 
@@ -790,8 +815,10 @@ def calculate_frp(i,j,code,iters_bkg):
 
     return frp
 
-def build_phase1_output(i,j,bkg_stats,  iter_bkg, adj_values, Tt, p, fire_area, pixel_area, frp, fail_char):
-    res = []
+
+
+def build_phase1_output(i,j,bkg_stats,  iter_bkg, contextual_thresholds, adj_values, Tt, p, fire_area, pixel_area, frp, fail_char):
+    res = output_phase1()
     res.lat = latitudes[i,j]
     res.long = longitudes[i,j]
     res.i = i
@@ -799,39 +826,55 @@ def build_phase1_output(i,j,bkg_stats,  iter_bkg, adj_values, Tt, p, fire_area, 
     res.id = cant_candidatos
     res.emis7 = emisividad7[i,j]
     res.emis14 = emisividad14[i,j]
-    res.append()
-    res.append()
+    res.sum_of_bkg_temps_ch7 = bkg_stats[8]
+    res.sum_of_bkg_temps_ch14 = bkg_stats[9]
     res.bkg_count = bkg_count
     res.bTemp7_bkg = bTemp7_bkg
     res.bTemp14_bkg = bTemp14_bkg
-    res.append()
-    res.append()
+    res.temp7_bkg_std_dev = bkg_stats[3]
+    res.temp14_bkg_std_dev = bkg_stats[4]
     res.bTemp7 = bTemp7[i,j]
-    res.bTemp7 = bTemp14[i,j]
-    res.append()
-    res.append()
+    res.bTemp14 = bTemp14[i,j]
+    res.min_temp_diff = contextual_thresholds[0]
+    res.min_subpixel_fire_temp = 400
     res.bTemp_bkg_adj = bTemp_bkg_adj
-    res.bTemp_bkg_adj = bTemp7_adj
+    res.bTemp7_adj = bTemp7_adj
     res.bTemp14_adj = bTemp14_adj
     res.Tt = Tt
     res.p = p
     res.fire_area = fire_area
     res.frp = frp
     res.iter_bkg = iter_bkg
-    res.append()
+    res.land_cover_value = cobertura_terrestre[i,j]
     res.fail_char = fail_char
     res.sza = angulo_zenit_sol[i,j]
-    res.append()
-    res.append()
-    res.append()
-    res.append()
-    res.append()
+    res.visible_brightness = vis_brightness[i,j]
+    res.mean_bkg_brightness = bkg_stats[2]
+    res.mean_bkg_brightness_histogram = bkg_stats[6]
+    res.albedo = albedo[i,j]
+    res.bkg_albedo = albedo_bkg
     res.date = getDate() #Fecha
     res.time = getTime() #Hora UTC HHMMSS
     res.pixel_area = pixel_area
-    res.append()
-    res.append()
-    res.rel_angñe = angulo_relativo[i,j]
+    res.local_zenith_angle = ang_cenital_local[i,j]
+    res.solar_zenith_angle = ang_cenital_sol[i,j]
+    res.rel_angle = azimut_relativo[i,j]
+    res.temp7_bkg_histogram =   bkg_stats[12]
+    res.temp14_bkg_histogram =   bkg_stats[13]
+    res.temp7_bkg_std_dev_histogram = bkg_stats[14]
+    res.temp14_bkg_std_dev_histogram = bkg_stats[15]
+    res.bkg_temp_diff_std_dev = bkg_stats[16]
+    res.vis_bkg_histogram_std_dev = bkg_stats[5] 
+    res.vis_bkg_diff_histogram = bkg_stats[6] 
+    res.vis_brightness.final = vis_brightness
+    res.refl = refl[i,j]
+    res.reflb = bkg_stats[24]
+    res.refl_std_dev = bkg_stats[25]
+    res.refl_diff_left = refl[i,j] - refl[i,j-2]
+    res.refl_diff_right = refl[i,j] - refl[i,j+2]
+    res.pass_along_scan_line_test = contextual_thresholds[4]
+    
+    return res
 
 
 #==================================================================================================================================#
@@ -923,4 +966,42 @@ def run_temporal_filter(i,j):
                 code += 20
     return code
 
+
 def build_output():
+    res = output_phase2()
+    #Mascara de codigos 
+    res.fire_mask_codes = mascara_fuego
+    #Tamaños de incendio 
+    res.subpixel_fire_size = fire_sizes
+    #Temperaturas de incendio 
+    res.subpixel_fire_temperature = fire_temps
+    #FRP 
+    res.subpixel_fire_radiative_power  = frp
+    #Mascara anterior 
+    res.previous_fire_mask = mascara_fuego_anterior
+    #Flags QA 
+    array[L,W] qa_flags
+    for(i in 0..L-1):
+        for(k in 0..W-1):
+            codigo = mascara_fuego[i,j]    
+            #Incendios válidos 
+            if( (10 <= codigo <= 15) or (20 <= codigo <= 25) or (30 <= codigo <= 35) ):
+                qa_array[i,j] = 0         
+            #Píxel de tierra libre de fuego
+            else if (codigo == 100):
+                qa_array[i,j] = 1        
+            #Falla en tests de nubes opacas
+            else if(codigo in (200, 201, 205, 210, 215, 220, 225, 230, 240, 245)):
+                qa_array[i,j] = 2    
+            #Píxel inutilizable
+            else if(codigo in (0, 40, 50, 60, 130, 150, 151, 152, 153, 155)):
+                qa_array[i,j] = 3  
+            #Datos de entrada corruptos o malos
+            else if(codigo in (120, 121, 122, 123, 124, 125, 126, 127, 160)):
+                qa_array[i,j] = 4 
+            #Falla en un cálculo del algoritmo (background, Dozier, area, etc)
+            else if(codigo in (170, 180, 182, 185, 186, 187, 188)):
+                qa_array[i,j] = 5
+    #Metadatos 
+
+    return res
