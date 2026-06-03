@@ -2,7 +2,6 @@ satellite: 19
 domain: F
 max_workers: 4
 output_root: dataset
-
 regions:
   uruguay:
     lat_min: -35.5
@@ -14,8 +13,8 @@ regions:
     lat_max: -28.0
     lon_min: -62.0
     lon_max: -48.0
-
 products:
+  # ── Bandas que ya existían (modelo de detección) ──────────────────────────
   - id: ABI-L1b-Rad-B07
     product: ABI-L1b-Rad
     band: 7
@@ -36,3 +35,25 @@ products:
     variable: DQF
     dtype: int8
     description: "Fire detection mask - ground truth label"
+
+  # ── Bandas nuevas para FDCA ───────────────────────────────────────────────
+  - id: ABI-L1b-Rad-B13
+    product: ABI-L1b-Rad
+    band: 13
+    variable: Rad
+    dtype: float32
+    description: "Longwave IR 10.3µm - FPT hybrid channel (FDCA ATBD 3.4.2.2)"
+
+  - id: ABI-L1b-Rad-B15
+    product: ABI-L1b-Rad
+    band: 15
+    variable: Rad
+    dtype: float32
+    description: "Longwave IR 12.3µm - split-window cloud test (FDCA ATBD 3.4.2.3)"
+
+  - id: ABI-L1b-Rad-B02
+    product: ABI-L1b-Rad
+    band: 2
+    variable: Rad
+    dtype: float32
+    description: "Visible 0.64µm - reflectance / cloud / glint test (FDCA refl2)"
