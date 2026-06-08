@@ -314,7 +314,8 @@ def load_fdca_input(
     base = os.path.join(dataset_root, region)
 
     # ── Parsear timestamp ──────────────────────────────────────────────────────
-    dt = datetime.strptime(timestamp, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc)
+    #dt = datetime.strptime(timestamp, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc) antes
+    dt = datetime.strptime(timestamp, "%Y%m%d_%H%M")  # sin timezone, fdca.py lo maneja internamente
 
     # ── Función auxiliar para leer .npy ────────────────────────────────────────
     def load_band(band_id: str, required: bool = False) -> np.ndarray | None:
@@ -335,10 +336,18 @@ def load_fdca_input(
     if verbose:
         print(f"\n[ Cargando inputs para {timestamp} | región: {region} ]")
 
-    rad7  = load_band("ABI-L1b-Rad-B07", required=True)
-    rad14 = load_band("ABI-L1b-Rad-B14", required=True)
-    rad13 = load_band("ABI-L1b-Rad-B13", required=False)
-    rad15 = load_band("ABI-L1b-Rad-B15", required=False)
+
+    rad7  = load_band("ABI-L1b-Rad-B07", required=True) * 1e6   # W/μm → W/m
+    rad14 = load_band("ABI-L1b-Rad-B14", required=True) * 1e6
+    rad13 = load_band("ABI-L1b-Rad-B13") 
+    if rad13 is not None: rad13 = rad13 * 1e6
+    rad15 = load_band("ABI-L1b-Rad-B15")
+    if rad15 is not None: rad15 = rad15 * 1e6
+    # B02 NO se convierte — es banda visible, no pasa por Planck
+    #rad7  = load_band("ABI-L1b-Rad-B07", required=True)
+    #rad14 = load_band("ABI-L1b-Rad-B14", required=True)
+    #rad13 = load_band("ABI-L1b-Rad-B13", required=False)
+    #rad15 = load_band("ABI-L1b-Rad-B15", required=False)
     rad02 = load_band("ABI-L1b-Rad-B02", required=False)
 
     if verbose:
@@ -377,7 +386,15 @@ def load_fdca_input(
     bt15 = rad_to_bt(15, rad15) if rad15 is not None else None
 
     # ── Reflectancia B02 ──────────────────────────────────────────────────────
-    refl2 = rad_b02_to_reflectance(rad02, sza) if rad02 is not None else None
+    if rad02 is not None:
+        # Submuestrear B02 de (893,1212) a (224,303) promediando bloques
+        from PIL import Image
+        H, W = shape
+        img = Image.fromarray(rad02).resize((W, H), Image.BILINEAR)
+        rad02_resized = np.array(img, dtype=np.float32)
+        refl2 = rad_b02_to_reflectance(rad02_resized, sza)
+    else:
+        refl2 = None
 
     if verbose:
         print(f"\n  {'BT7 range [K]':<22}: {np.nanmin(bt7):.1f} – {np.nanmax(bt7):.1f}")
