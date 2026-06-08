@@ -11,3 +11,5 @@ segmentation-models-pytorch
 huggingface_hub
 geopandas
 shapely
+h5py
+boto3
