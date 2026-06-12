@@ -1,1 +1,32 @@
+# Credenciales y variables de entorno
 .env
+
+# Dataset — nunca subir al repo, usar Hugging Face
+obtencion_imagenes/dataset/
+
+# Archivos de datos
+*.npy
+*.npz
+*.nc
+
+# Entorno virtual
+.venv/
+
+# Checkpoints del modelo
+entrenamiento/checkpoints/
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Caché de goes2go (descarga archivos NetCDF localmente)
+goes2go/
+~/data/
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+prueba.ipynb
