@@ -62,7 +62,7 @@ def download_highres(timestamp, product_cfg, region_cfg, satellite, domain):
 
     band = product_cfg.get("band")
     g = GOES(satellite=satellite, product=product_cfg["product"], domain=domain,
-             bands=band, timeout=60)
+             bands=band) #GOES NO TIENE TIMEOUT COMO PARAMETRO!!!
 
     # Solo obtener la lista de archivos, sin abrirlos
     files_df = g.nearesttime(timestamp, return_as="filelist")
@@ -161,7 +161,7 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
         else:
             # Flujo normal: goes2go carga el dataset completo en memoria
             g  = GOES(satellite=satellite, product=product_cfg["product"], domain=domain,
-                      bands=band if band else None, timeout=30)
+                      bands=band if band else None) 
             ds = g.nearesttime(timestamp)
             xs, ys = goes_xy_slices(ds, **region_cfg)
             data = ds.sel(x=xs, y=ys)[product_cfg["variable"]].values
