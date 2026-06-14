@@ -85,7 +85,7 @@ def compute_solar_zenith(lat: np.ndarray, lon: np.ndarray, dt: datetime) -> np.n
 
     # Ecuación del tiempo (corrección de minutos solares)
     eot = (9.87 * np.sin(2*B) - 7.53 * np.cos(B) - 1.5 * np.sin(B)) / 60.0
-    lstm = 15.0 * round(hour_utc)   # meridiano estándar más cercano
+    lstm = 0.0   # hour_utc ya está referido al meridiano de Greenwich
     tc   = 4.0 * (lon - lstm) + 60.0 * eot
     hour_local = hour_utc + tc / 60.0
     hour_angle = np.radians(15.0 * (hour_local - 12.0))
@@ -331,24 +331,65 @@ def load_fdca_input(
                 )
             return None
         return np.load(path)
+    
+   
+    def load_planck_coeffs(base: str, band_id: str, timestamp: str) -> dict | None:
+        """Lee los coeficientes Planck (*_planck.json) generados por downloader.py
+        y los mapea a los nombres esperados por planck_temp_from_coeffs (fk1, fk2, bc1, bc2)."""
+        path = os.path.join(base, band_id, f"{timestamp}_planck.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            raw = json.load(f)
+        return {
+            "fk1": raw["planck_fk1"],
+            "fk2": raw["planck_fk2"],
+            "bc1": raw["planck_bc1"],
+            "bc2": raw["planck_bc2"],
+        }
 
-    # ── Leer radiancias ────────────────────────────────────────────────────────
-    if verbose:
-        print(f"\n[ Cargando inputs para {timestamp} | región: {region} ]")
+    # Radiancias crudas tal cual vienen del .nc — SIN conversión manual de unidades.
+    # Su unidad nativa es mW m-2 sr-1 (cm-1)-1, y se invierten a BT usando
+    # los coeficientes Planck propios de cada archivo (planck_temp_from_coeffs).
+    rad7_raw  = load_band("ABI-L1b-Rad-B07", required=True)
+    rad14_raw = load_band("ABI-L1b-Rad-B14", required=True)
+    rad13_raw = load_band("ABI-L1b-Rad-B13")
+    rad15_raw = load_band("ABI-L1b-Rad-B15")
+    rad02     = load_band("ABI-L1b-Rad-B02", required=False)
 
+    coeffs7  = load_planck_coeffs(base, "ABI-L1b-Rad-B07", timestamp)
+    coeffs14 = load_planck_coeffs(base, "ABI-L1b-Rad-B14", timestamp)
+    if coeffs7 is None or coeffs14 is None:
+        raise FileNotFoundError(
+            f"Faltan coeficientes Planck (*_planck.json) para {timestamp}.\n"
+            f"Re-descargá B07/B14 con la versión actualizada de downloader.py "
+            f"(borrá los .npy existentes y volvé a correr 'pipeline.py download')."
+        )
 
-    rad7  = load_band("ABI-L1b-Rad-B07", required=True) * 1e6   # W/μm → W/m
-    rad14 = load_band("ABI-L1b-Rad-B14", required=True) * 1e6
-    rad13 = load_band("ABI-L1b-Rad-B13") 
-    if rad13 is not None: rad13 = rad13 * 1e6
-    rad15 = load_band("ABI-L1b-Rad-B15")
-    if rad15 is not None: rad15 = rad15 * 1e6
-    # B02 NO se convierte — es banda visible, no pasa por Planck
-    #rad7  = load_band("ABI-L1b-Rad-B07", required=True)
-    #rad14 = load_band("ABI-L1b-Rad-B14", required=True)
-    #rad13 = load_band("ABI-L1b-Rad-B13", required=False)
-    #rad15 = load_band("ABI-L1b-Rad-B15", required=False)
-    rad02 = load_band("ABI-L1b-Rad-B02", required=False)
+    from fdca.planck import planck_temp_from_coeffs, planck_rad
+
+    bt7  = planck_temp_from_coeffs(rad7_raw,  **coeffs7).astype(np.float32)
+    bt14 = planck_temp_from_coeffs(rad14_raw, **coeffs14).astype(np.float32)
+
+    coeffs13 = load_planck_coeffs(base, "ABI-L1b-Rad-B13", timestamp)
+    bt13 = (planck_temp_from_coeffs(rad13_raw, **coeffs13).astype(np.float32)
+            if (rad13_raw is not None and coeffs13 is not None) else None)
+
+    coeffs15 = load_planck_coeffs(base, "ABI-L1b-Rad-B15", timestamp)
+    bt15 = (planck_temp_from_coeffs(rad15_raw, **coeffs15).astype(np.float32)
+            if (rad15_raw is not None and coeffs15 is not None) else None)
+
+    # ── Regenerar radiancias "consistentes" en W·m⁻²·sr⁻¹·m⁻¹ ────────────────
+    # El resto del pipeline (Dozier, background, FRP) fue validado con
+    # planck_rad/planck_temp en esta unidad. Para mantener consistencia
+    # interna, recalculamos rad7/rad14/rad13/rad15 a partir del BT correcto
+    # (ya invertido con los coeficientes reales) usando planck_rad genérico.
+    # TODO: reescribir Dozier/background/FRP para trabajar nativamente en
+    # mW m-2 sr-1 (cm-1)-1 y eliminar este paso (ver fix riguroso pendiente).
+    rad7  = planck_rad(7,  bt7)
+    rad14 = planck_rad(14, bt14)
+    rad13 = planck_rad(13, bt13) if bt13 is not None else None
+    rad15 = planck_rad(15, bt15) if bt15 is not None else None
 
     if verbose:
         def band_info(name, arr):
@@ -379,11 +420,11 @@ def load_fdca_input(
         day_pct = 100 * (sza <= 85).mean()
         print(f"  {'Píxeles diurnos':<22}: {day_pct:.0f}%")
 
-    # ── Conversión radiancia → BT ──────────────────────────────────────────────
-    bt7  = rad_to_bt(7,  rad7)
-    bt14 = rad_to_bt(14, rad14)
-    bt13 = rad_to_bt(13, rad13) if rad13 is not None else None
-    bt15 = rad_to_bt(15, rad15) if rad15 is not None else None
+    # # ── Conversión radiancia → BT ──────────────────────────────────────────────
+    # bt7  = rad_to_bt(7,  rad7)
+    # bt14 = rad_to_bt(14, rad14)
+    # bt13 = rad_to_bt(13, rad13) if rad13 is not None else None
+    # bt15 = rad_to_bt(15, rad15) if rad15 is not None else None
 
     # ── Reflectancia B02 ──────────────────────────────────────────────────────
     if rad02 is not None:
