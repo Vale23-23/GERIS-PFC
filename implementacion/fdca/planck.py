@@ -112,3 +112,32 @@ def planck_deriv_T(band: int, T: float, p: float) -> float:
     x   = c2 / (lam * T)
     ex  = np.exp(x)
     return p * c1 * c2 / (lam**6 * T**2) * ex / (ex - 1.0)**2
+
+def planck_temp_from_coeffs(rad, fk1, fk2, bc1, bc2):
+    """
+    Inversión oficial NOAA (ABI L1b PUG, sección 4.2.4): radiancia cruda
+    del .nc -> temperatura de brillo [K].
+
+    rad debe ser la radiancia tal cual viene en la variable 'Rad' del .nc,
+    SIN ninguna conversión de unidades manual. fk1, fk2, bc1, bc2 son los
+    coeficientes propios de ESA banda y ESE archivo (planck_fk1, planck_fk2,
+    planck_bc1, planck_bc2), no constantes genéricas de constants.py.
+
+    Fórmula:
+        BT = (fk2 / ln(fk1/rad + 1) - bc1) / bc2
+
+    Parameters
+    ----------
+    rad : array-like
+        Radiancia cruda [mW m-2 sr-1 (cm-1)-1]
+    fk1, fk2, bc1, bc2 : float
+        Coeficientes de calibración leídos del .nc (o del *_planck.json)
+
+    Returns
+    -------
+    ndarray [K]
+    """
+    rad = np.asarray(rad, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        BT = (fk2 / np.log1p(fk1 / np.where(rad > 0, rad, np.nan)) - bc1) / bc2
+    return BT
