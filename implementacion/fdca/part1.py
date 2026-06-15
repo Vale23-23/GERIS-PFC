@@ -219,7 +219,7 @@ def run_part1(
     L, W = bt7.shape
 
     # ── Initialize outputs ────────────────────────────────────────────────────
-    fire_mask     = np.full((L, W), FireMask.FIRE_FREE, dtype=np.int32)
+    fire_mask     = np.full((L, W), FireMask.INIT, dtype=np.int32)
     fail_char_arr = np.full((L, W), FailChar.NONE,      dtype=np.int32)
     candidates:  List[FireCandidate] = []
     fire_id_ctr  = 0

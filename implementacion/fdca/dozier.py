@@ -102,7 +102,7 @@ def _solve_newton(
 
     converged = False
     for _ in range(DOZIER_NEWTON_MAX):
-        if Tt <= 0:
+        if not np.isfinite(Tt) or Tt <= 0:
             break
 
         B7  = p * planck_rad(7,  Tt)
