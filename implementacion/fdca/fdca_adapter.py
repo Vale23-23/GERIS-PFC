@@ -304,8 +304,8 @@ def load_fdca_input(
     FileNotFoundError  si faltan B07 o B14 (inputs mínimos obligatorios)
     """
     import yaml
-    sys.path.insert(0, str(Path(config_path).parent.parent))
-    from fdca import FDCAInput
+    #sys.path.insert(0, str(Path(config_path).parent.parent))
+    from .algorithm import FDCAInput
 
     # ── Cargar config ──────────────────────────────────────────────────────────
     with open(config_path) as f:
