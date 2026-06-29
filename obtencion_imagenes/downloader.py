@@ -74,9 +74,23 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
 
     band = product_cfg.get("band")
 
-    if os.path.exists(file_path):
-        return {"status": "exists", "path": file_path, "product": product_id,
-                "timestamp": timestamp.strftime("%Y%m%d_%H%M")}
+    # ¿Hace falta descargar la imagen?
+    need_npy = not os.path.exists(file_path)
+
+    # ¿Hace falta generar el JSON con los coeficientes Planck?
+    need_json = (
+        band in PLANCK_BANDS
+        and not os.path.exists(coeffs_path)
+    )
+
+    # Si ya existe todo lo necesario, no hacemos nada.
+    if not need_npy and not need_json:
+        return {
+            "status": "exists",
+            "path": file_path,
+            "product": product_id,
+            "timestamp": timestamp.strftime("%Y%m%d_%H%M"),
+        }
 
     print(f"    📥 Descargando {timestamp.strftime('%Y%m%d_%H%M')} {product_id}...", end="", flush=True)
     start_time = time.time()
@@ -109,10 +123,13 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
             return {"status": "empty", "path": None, "product": product_id,
                     "timestamp": timestamp.strftime("%Y%m%d_%H%M")}
 
-        dtype = np.float32 if product_cfg["dtype"] == "float32" else np.int8
-        np.save(file_path, data.astype(dtype))
+        # Guardar la imagen solo si hacía falta descargarla
+        if need_npy:
+            dtype = np.float32 if product_cfg["dtype"] == "float32" else np.int8
+            np.save(file_path, data.astype(dtype))
 
-        if planck_coeffs is not None:
+        # Guardar el JSON solo si hacía falta
+        if need_json and planck_coeffs is not None:
             with open(coeffs_path, "w") as f:
                 json.dump(planck_coeffs, f)
 
