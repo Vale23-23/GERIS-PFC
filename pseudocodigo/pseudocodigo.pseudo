@@ -1,0 +1,405 @@
+#Pseudocodigo algoritmo NOAA
+#Todas las temperaturas estan expresadas en K y los grados en º
+
+#La LUT de TPW tiene la siguiente estructura:
+#+----------------------------+---Angulo Zenit Satelite para Bin 1 de TPW (7 columnas)---+---Angulos para bin 2---+---...---+Angulos para bin 5---+
+#|TPW (1-5)                   |                                                          |                        |         |                     |
+#|Offset radianza             |                                                          |                        |         |                     |
+#|Transmitancia ch7 (trans_7) |                                                          |                        |         |                     |
+#|Transmitancia ch14          |                                                          |                        |         |                     |
+#|Offset absorcion ch7 (ext_7)|                                                          |                        |         |                     |
+#|Offset absorcion ch14       |                                                          |                        |         |                     |
+#+----------------------------+----------------------------------------------------------+------------------------+---------+---------------------+
+
+
+#=========CONSTANTES===========#
+#W = ancho de imagen, L = largo de imagen
+#BR_TEMP_MISS_VAL
+#SAT_TEMP = temperatura de saturacion
+#SAT_BUFF = 5
+
+
+#=========INPUTS===========#
+#Datos del ABI
+array[L,W] brTemp_ch7,brTemp_ch14, rad_ch7,rad_ch14 #Temperaturas de brillo y radianzas de bandas principales
+array[L,W] refl_ch2 #Reflectancia canal 2. Identificacion diurna de nubes, filtrado de reflectividad solar. Sampleado a 2 km (canal 2 tiene mejor resolucion que los otros)
+array[L,W] brTemp_ch13,brTemp_ch15,rad_ch13,rad_ch15 #Temperaturas de brillo y radianzas auxiliares. Identificacion de nubes opacas .
+array[L,W] longitudes,latitiudes,angulo_zenit_sol,angulo_resplandor_sol,angulo_zenit_local,azimut_relativo,angulo_relativo,data_quality_ABI #Datos auxiliares para cada pixel
+float FPT #Focal Point Temperature 
+#Datos auxiliares dinamicos
+array[L,W] ncep_tpw #Total precipitable water, modelo ncep gfs
+array[L,W] emisividad_ch7, emisividad_ch14 #Emisividad (uw baseline fit)
+array[L,W] mascara_fuego_anterior
+#Datos auxiliares estaticos
+array[L,W] cobertura_terrestre 
+array[L,W] mascara_tierra_mar 
+array[L,W] mascara_desierto #Para uruguay no se usa supongo
+table LUT_TPW_offset #Look-up table para offset de tpw
+#==========================#
+
+
+
+
+
+
+
+
+#=========FASE 1===========#
+#Loop sobre todos los pixeles
+#Identificacion y correccion
+#==========================#
+
+list pixeles_fuego #Lista con datos de potenciales pixeles de fuego detectados 
+
+#Calculo diferencia de radianzas entre canales 7 y 14
+#Las bandas son distintas asi que debo calcular la radianza equivalente en banda 7 para la temperatura de brillo de la banda 14
+#Planck(n,m) calcula usa la funcion de planck para calcular la radianza equivalente en el espacio de la banda m a partir de la temp. de la banda n
+rad_ch_14_a_7  = planck(14,7) 
+refl = rad_ch7 - rad_ch_14_a_7 
+#Repito para canal 13
+rad_ch13_a_7 = planck(13,7)
+refl_7_13 = rad_ch7 - rad_ch13_a_7
+if(FPT > 90): #FPT = Focal Plane Temperature. Si temperatura del sensor se pasa de los 90K, creo banda hibrida
+    for(i = 0..W-1):
+        for(j = 0..L-1):
+            refl[i,j] = min(abs(refl[i,j]),abs(refl_7_13[i,j])) #Tomo la menor diferencia absoluta de radianza
+
+
+
+#"Test data against thresholds"
+#Loop sobre todos los pixeles
+#Se realizan varios tests de umbral
+array[L,W] mascara_fuego #non space pixel = 40 <------------------- ????????
+
+#Inicializo mascara en 100
+for(i = 0..L-1):
+    for(j = 0..W-1):
+        mascara_fuego[i,j] = 100
+
+#Itero sobre todos los pixeles
+#"A solar logic flag indicating the pixel is sunlit is set if the solar zenith angle is greater than or equal to 0˚ and less than or equal to 85˚." <--- cual valor?
+#"If Channel 2 (0.64 µm) is available the Channel 2 reflectance is divided by the cosine of the solar zenith angle." <---no entendi para que es esto
+potencial_fuego = 0 #Contador de pixeles potencialmente con fuego
+
+for(i = 0..L-1):
+    for(j = 0..W-1):
+        if(angulo_zenit_sol[i,j] > 80): #Test de zenit solar
+            mascara_fuego[i,j] = 50
+        if(angulo_zenit_sol[i,j] < 10 or angulo_resplandor_sol[i,j] < 10):
+            mascara_fuego[i,j] = 60
+        if(brTemp_ch7[i,j] == BR_TEMP_MISS_VAL): #Pixel "malo" (missing value)
+            mascara_fuego[i,j] = 120 
+        if(brTemp_ch14[i,j] == BR_TEMP_MISS_VAL):
+            mascara_fuego[i,j] = 121
+        if(brTemp_ch7[i,j] > SAT_TEMP + SAT_BUFF): #Pixel "malo" (saturacion)
+            mascara_fuego[i,j] = 123
+        if(brTemp_ch7[i,j] > SAT_TEMP + SAT_BUFF):
+            mascara_fuego[i,j] = 124
+        if(brTemp_ch7[i,j] < 200): #Pixel inutilizable
+            mascara_fuego[i,j] = 126
+        if(brTemp_ch7[i,j] z 200): 
+            mascara_fuego[i,j] = 127
+        #=======#
+        #ACA IRIA TEST ECOSISTEMAS#
+        #=======#
+        if(rad_ch7[i,j] < 0 or rad_ch14[i,j] < 0):
+            mascara_fuego[i,j] = 125
+        if((brTemp_ch7[i,j] > 273 or brTemp_ch14[i,j] > 273) and (abs(brTemp_ch7[i,j] - brTemp_ch14[i,j]) <= 2)): #Umbral para actividad de fuego
+            mascara_fuego[i,j] = 100
+        elif(abs(brTemp_ch7[i,j] - brTemp_ch14[i,j]) < 2): #Pixel frio
+            mascara_fuego[i,j] = 201
+
+#Los umbrales para el canal 7 son constantes en la noche y variables durante el dia
+#En el dia se usa el angulo del zenit solar para calcularlos, no me queda claro si es pixel a pixel
+#Las lineas en donde se usen hay que revisarlas 
+umbral_temp_ch7 = 273 #Noche 
+umbral_refl = 315 #Noche 
+
+array[L,W] mascara_nubes
+ for(i = 0..L-1): 
+    for(j = 0..W-1):
+        mascara_nubes[i,j] = false
+
+
+#Este loop capaz se puede combinar con el anterior
+for(i = 0..L-1): 
+    for(j = 0..W-1):
+        if(dia(i,j)): #Si es de dia ajusto umbrales
+            umbral_temp_ch7 = 285 + 15*cos(angulo_zenit_sol[i,j])
+            umbral_refl = 315 + 5*cos(angulo_zenit_sol[i,j])
+        if(mascara_fuego[i,j] > 100): #Solo corro los siguientes tests si ya paso los del loop anterior 
+            if(brTemp_ch14[i,j] < 270):
+                mascara_fuego[i,j] = 200
+                mascara_nubes[i,j] = true 
+            if(brTemp_ch7[i,j] - brTemp_ch14[i,j] < -4):
+                mascara_fuego[i,j] = 205
+                mascara_nubes[i,j] = true 
+            if((brTemp_ch7[i,j] - brTemp_ch14[i,j] > 20) and (brTemp_ch7[i,j] < 285))
+                mascara_fuego[i,j] = 210
+                mascara_nubes[i,j] = true 
+            if(dia(i,j))
+                if(angulo_zenit_sol[i,j] <= 70 or  (angulo_zenit_sol[i,j] <= 60 and angulo_zenit_local[i,j] <= 60)): #Si es un pixel de dia, hago test de canal 2
+                    if(refl_ch2[i,j]/cos(angulo_zenit_sol[i,j]) > 0.38): #refl_ch2/cos(angulo_zenit_sol) es el albedo
+                        mascara_fuego[i,j] = 215
+                        mascara_nubes[i,j] = true 
+            if(ch15_available): #Si tengo canal 15, lo uso para testear
+                if(brTemp_ch15[i,j] <= 265):
+                    mascara_fuego[i,j] = 220
+                    mascara_nubes[i,j] = true 
+                if(brTemp_ch14[i,j] < 270 and brTemp_ch14[i,j] - brTemp_ch15[i,j] < -4):
+                    mascara_fuego[i,j] = 225
+                    mascara_nubes[i,j] = true 
+                if(brTemp_ch14[i,j] < 270 and brTemp_ch14[i,j] - brTemp_ch15[i,j] > 60):
+                    mascara_fuego[i,j] = 230
+                    mascara_nubes[i,j] = true 
+
+
+#"Along scan reflectivity test"
+for(i = 0..L-1): 
+    for(j = 0..W-1):
+        if(dia(i,j)):
+            if(refl_ch2[i,j]/cos(angulo_zenit_sol[i,j]) >= 0.38 and brTemp_ch7[i,j] < 320):
+                if(refl[i,j-3] < 0.2 or refl[i,j+3] < 0.2):
+                    mascara_fuego[i,j] = 245
+        else:
+            if(brTemp_ch7[i,j] < umbral_temp_ch7 and brTemp_ch7[i,j] >= 150):
+                if(refl[i,j-3] < 0.2 or refl[i,j+3] < 0.2):
+                    mascara_fuego[i,j] = 240
+
+
+
+
+
+#"Determine background condition statistics"
+#Por cada pixel se crea una ventana cuadrada alrededor, que se va expandiendo hasta que 20% de su interior sea valido. 10 maximas expansiones.
+#De nuevo, no estoy seguro si esto no iria en el loop principal
+#Creo que en realidad sí va en el loop anterior porque seguimos clasificando pixeles en la mascar a defuegos. Tambien por eso no se usa el valor de la mascara para ver si 
+#un pixel es valido: no se tiene los valores de los pixeles siguientes al que estamos evaluando
+
+
+for(i = 0..L-1): 
+    for(j = 0..W-1):
+        int iter = 0
+        int tam_ventana = 5
+        fin = false
+        while(!fin and iter < 10):
+            int validos = 0
+            for(x = i-tam_ventana..i+tam_ventana): #Recorro ventana cuadrada centrada en pixel de coordenadas i,j y cuento pixeles validosend. FALTA CHEQUEAR SI ME SALGO DE LA IMAGEN!!    
+                for(y = j-tam_ventana..j+tam_ventana):
+                    #Reviso si pixel es valido 
+                    if(mascara_tierra_mar[x,y] and #Es pixel de tierra
+                       ((brTemp_ch7[x,y] <= 310 and !dia(x,y)) or (dia(x,y) and brTemp_ch7[x,y] <= 310 + 25*cos(angulo_zenit_sol[x,y]))) and #No es muy calido 
+                       (brTemp_ch7[x,y] >= 270 and brTemp_ch14[x,y] >= 270) and #No es muy frio 
+                       ((255*int(sqrt(refl_ch2[x,y])) >= 1) and (refl_ch2[x,y]/cos(angulo_zenit_sol[x,y]))) #Reflectividad 
+                    ):
+                        validos += 1
+                        if(validos == 0.20*(2*tam_ventana + 1)**2): #Validos alcanzan 20% de la ventana 
+                            fin = true 
+                            break
+                if(fin):
+                    break 
+            iter += 1
+            if(!fin) tam_ventana += 1
+        
+        if(!fin): #Se llego a maximo de iteraciones sin encontrar 20% valido 
+            mascara_fuego[i,j] = 170
+        else: #Tengo al menos 20% de ventana valido. Calculo estadisticas
+                rango_ventana = (i-tam_ventana:i+tam_ventana,j-tam_ventana:j+tam_ventana) #Pixeles de la ventana final
+                reflb = ...
+
+                temp4_bkg_mean = mean(brTemp_ch7[rango_ventana]) #Temperatura media en canal 7
+                temp11_bkg_mean = mean(brTemp_ch14[rango_ventana]) #Temperatura media en canal 14
+                vis_mean_bkg = mean(255*int(sqrt(refl_ch2[rango_ventana]))) #Brillo visible medio 
+                temp4_bkg_stddev = std_dev(brTemp_ch7[rango_ventana]) #Desviacion estandar de canal 7
+                temp11_bkg_mean = std_dev(brTemp_ch14[rango_ventana]) #Desviacion estandar de canal 14
+                vis_bkg_histogram_stddev = ... 
+                histogram_bin_largest_count = ...
+                number_passes_in_bkg_stadistics = iter #Cantidad de incrementos de ventana
+                sum_of_values_comp_bkg_temp4 = sum(brTemp_ch7[rango_ventana]) #Suma de temperaturas canal 7
+                sum_of_values_comp_bkg_temp11 = sum(brTemp_ch14[rango_ventana]) #Suma de temperaturas canal 14
+                idx_cld_bkg = ...
+                bkg_count_idx = ...
+                temp4_bkg_histogram = ...
+                temp11_bkg_histogram = ...
+                temp4_bkg_histogram_stddev = ...
+                temp11_bkg_histogram_stddev = ...
+                stddev_4mu_11mu_temp_diff = stddev(brTemp_ch7[rango_ventana] - brTemp_ch14[rango_ventana])
+                vis_diff_histogram = ...
+                vis_histogram_variance = ...
+                vis_histogram_stddev = ...
+                temp4_bkg_avg = ... #A cual vecindad se refiere??
+                temp4_stddev = ...
+                temp11_bkg_avg = ...
+                temp11_stddeve = ...
+                rad_4mu_11mu_avg_diff = ...
+                rad_diff_sigma = ...
+
+                #Si no se puede determinar nada, mascara fuego = 170??
+
+                #Umbrales contextuales
+                offset_tam_ventana = min(5,number_passes_in_bkg_stadistics/3) #Offset para tener en cuenta tamaño de ventana
+
+                std_dev_threshold_7_14 = 3*std_dev(temp4_bkg_avg - temp11_bkg_avg)
+                if(std_dev_threshold_7_14 > 4):
+                        std_dev_threshold_7_14 = 4
+                std_dev_threshold_7 = 3.75*std_dev(temp4_bkg_avg) + offset_tam_ventana
+                if(std_dev_threshold_7 < 4):
+                        std_dev_threshold_7 = 4 
+                if(std_dev_threshold_7 > 10):
+                        std_dev_threshold_7 = 10
+                reflb_threshold = 3*std_dev(reflb) #A que se refiere por "appropiate floor or ceiling value"?
+                reflb_threshold_max = 2.5*std_dev(reflb) + 0.5*min(5,((2*tam_ventana + 1)**2-1)/3) #"background pixels" solo validos o todos?
+                along_scan-line_threshold = = ...
+
+                if(dia(i,j)): #Calculo albedo de fondo si el pixel es de dia 
+                    albedo_bkg[i,j] = (((255*int(sqrt(refl_ch2[rango_ventana]))/25.5)**2)/(cos(angulo_zenit_sol[i,j])))
+
+
+                #Identificacion inicial de pixeles de fuego
+                "The first test that identifies possible fire detections is applied to pixels that are either flagged as 
+                saturated or required more than 10 passes to build the background window. " <-----------?????
+
+                if(brTemp_ch7[i,j] - brTemp_ch14[i,j] < std_dev_threshold_7_14 and 
+                   brTemp_ch7[i,j] - temp4_bkg_mean < std_dev_threshold_7
+                ):
+                    tam_fuego[i,j] = 0
+                    area_pixel[i,j] = 0
+                    if(#pixel saturado):
+                        temp_fuego[i,j] = 0
+                    else:
+                        temp_fuego[i,j] = -9.05
+                if((refl[i,j] < reflb_threshold and brTemp_ch7[i,j] < 320) or
+                    (brTemp_ch7[i,j] - brTemp_ch14[i,j] < 0 or brTemp_ch7[i,j] - temp4_bkg_avg < 0)
+                ):
+                    #No se hace nada??
+                if( brTemp_ch7[i,j]-brTemp_ch14[i,j]  < std_dev_threshold_7_14 and (refl[i,j] - reflb_threshold_max or #along scan line test)):
+                    #Se flaggea como 1, creo que en failchar
+                if(brTemp_ch7[i,j] - temp4_bkg_mean < std_dev_threshold_7 and (refl[i,j] - reflb_threshold_max or #along scan line test) ):
+                    #Se flaggea como 2
+                    
+                
+
+                #Aplicar correcciones y ajustes
+                if(#Pixel pasa tests de umbral):
+                    tpw = ...
+                    angulo_zenit_sat = ...
+                    ext_ch7 = tpw_lookup(4,(tpw-1)*7 + angulo_zenit_sat) 
+                    ext_ch14 = tpw_lookup(5,(tpw-1)*7 + angulo_zenit_sat)
+                    trans_ch7 = tpw_lookup(2,(tpw-1)*7 + angulo_zenit_sat)
+                    trans_ch14 = tpw_lookup(3,(tpw-1)*7 + angulo_zenit_sat)
+                    rad_offset_ch7 = planck(7,7) #No me queda claro por que convierte la temp a rad en vez de usar la rad de input directamente
+                    rad_offset_ch14 = planck(14,14)
+
+                    #Correccion de temperatura por transmitancia atmosferica
+                    rad_correccion_ch7 = (rad_ch7[i,j]-ext_ch7*rad_offset_ch7)/trans_ch7
+                    rad_correccion_ch14 = (rad_ch14[i,j]-ext_ch14*rad_offset_ch14)/trans_ch14
+
+                    if(ext_ch7*rad_offset_ch7 < 0 or ext_ch14*rad_offset_ch14 < 0 or planck_inversa(rad_offset_ch7) < 0 or planck_inversa(rad_offset_ch14) <0):
+                        mascara_fuego[i,j] = 180
+                        #Avanzo a siguiente pixel 
+                    
+                    if(dia(i,j)):
+                        albedo = refl_ch2[i,j]/cos(angulo_zenit_sol[i,j])
+                        if(0.07 > abs(albedo - albedo_bkg) > 0.025):
+                            brTemp_ch7[i,j] += 10*albedo_bkg
+                            brTemp_ch14[i,j] += 30*albedo_bkg
+                        else if(albedo > 0.38 abs(albedo - albedo_bkg) >= 0.38):
+                            brTemp_ch7[i,j] += 0.7
+                            brTemp_ch14[i,j] += 2.1
+                            #Setear flag 
+                    
+                    #Correccion de emisividad de superficie
+                    rad_correccion_ch7_emis = rad_correccion_ch7/emisividad_ch7[i,j] #Emisividades son inputs del algoritmo 
+                    rad_correccion_ch14_emis = rad_correccion_ch14/emisividad_ch14[i,j]
+
+                    #Correccion de reflectividad solar (se asume que las diferencias de temp. entre canales 7 y 14 es por reflectividad solar)
+                    rad_correccion_ch7_bkg = (temp4_bkg_mean-ext_ch7*temp4_bkg_mean)/trans_ch7
+                    rad_correccion_ch14_bkg = (temp11_bkg_mean-ext_ch14*temp11_bkg_mean)/trans_ch14
+                    bkg_brTemp_ch7_correccion = planck_inversa(rad_correccion_ch7_bkg)
+                    bkg_brTemp_ch14_correccion = planck_inversa(rad_correccion_ch14_bkg)
+                    rad_correccion_bkg_4from11 = planck_a_ch7(bkg_brTemp_ch14_correccion)
+
+                    rad_solar = rad_correccion_ch7_bkg - emisividad_ch7[i,j]*rad_correccion_bkg_4from11
+
+                    rad_correccion_ch7_solar = (rad_correccion_ch7_emis - rad_solar)/emisividad_ch7[i,j]
+
+                    if( plancK_inversa(rad_correccion_ch7) < 0 or
+                        planck_inversa(rad_correccion_ch14) < 0 or
+                        planck_inversa(rad_correccion_ch7_bkg) < 0 or 
+                        planck_inversa(rad_correccion_ch14_bkg) < 0 or 
+                        temp11_bkg_mean < 0):
+                        mascara_fuego[i,j] = 180 
+                        #Avanzo a siguiente pixel 
+                    
+                    #Correccion de difraccion
+                    rad_diff_7 = (rad_correccion_ch7_solar - 0.15*rad_correccion_bkg_4from11)/0.85
+                    rad_diff_14 = (rad_correccion_ch14-0.3*rad_correccion_bkg_4from11)/0.7
+
+                    brTemp_corregida_ch7 = planck_inversa(rad_diff_7)
+                    brTemp_corregida_ch14 = planck_inversa(rad_diff_14)
+
+                #Tests post-correccion 
+                #Si el pixel se taggea como 3,4,5 o 10 se saltea Dozier y se pasa a los tests de ultima  chance 
+                
+                bkg_brTemp_correccion = bkg_brTemp_ch7_correccion #Ambas (canal 7 y 14) quedan iguales
+                cte_solar = 0 #Correccion para usar de dia 
+                if(dia(i,j)):
+                    cte_solar = cos(angulo_zenit_sol[i,j]*15)
+                if(brTemp_corregida_ch14 < 285 or brTemp_corregida_ch7 < 285 + cte_solar):
+                    #Taggear como 3
+                if(brTemp_corregida_ch14 -bkg_brTemp_correccion < 0.25):
+                    if((refl_ch2[i,j]/cos(angulo_zenit_sol[i,j]) > 0.15 or nubes[i,j]) and brTemp_corregida_ch7 - bkg_brTemp_correccion> 10):
+                        #Taggear como 10 
+                    else:
+                        #Taggear como 4
+                if(brTemp_corregida_ch7 - bkg_brTemp_correccion < 2):
+                    #taggear como 5
+                if(dia(i,j) and (refl_ch2[i,j]/cos(angulo_zenit_sol[i,j]) >= 0.25 or refl_ch2[i,j]/cos(angulo_zenit_sol[i,j]) - albedo_bkg> 0.07)):
+                    #Taggear como 8
+
+
+                #Dozier (caracterizacion sub-pixel)
+                
+
+
+
+
+
+                #Tests de ultima chance
+
+                if(#No paso tests necesarios):
+                    if((brTemp_ch7[i,j] - temp4_bkg_mean >= std_dev_threshold_7 and brTemp_ch14[i,j] - temp11_bkg_mean >= -20) or
+                    (refl - reflb >= reflb_threshold_max and pasa el along scan_line test)):
+                        #Tamaño de fuego subpixel = 0
+                        if(350 < temperatura de fuego <= 400):
+                            temperatura de fuego *= -1
+                        else:
+                            temperatura de fuego = -999
+
+
+                    #=====TEST DE AREA DE PIXEL < 4KM2
+
+                #FRP
+                if(mascara_fuego[i,j] == 11 or mascara_fuego[i,j] == 12 or mascara_fuego[i,j] == 15 or number_passes_in_bkg_stadistics > 10):  #Sin FRP reportado
+                    FRP[i,j] = -9
+
+
+                #Pasar datos de pixeles de fuego a fase 2
+                if(#Potencialmente pixel de fuego):
+                    potencial_fuego += 1 
+
+                    pixeles_fuego.insert(
+                        id = potencial_fuego,
+                        #latitud y longitud 
+                        #image line and element coordinates,
+                        emiss_ch7 = emisividad_ch7[i,j], emiss_ch14 = emisividad_ch14[i,j]
+                        #suma de valores usados para computar temperatura de brillo de fondo para canales 7 y 14,
+                        #numero de valores usados para estadisiticas de fondo,
+                        temp4_bkg_mean,temp11_bkg_mean,
+                        std_dev(temp4_bkg_mean),std_dev(temp11_bkg_mean),
+                        #temps de brillo observadas para canales 7 y 14,
+                        #minima dif de temperaturas 7 - 14
+                        #
+                    )
+
+
