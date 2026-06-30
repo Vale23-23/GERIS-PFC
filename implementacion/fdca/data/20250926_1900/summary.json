@@ -1,0 +1,17 @@
+{
+  "timestamp": "20250926_1900",
+  "region": "uruguay",
+  "shape": [
+    224,
+    303
+  ],
+  "n_candidates": 27005,
+  "n_confirmed": 2917,
+  "n_high": 0,
+  "n_medium": 0,
+  "n_low": 1782,
+  "n_temporal": 64955,
+  "frp_median_mw": 19.632076313484095,
+  "frp_max_mw": 2710.001441102722,
+  "run_time_s": 432.461375
+}
