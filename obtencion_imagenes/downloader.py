@@ -101,10 +101,29 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
             planck_coeffs = None # Si el .npy existe pero falta el JSON de coeficientes (banda IR), lo señalamos
         else:
             g  = GOES(satellite=satellite, product=product_cfg["product"], domain=domain,
-                      bands=band if band else None)
+                    bands=band if band else None)
             ds = g.nearesttime(timestamp)
             xs, ys = goes_xy_slices(ds, **region_cfg)
-            data = ds.sel(x=xs, y=ys)[product_cfg["variable"]].values
+            ds_cropped = ds.sel(x=xs, y=ys)
+            data = ds_cropped[product_cfg["variable"]].values
+
+            # Geometría: una sola vez por producto/banda (la grilla x/y es estática
+            # en el tiempo; lo único que cambia por resolución es el band/product_id,
+            # así que la cacheamos a nivel de carpeta de producto, no por timestamp)
+            geom_path = os.path.join(folder, "geometry.json")
+            if not os.path.exists(geom_path):
+                proj_info = ds_cropped["goes_imager_projection"]
+                geom_meta = {
+                    "x": ds_cropped["x"].values.tolist(),
+                    "y": ds_cropped["y"].values.tolist(),
+                    "longitude_of_projection_origin": float(proj_info.longitude_of_projection_origin),
+                    "perspective_point_height": float(proj_info.perspective_point_height),
+                    "semi_major_axis": float(proj_info.semi_major_axis),
+                    "semi_minor_axis": float(proj_info.semi_minor_axis),
+                    "sweep_angle_axis": "x",
+                }
+                with open(geom_path, "w") as f:
+                    json.dump(geom_meta, f)
 
             planck_coeffs = None
             if band in PLANCK_BANDS:
