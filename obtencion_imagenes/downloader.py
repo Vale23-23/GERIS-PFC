@@ -52,6 +52,32 @@ def get_goes2go_cache_dir():
     except Exception:
         return os.path.expanduser("~/data")
 
+def download_highres(timestamp, product_cfg, region_cfg, satellite, domain, folder=None):
+    """
+    Descarga y cropea bandas de alta resolución (ej: B02).
+    No guarda geometría propia: B02 termina remuestreado a la grilla de 2 km
+    de las bandas IR en fdca_adapter.py, así que la única geometría que
+    importa para el FDCAInput es region_geometry.json (generado por las
+    bandas IR en la rama normal de download_and_save).
+    """
+    import xarray as xr
+    band = product_cfg.get("band")
+    g = GOES(satellite=satellite, product=product_cfg["product"], domain=domain, bands=band)
+    files_df = g.nearesttime(timestamp, return_as="filelist")
+    if files_df is None or len(files_df) == 0:
+        raise RuntimeError(f"goes2go no encontró archivos para {product_cfg['id']} en {timestamp}")
+    relative_path = files_df.iloc[0]["file"]
+    cache_dir = get_goes2go_cache_dir()
+    full_path = os.path.join(cache_dir, relative_path)
+    if not os.path.exists(full_path):
+        raise FileNotFoundError(f"Archivo descargado no encontrado en: {full_path}")
+
+    ds = xr.open_dataset(full_path)   # sin chunks, lazy por indexing igual
+    xs, ys = goes_xy_slices(ds, **region_cfg)
+    data = ds.sel(x=xs, y=ys)[product_cfg["variable"]].values
+    ds.close()
+    return data
+
 def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, output_root):
     """
     Download a single product/timestamp, crop to region, save as .npy.
@@ -97,7 +123,7 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
 
     try:
         if band in HIGH_RES_BANDS:
-            data = download_highres(timestamp, product_cfg, region_cfg, satellite, domain)
+            data = download_highres(timestamp, product_cfg, region_cfg, satellite, domain, folder)
             planck_coeffs = None # Si el .npy existe pero falta el JSON de coeficientes (banda IR), lo señalamos
         else:
             g  = GOES(satellite=satellite, product=product_cfg["product"], domain=domain,
@@ -109,8 +135,7 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
 
             # Geometría: una sola vez por producto/banda (la grilla x/y es estática
             # en el tiempo; lo único que cambia por resolución es el band/product_id,
-            # así que la cacheamos a nivel de carpeta de producto, no por timestamp)
-            geom_path = os.path.join(folder, "geometry.json")
+            geom_path = os.path.join(os.path.dirname(folder), "geometry.json")
             if not os.path.exists(geom_path):
                 proj_info = ds_cropped["goes_imager_projection"]
                 geom_meta = {

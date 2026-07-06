@@ -83,9 +83,8 @@ def cmd_download(args, cfg):
                 icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
                 
                 if result["status"] == "error":
-                    # Mensaje personalizado cuando falla el reintento
-                    print(f"  ❌ {result['timestamp']}  {result['product']:<30}  ERROR DE AWS")
-                    print(f"     👉 Probá: aws s3 ls s3://noaa-goes19/{result['product_path']} --no-sign-request")
+                    print(f"  ❌ {result['timestamp']}  {result['product']:<30}  {result.get('substatus', result['status'])}")
+                    print(f"     👉 Detalle real: {result.get('error')}")
                 else:
                     print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
             
