@@ -8,6 +8,7 @@ obtencion_imagenes/dataset/
 *.npy
 *.npz
 *.nc
+implementacion/data/
 
 # Entorno virtual
 .venv/
@@ -30,3 +31,4 @@ goes2go/
 # Jupyter
 .ipynb_checkpoints/
 prueba.ipynb
+

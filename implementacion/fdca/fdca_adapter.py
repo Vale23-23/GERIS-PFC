@@ -23,12 +23,16 @@ Uso:
   # → FDCAInput listo para run_fdca(inp)
 """
 
+from __future__ import annotations  # permite 'np.ndarray | None' en Python < 3.10
+
+
 import os
 import sys
 import json
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
+import pyproj
 
 # ── Constantes físicas para conversión de radiancia B02 ──────────────────────
 # Irradiancia solar exoatmosférica para ABI Band 2 (0.64 µm) [W·m⁻²·µm⁻¹]
@@ -38,44 +42,116 @@ ESUN_B02 = 1924.0   # [W·m⁻²·µm⁻¹]
 # refl_factor = π * Rad / (ESUN * cos(SZA))
 # Acá calculamos sin dividir por cos(SZA) — eso lo hace part1.py al calcular albedo
 
-# Constantes GOES-19
-GOES19_LON_0  = -75.0          # longitud subsatelital [deg]
-GOES19_H      = 35786.023e3    # altura orbital [m]
-GOES19_R_EQ   = 6378.137e3     # radio ecuatorial [m]
-GOES19_R_POL  = 6356.7523e3    # radio polar [m]
+# Constantes GOES-19 — SOLO fallback si geometry.json no trae estos campos.
+# IMPORTANTE: compute_latlon_grid() y compute_local_zenith() deben usar los
+# valores reales leídos de geometry.json (lon_0, h, a, b), no estas constantes,
+# para que las coordenadas y los ángulos sean geométricamente consistentes
+# entre sí. Antes este archivo calculaba lat/lon con el elipsoide real del
+# JSON pero el LZA con una fórmula esférica + esta constante hardcodeada:
+# quedaban desacopladas. Ver load_geometry().
+GOES19_LON_0_FALLBACK  = -75.0          # longitud subsatelital [deg]
+GOES19_H_FALLBACK      = 35786.023e3    # altura orbital [m]
+GOES19_R_EQ_FALLBACK   = 6378.137e3     # radio ecuatorial [m]
+GOES19_R_POL_FALLBACK  = 6356.7523e3    # radio polar [m]
+
+
+def load_geometry(base_path: str) -> dict:
+    """
+    Única fuente de verdad para los parámetros geométricos del satélite.
+    Lee geometry.json y devuelve lon_0, h, a, b (mismos parámetros que usa
+    compute_latlon_grid para proyectar lat/lon). compute_local_zenith y el
+    cálculo de azimuth DEBEN recibir estos mismos valores, para no volver a
+    quedar desacoplados de las coordenadas.
+    """
+    geom_path = os.path.join(base_path, "geometry.json")
+    if not os.path.exists(geom_path):
+        raise FileNotFoundError(
+            f"No se encontró la geometría de la región en: {geom_path}. "
+            f"Asegúrate de correr el downloader para generar este archivo base."
+        )
+    with open(geom_path, "r") as f:
+        geom_data = json.load(f)
+
+    return {
+        "lon_0": float(geom_data["longitude_of_projection_origin"]),
+        "h":     float(geom_data["perspective_point_height"]),
+        "a":     float(geom_data["semi_major_axis"]),
+        "b":     float(geom_data["semi_minor_axis"]),
+    }
 
 
 # ── Geometría ─────────────────────────────────────────────────────────────────
 
-def compute_latlon_grid(region_cfg: dict, shape: tuple) -> tuple[np.ndarray, np.ndarray]:
+def compute_latlon_grid(base_path: str) -> tuple[np.ndarray, np.ndarray]:
     """
-    Construye una grilla de lat/lon uniforme para la región.
-
-    El pipeline recorta los datos a la bounding box del config; la grilla
-    resultante tiene la resolución nominal de ABI (~2 km para bandas IR).
-    Esta es una aproximación — para análisis de precisión usar la proyección
-    geoestacionaria exacta de downloader.py.
+    Construye la grilla bidimensional de Latitud y Longitud exacta utilizando
+    la elipsoide y la proyección geoestacionaria (Fixed Grid System) del ABI.
+    Lee los metadatos geométricos fijos generados por el downloader.
 
     Parameters
     ----------
-    region_cfg : dict  con lat_min, lat_max, lon_min, lon_max
-    shape      : (H, W)  shape de los arrays descargados
+    base_path : str
+        Ruta raíz de la región (ej. "dataset/uruguay") donde reside 'region_geometry.json'.
 
     Returns
     -------
-    lat2d, lon2d : arrays [H, W]
+    lat2d, lon2d : arrays [H, W] con coordenadas exactas o np.nan en espacio profundo.
     """
-    H, W = shape
-    lats = np.linspace(region_cfg["lat_max"], region_cfg["lat_min"], H)  # norte→sur
-    lons = np.linspace(region_cfg["lon_min"], region_cfg["lon_max"], W)  # oeste→este
-    lon2d, lat2d = np.meshgrid(lons, lats)
+    import os
+    import json
+    import pyproj
+    import numpy as np
+
+    # 1. Cargar el JSON geométrico de la región (misma función que usan
+    #    compute_local_zenith / compute_view_geometry más abajo, para que
+    #    coordenadas y ángulos usen siempre el mismo lon_0/h/a/b)
+    geom = load_geometry(base_path)
+
+    geom_path = os.path.join(base_path, "geometry.json")
+    with open(geom_path, "r") as f:
+        geom_data = json.load(f)
+
+    # Convertir listas del JSON a vectores numéricos de NumPy
+    x_vals = np.array(geom_data["x"], dtype=np.float32)
+    y_vals = np.array(geom_data["y"], dtype=np.float32)
+
+    # 2. Configurar la Proyección Geoestacionaria (Fixed Grid) usando los datos del satélite
+    crs_goes = pyproj.CRS.from_dict({
+        "proj": "geos",
+        "lon_0": geom["lon_0"],
+        "h": geom["h"],
+        "a": geom["a"],
+        "b": geom["b"],
+        "sweep": "x",
+    })
+
+    # 3. Configurar el sistema de destino (WGS84 estándar en grados)
+    crs_latlon = pyproj.CRS.from_epsg(4326)
+
+    # 4. Crear el transformador matemático (always_xy=True garantiza orden Long, Lat)
+    transformer = pyproj.Transformer.from_crs(crs_goes, crs_latlon, always_xy=True)
+
+    # 5. Proyectar la malla 2D
+    # En pyproj, las coordenadas geostacionarias deben multiplicarse por la altura orbital (h)
+    h = geom["h"]
+    x_mesh, y_mesh = np.meshgrid(x_vals * h, y_vals * h)
+
+    # Transformación de coordenadas de matriz completa
+    lon2d, lat2d = transformer.transform(x_mesh, y_mesh)
+
+    # 6. Control de bordes (Filtrar píxeles inválidos que caen fuera del disco de la Tierra)
+    lon2d = np.where(np.abs(lon2d) <= 180, lon2d, np.nan)
+    lat2d = np.where(np.abs(lat2d) <= 90, lat2d, np.nan)
+
     return lat2d.astype(np.float32), lon2d.astype(np.float32)
 
 
-def compute_solar_zenith(lat: np.ndarray, lon: np.ndarray, dt: datetime) -> np.ndarray:
+def _solar_position(lat: np.ndarray, lon: np.ndarray, dt: datetime):
     """
-    Ángulo cenital solar [deg] usando la aproximación de Spencer (±0.5°).
-    Suficiente para los tests día/noche del FDCA.
+    Declinación solar y ángulo horario local — factorizado para que
+    compute_solar_zenith y compute_solar_azimuth usen EXACTAMENTE los mismos
+    dec/hour_angle (antes cada cálculo de azimuth hubiera tenido que
+    recalcularlos por separado, con riesgo de desincronizarse).
     """
     doy = dt.timetuple().tm_yday
     hour_utc = dt.hour + dt.minute / 60.0
@@ -88,37 +164,142 @@ def compute_solar_zenith(lat: np.ndarray, lon: np.ndarray, dt: datetime) -> np.n
     lstm = 0.0   # hour_utc ya está referido al meridiano de Greenwich
     tc   = 4.0 * (lon - lstm) + 60.0 * eot
     hour_local = hour_utc + tc / 60.0
-    hour_angle = np.radians(15.0 * (hour_local - 12.0))
+    hour_angle_rad = np.radians(15.0 * (hour_local - 12.0))
 
+    return dec_rad, hour_angle_rad
+
+
+def compute_solar_zenith(lat: np.ndarray, lon: np.ndarray, dt: datetime) -> np.ndarray:
+    """
+    Ángulo cenital solar [deg] usando la aproximación de Spencer (±0.5°).
+    Suficiente para los tests día/noche del FDCA.
+    """
+    dec_rad, hour_angle_rad = _solar_position(lat, lon, dt)
     lat_rad = np.radians(lat)
     cos_sza = (np.sin(lat_rad) * np.sin(dec_rad) +
-               np.cos(lat_rad) * np.cos(dec_rad) * np.cos(hour_angle))
+               np.cos(lat_rad) * np.cos(dec_rad) * np.cos(hour_angle_rad))
     cos_sza = np.clip(cos_sza, -1.0, 1.0)
     return np.degrees(np.arccos(cos_sza)).astype(np.float32)
 
 
+def compute_solar_azimuth(lat: np.ndarray, lon: np.ndarray, dt: datetime) -> np.ndarray:
+    """
+    Azimuth solar [deg, desde el Norte, sentido horario].
+    Usa la misma declinación/ángulo horario que compute_solar_zenith
+    (vía _solar_position) para que ambos ángulos sean consistentes entre sí.
+    Fórmula estándar (NOAA Solar Calculator).
+    """
+    dec_rad, hour_angle_rad = _solar_position(lat, lon, dt)
+    lat_rad = np.radians(lat)
+
+    cos_sza = (np.sin(lat_rad) * np.sin(dec_rad) +
+               np.cos(lat_rad) * np.cos(dec_rad) * np.cos(hour_angle_rad))
+    cos_sza = np.clip(cos_sza, -1.0, 1.0)
+    zenith_rad = np.arccos(cos_sza)
+    sin_zenith_safe = np.where(np.sin(zenith_rad) > 1e-6, np.sin(zenith_rad), 1e-6)
+
+    cos_az = ((np.sin(lat_rad) * np.cos(zenith_rad) - np.sin(dec_rad)) /
+              (np.cos(lat_rad) * sin_zenith_safe))
+    cos_az = np.clip(cos_az, -1.0, 1.0)
+    az = np.degrees(np.arccos(cos_az))
+
+    # Corrección de cuadrante según el signo del ángulo horario (mañana/tarde)
+    az = np.where(hour_angle_rad > 0.0, (az + 180.0) % 360.0, (540.0 - az) % 360.0)
+    return az.astype(np.float32)
+
+
+def geodetic_to_ecef(lat_deg: np.ndarray, lon_deg: np.ndarray,
+                      h_m, a: float, b: float):
+    """
+    Convierte coordenadas geodésicas (lat, lon, altura sobre el elipsoide)
+    a ECEF, usando el MISMO elipsoide (a, b) que compute_latlon_grid lee de
+    geometry.json (antes compute_local_zenith asumía una Tierra esférica
+    y una longitud subsatelital hardcodeada, desacoplada de esto).
+    """
+    lat_r = np.radians(lat_deg)
+    lon_r = np.radians(lon_deg)
+    e2 = 1.0 - (b ** 2) / (a ** 2)
+    N = a / np.sqrt(1.0 - e2 * np.sin(lat_r) ** 2)
+
+    x = (N + h_m) * np.cos(lat_r) * np.cos(lon_r)
+    y = (N + h_m) * np.cos(lat_r) * np.sin(lon_r)
+    z = (N * (1.0 - e2) + h_m) * np.sin(lat_r)
+    return x, y, z
+
+
+def compute_view_geometry(lat: np.ndarray, lon: np.ndarray,
+                           sat_lon_deg: float, sat_height_m: float,
+                           a: float, b: float):
+    """
+    Ángulo cenital local (LZA) y azimuth del satélite [deg], vistos desde
+    cada píxel, calculados con geometría ECEF real (no la fórmula esférica
+    de ángulo central usada antes). Recibe lon_0/h/a/b directamente de
+    geometry.json (vía load_geometry), el mismo archivo que usa
+    compute_latlon_grid — así ambos cálculos quedan atados a la misma fuente.
+
+    sat_height_m es la altura del satélite sobre el elipsoide en el punto
+    subsatelital (perspective_point_height de geometry.json).
+    """
+    x_s, y_s, z_s = geodetic_to_ecef(0.0, sat_lon_deg, sat_height_m, a, b)
+    x_g, y_g, z_g = geodetic_to_ecef(lat, lon, 0.0, a, b)
+
+    dx, dy, dz = x_s - x_g, y_s - y_g, z_s - z_g
+    rng = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
+
+    lat_r = np.radians(lat)
+    lon_r = np.radians(lon)
+
+    # Normal geodésica local (vertical local del elipsoide en el píxel)
+    nx = np.cos(lat_r) * np.cos(lon_r)
+    ny = np.cos(lat_r) * np.sin(lon_r)
+    nz = np.sin(lat_r)
+
+    cos_lza = (dx * nx + dy * ny + dz * nz) / rng
+    cos_lza = np.clip(cos_lza, -1.0, 1.0)
+    lza = np.degrees(np.arccos(cos_lza))
+
+    # Vectores locales Este/Norte (ENU) para obtener el azimuth del satélite
+    ex, ey, ez = -np.sin(lon_r), np.cos(lon_r), np.zeros_like(lon_r)
+    nox = -np.sin(lat_r) * np.cos(lon_r)
+    noy = -np.sin(lat_r) * np.sin(lon_r)
+    noz =  np.cos(lat_r)
+
+    e_comp = dx * ex + dy * ey + dz * ez
+    n_comp = dx * nox + dy * noy + dz * noz
+    sat_azimuth = np.degrees(np.arctan2(e_comp, n_comp)) % 360.0
+
+    return lza.astype(np.float32), sat_azimuth.astype(np.float32)
+
+
 def compute_local_zenith(lat: np.ndarray, lon: np.ndarray,
-                          sat_lon_deg: float = GOES19_LON_0) -> np.ndarray:
+                          sat_lon_deg: float, sat_height_m: float,
+                          a: float, b: float) -> np.ndarray:
     """
-    Ángulo cenital local del satélite [deg].
-    Para GOES-19 (lon_0 = -75°) sobre Uruguay es ~45-55°.
+    Ángulo cenital local del satélite [deg] (wrapper de compute_view_geometry
+    que devuelve solo el LZA, para no romper otros llamadores).
+    Para GOES-19 (lon_0 ≈ -75°) sobre Uruguay da ~45-55°, similar en magnitud
+    a la aproximación esférica anterior, pero ahora coherente con el mismo
+    elipsoide/lon_0 que generó lat2d/lon2d.
     """
-    dlat = np.radians(lat)
-    dlon = np.radians(lon - sat_lon_deg)
-    lza  = np.degrees(np.arccos(np.cos(dlat) * np.cos(dlon)))
-    return lza.astype(np.float32)
+    lza, _ = compute_view_geometry(lat, lon, sat_lon_deg, sat_height_m, a, b)
+    return lza
 
 
 def compute_glint_angle(sza: np.ndarray, lza: np.ndarray,
-                         azimuth: np.ndarray) -> np.ndarray:
+                         rel_azimuth: np.ndarray) -> np.ndarray:
     """
     Ángulo de glint solar [deg].
     Aproximación plana: ángulo entre el vector solar especular y el satélite.
     glint_angle ≈ 0 → glint perfecto. El FDCA usa threshold ~10°.
+
+    rel_azimuth debe ser el azimuth relativo REAL (azimuth_satélite -
+    azimuth_solar), no una constante fija: antes se pasaba 120° para toda
+    la imagen, lo que hacía que el glint quedara desacoplado de la geometría
+    real sol-satélite-píxel.
     """
     sza_r = np.radians(sza)
     lza_r = np.radians(lza)
-    az_r  = np.radians(azimuth)
+    az_r  = np.radians(rel_azimuth)
     cos_glint = (np.cos(sza_r) * np.cos(lza_r) +
                  np.sin(sza_r) * np.sin(lza_r) * np.cos(az_r))
     cos_glint = np.clip(cos_glint, -1.0, 1.0)
@@ -405,13 +586,21 @@ def load_fdca_input(
     shape = rad7.shape
 
     # ── Grilla lat/lon ────────────────────────────────────────────────────────
-    lat2d, lon2d = compute_latlon_grid(region_cfg, shape)
+    lat2d, lon2d = compute_latlon_grid(base)
 
-    # ── Geometría solar ───────────────────────────────────────────────────────
-    sza = compute_solar_zenith(lat2d, lon2d, dt)
-    lza = compute_local_zenith(lat2d, lon2d)
-    # Azimuth relativo constante (aproximación razonable para análisis regional)
-    azimuth = np.full(shape, 120.0, dtype=np.float32)
+    # ── Geometría del satélite (misma fuente que usó compute_latlon_grid) ────
+    geom = load_geometry(base)
+
+    # ── Geometría solar y satelital ───────────────────────────────────────────
+    sza          = compute_solar_zenith(lat2d, lon2d, dt)
+    solar_az     = compute_solar_azimuth(lat2d, lon2d, dt)
+    lza, sat_az  = compute_view_geometry(
+        lat2d, lon2d,
+        sat_lon_deg=geom["lon_0"], sat_height_m=geom["h"],
+        a=geom["a"], b=geom["b"],
+    )
+    # Azimuth relativo real sol-satélite (antes: constante 120° para toda la imagen)
+    azimuth = (sat_az - solar_az) % 360.0
     glint   = compute_glint_angle(sza, lza, azimuth)
 
     if verbose:
