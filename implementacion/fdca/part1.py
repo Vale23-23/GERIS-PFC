@@ -176,6 +176,25 @@ def _solar_correction(
     return rad7_solar_corr, rad7from14_bkg
 
 
+
+def calculate_albedo(L: int, W: int, sza: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
+        # ── Daylight flag ─────────────────────────────────────────────────────────
+        is_day = (sza >= 0.0) & (sza <= MAX_SZA_DAYLIGHT)
+        
+        sza_cos = np.cos(np.radians(sza))
+
+        # ── Albedo and visible brightness (ATBD 3.4.2.1) ─────────────────────────
+        albedo         = np.full((L, W), np.nan)
+        vis_brightness = np.zeros ((L, W), dtype=np.float32)
+        if refl2 is not None:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                albedo = np.where(is_day, refl2 / np.where(sza_cos > 0, sza_cos, np.nan), np.nan)
+            vis_brightness = (255.0 * np.sqrt(np.clip(refl2, 0, None))).astype(np.float32)
+
+        return albedo, vis_brightness, is_day, sza_cos
+
+
 # ── Main Part I function ──────────────────────────────────────────────────────
 def run_part1(
     # ── ABI band data ────────────────────────────────────────────────────────
@@ -224,17 +243,8 @@ def run_part1(
     candidates:  List[FireCandidate] = []
     fire_id_ctr  = 0
 
-    # ── Daylight flag ─────────────────────────────────────────────────────────
-    is_day = (sza >= 0.0) & (sza <= MAX_SZA_DAYLIGHT)
-    sza_cos = np.cos(np.radians(sza))
-
-    # ── Albedo and visible brightness (ATBD 3.4.2.1) ─────────────────────────
-    albedo         = np.full((L, W), np.nan)
-    vis_brightness = np.zeros ((L, W), dtype=np.float32)
-    if refl2 is not None:
-        with np.errstate(invalid="ignore", divide="ignore"):
-            albedo = np.where(is_day, refl2 / np.where(sza_cos > 0, sza_cos, np.nan), np.nan)
-        vis_brightness = (255.0 * np.sqrt(np.clip(refl2, 0, None))).astype(np.float32)
+    
+    albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, sza)
 
     # ── FPT mitigation: build hybrid longwave band (ATBD 3.4.2.2) ────────────
     use_hybrid = FPT > FPT_THRESHOLD

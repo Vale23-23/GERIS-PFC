@@ -13,6 +13,7 @@ import numpy as np
 import unittest
 from fdca.planck import planck_rad, planck_temp, planck_deriv_T
 from fdca.background import compute_background, BackgroundStats
+from fdca.part1 import calculate_albedo
 from fdca.dozier import (
     compute_dozier, compute_frp, compute_pixel_area,
     _solve_bisection, _dozier_rad_fire,
@@ -65,6 +66,24 @@ class TestPlanck(unittest.TestCase):
         """La derivada de Planck respecto a T debería ser positiva."""
         d = planck_deriv_T(7, 600.0, 0.01)
         self.assertGreater(d, 0.0)
+
+
+class TestPart1(unittest.TestCase):
+
+    def test_calculate_albedo_import_and_shape(self):
+        L, W = 2, 3
+        sza = np.array([[0.0, 30.0, 85.0], [90.0, 60.0, 80.0]], dtype=float)
+        refl2 = np.array([[0.2, 0.4, 0.6], [0.8, 1.0, 1.2]], dtype=float)
+
+        albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, sza, refl2)
+
+        self.assertEqual(albedo.shape, (L, W))
+        self.assertEqual(vis_brightness.shape, (L, W))
+        self.assertEqual(is_day.shape, (L, W))
+        self.assertEqual(sza_cos.shape, (L, W))
+        self.assertTrue(np.isfinite(albedo[0, 0]))
+        self.assertTrue(np.isnan(albedo[1, 0]))
+        self.assertGreater(vis_brightness[0, 1], 0.0)
 
 
 # ── Test estadísticos de Background ──────────────────────────────────────────

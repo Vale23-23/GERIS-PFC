@@ -7,6 +7,36 @@ FDCAInput listo para correr el algoritmo FDCA.
 El pipeline ya descarga y recorta los datos; este módulo solo hace la
 "traducción" entre el formato del pipeline y el formato que espera el FDCA.
 
+=============================================================================
+TABLA DE UNIDADES Y RANGOS DE REFERENCIA
+=============================================================================
+1. RADIANCIAS CRUDAS (ABI-L1b-Rad-BXX):
+    ABI-L1b-Rad-B02: 
+   - Unidad en archivos netCDF: W * m^-2 * sr^-1 * µm^-1
+    ABI-L1b-Rad-B07, ABI-L1b-Rad-B13,ABI-L1b-Rad-B14, ABI-L1b-Rad-B15: 
+   - Unidad en archivos netCDF: mW * m^-2 * sr^-1 * (cm-1)^-1
+ 
+
+2. TEMPERATURAS DE BRILLO (BT7, BT13, BT14, BT15):
+   - Unidad resultante: Kelvin (K)  [Conversión via Planck Inverso]
+
+
+3. REFLECTANCIA (refl2):
+   - Unidad: Adimensional / Factor de Reflectancia (Rango 0.0 a 1.0)
+   - Cálculo: Radiancia B02 / Radiancia Solar Teórica (ajustada por SZA).
+   - Rangos esperados: 0.02 a 0.35 (Suelo libre de nubes); >0.40 (Nubes/Glint).
+
+4. GEOMETRÍA (SZA, LZA, Glint):
+   - Unidad: Grados sexagesimales (°)
+   - Rangos/Límites del Algoritmo:
+     * SZA (Solar): < 85° para modo Diurno.
+     * LZA (Satélite): < 80° (Límite estricto FDCA), óptimo < 65° (Uruguay: ~31°-41°).
+
+5. TPW (Total Precipitable Water):
+   - Unidad: Milímetros (mm)
+   - Rangos climatológicos Cono Sur: 15 mm (Invierno seco) a 45 mm (Verano húmedo).
+=============================================================================
+
 Qué hace cada sección:
   1. Lee las radiancias de B07, B14 (y opcionalmente B13, B15, B02)
   2. Convierte radiancia → BT usando Planck inverso
@@ -37,7 +67,7 @@ import pyproj
 # ── Constantes físicas para conversión de radiancia B02 ──────────────────────
 # Irradiancia solar exoatmosférica para ABI Band 2 (0.64 µm) [W·m⁻²·µm⁻¹]
 # Valor de la tabla de calibración ABI (GOES-R PUG-L1B, Tabla 7-6)
-ESUN_B02 = 1924.0   # [W·m⁻²·µm⁻¹]
+ESUN_B02 = 1622.088   # [W·m⁻²·µm⁻¹] #CHEQUEAR ESTE VALOR CUAL ES
 # Factor de corrección: Rad [W·m⁻²·sr⁻¹·µm⁻¹] → Reflectance factor [-]
 # refl_factor = π * Rad / (ESUN * cos(SZA))
 # Acá calculamos sin dividir por cos(SZA) — eso lo hace part1.py al calcular albedo
@@ -49,6 +79,7 @@ ESUN_B02 = 1924.0   # [W·m⁻²·µm⁻¹]
 # entre sí. Antes este archivo calculaba lat/lon con el elipsoide real del
 # JSON pero el LZA con una fórmula esférica + esta constante hardcodeada:
 # quedaban desacopladas. Ver load_geometry().
+
 GOES19_LON_0_FALLBACK  = -75.0          # longitud subsatelital [deg]
 GOES19_H_FALLBACK      = 35786.023e3    # altura orbital [m]
 GOES19_R_EQ_FALLBACK   = 6378.137e3     # radio ecuatorial [m]
@@ -150,8 +181,7 @@ def _solar_position(lat: np.ndarray, lon: np.ndarray, dt: datetime):
     """
     Declinación solar y ángulo horario local — factorizado para que
     compute_solar_zenith y compute_solar_azimuth usen EXACTAMENTE los mismos
-    dec/hour_angle (antes cada cálculo de azimuth hubiera tenido que
-    recalcularlos por separado, con riesgo de desincronizarse).
+    dec/hour_angle.
     """
     doy = dt.timetuple().tm_yday
     hour_utc = dt.hour + dt.minute / 60.0
@@ -232,8 +262,8 @@ def compute_view_geometry(lat: np.ndarray, lon: np.ndarray,
                            a: float, b: float):
     """
     Ángulo cenital local (LZA) y azimuth del satélite [deg], vistos desde
-    cada píxel, calculados con geometría ECEF real (no la fórmula esférica
-    de ángulo central usada antes). Recibe lon_0/h/a/b directamente de
+    cada píxel, calculados con geometría ECEF real. 
+    Recibe lon_0/h/a/b directamente de
     geometry.json (vía load_geometry), el mismo archivo que usa
     compute_latlon_grid — así ambos cálculos quedan atados a la misma fuente.
 
@@ -277,9 +307,7 @@ def compute_local_zenith(lat: np.ndarray, lon: np.ndarray,
     """
     Ángulo cenital local del satélite [deg] (wrapper de compute_view_geometry
     que devuelve solo el LZA, para no romper otros llamadores).
-    Para GOES-19 (lon_0 ≈ -75°) sobre Uruguay da ~45-55°, similar en magnitud
-    a la aproximación esférica anterior, pero ahora coherente con el mismo
-    elipsoide/lon_0 que generó lat2d/lon2d.
+    Para GOES-19 (lon_0 ≈ -75°) sobre Uruguay da ~45-55°.
     """
     lza, _ = compute_view_geometry(lat, lon, sat_lon_deg, sat_height_m, a, b)
     return lza
@@ -293,9 +321,7 @@ def compute_glint_angle(sza: np.ndarray, lza: np.ndarray,
     glint_angle ≈ 0 → glint perfecto. El FDCA usa threshold ~10°.
 
     rel_azimuth debe ser el azimuth relativo REAL (azimuth_satélite -
-    azimuth_solar), no una constante fija: antes se pasaba 120° para toda
-    la imagen, lo que hacía que el glint quedara desacoplado de la geometría
-    real sol-satélite-píxel.
+    azimuth_solar).
     """
     sza_r = np.radians(sza)
     lza_r = np.radians(lza)
@@ -529,6 +555,16 @@ def load_fdca_input(
             "bc2": raw["planck_bc2"],
         }
 
+    
+
+
+    from fdca.planck import planck_temp_from_coeffs, planck_rad
+
+    ## Calculos de lo necesario para correr el algoritmo
+
+    #Mientras que las bandas térmicas miden el calor emitido por la Tierra (en número de onda), 
+    #la banda B02 mide la luz del Sol reflejada por la superficie y la atmósfera (en longitud de onda).
+
     # Radiancias crudas tal cual vienen del .nc — SIN conversión manual de unidades.
     # Su unidad nativa es mW m-2 sr-1 (cm-1)-1, y se invierten a BT usando
     # los coeficientes Planck propios de cada archivo (planck_temp_from_coeffs).
@@ -536,21 +572,23 @@ def load_fdca_input(
     rad14_raw = load_band("ABI-L1b-Rad-B14", required=True)
     rad13_raw = load_band("ABI-L1b-Rad-B13")
     rad15_raw = load_band("ABI-L1b-Rad-B15")
-    rad02     = load_band("ABI-L1b-Rad-B02", required=False)
 
+    # Cargar coeficientes Planck para B07/B14 (obligatorios) 
     coeffs7  = load_planck_coeffs(base, "ABI-L1b-Rad-B07", timestamp)
     coeffs14 = load_planck_coeffs(base, "ABI-L1b-Rad-B14", timestamp)
+
     if coeffs7 is None or coeffs14 is None:
-        raise FileNotFoundError(
-            f"Faltan coeficientes Planck (*_planck.json) para {timestamp}.\n"
-            f"Re-descargá B07/B14 con la versión actualizada de downloader.py "
-            f"(borrá los .npy existentes y volvé a correr 'pipeline.py download')."
-        )
+            raise FileNotFoundError(
+                f"Faltan coeficientes Planck (*_planck.json) para {timestamp}.\n"
+                f"Re-descargá B07/B14 con la versión actualizada de downloader.py "
+                f"(borrá los .npy existentes y volvé a correr 'pipeline.py download')."
+            )
+    
 
-    from fdca.planck import planck_temp_from_coeffs, planck_rad
-
+    #radiancia cruda del .nc -> temperatura de brillo [K].
     bt7  = planck_temp_from_coeffs(rad7_raw,  **coeffs7).astype(np.float32)
     bt14 = planck_temp_from_coeffs(rad14_raw, **coeffs14).astype(np.float32)
+
 
     coeffs13 = load_planck_coeffs(base, "ABI-L1b-Rad-B13", timestamp)
     bt13 = (planck_temp_from_coeffs(rad13_raw, **coeffs13).astype(np.float32)
@@ -559,6 +597,12 @@ def load_fdca_input(
     coeffs15 = load_planck_coeffs(base, "ABI-L1b-Rad-B15", timestamp)
     bt15 = (planck_temp_from_coeffs(rad15_raw, **coeffs15).astype(np.float32)
             if (rad15_raw is not None and coeffs15 is not None) else None)
+
+    
+    # Radiancias crudas tal cual vienen del .nc
+    # Su unidad nativa es W * m^-2 * sr^-1 * µm^-1
+    rad02     = load_band("ABI-L1b-Rad-B02", required=False)
+    
 
     # ── Regenerar radiancias "consistentes" en W·m⁻²·sr⁻¹·m⁻¹ ────────────────
     # El resto del pipeline (Dozier, background, FRP) fue validado con
@@ -569,8 +613,8 @@ def load_fdca_input(
     # mW m-2 sr-1 (cm-1)-1 y eliminar este paso (ver fix riguroso pendiente).
     rad7  = planck_rad(7,  bt7)
     rad14 = planck_rad(14, bt14)
-    rad13 = planck_rad(13, bt13) if bt13 is not None else None
-    rad15 = planck_rad(15, bt15) if bt15 is not None else None
+    rad13 = planck_rad(13, bt13) 
+    rad15 = planck_rad(15, bt15) 
 
     if verbose:
         def band_info(name, arr):
@@ -609,11 +653,6 @@ def load_fdca_input(
         day_pct = 100 * (sza <= 85).mean()
         print(f"  {'Píxeles diurnos':<22}: {day_pct:.0f}%")
 
-    # # ── Conversión radiancia → BT ──────────────────────────────────────────────
-    # bt7  = rad_to_bt(7,  rad7)
-    # bt14 = rad_to_bt(14, rad14)
-    # bt13 = rad_to_bt(13, rad13) if rad13 is not None else None
-    # bt15 = rad_to_bt(15, rad15) if rad15 is not None else None
 
     # ── Reflectancia B02 ──────────────────────────────────────────────────────
     if rad02 is not None:
@@ -631,6 +670,7 @@ def load_fdca_input(
         print(f"  {'BT14 range [K]':<22}: {np.nanmin(bt14):.1f} – {np.nanmax(bt14):.1f}")
         if refl2 is not None:
             print(f"  {'refl2 range':<22}: {np.nanmin(refl2):.3f} – {np.nanmax(refl2):.3f}")
+
 
     # ── Emissividad ────────────────────────────────────────────────────────────
     # Valores típicos de vegetación/suelo para Uruguay
@@ -658,8 +698,8 @@ def load_fdca_input(
     inp = FDCAInput(
         bt7=bt7,   rad7=rad7,
         bt14=bt14, rad14=rad14,
-        bt13=bt13, rad13=rad13 if rad13 is not None else None,
-        bt15=bt15,
+        bt13=bt13, rad13=rad13,
+        bt15=bt15, rad15=rad15,
         refl2=refl2,
         latitudes=lat2d, longitudes=lon2d,
         sza=sza, glint_angle=glint,

@@ -44,6 +44,7 @@ class FDCAInput:
     bt13:  Optional[np.ndarray]    # Ch 13 BT (needed if FPT > 90 K)
     rad13: Optional[np.ndarray]    # Ch 13 radiance
     bt15:  Optional[np.ndarray]    # Ch 15 BT (optional)
+    rad15: Optional[np.ndarray]    # Ch 15 radiance (optional)
     refl2: Optional[np.ndarray]    # Ch 2 reflectance (0–1, optional)
 
     # ── Geolocation / geometry ───────────────────────────────────────────────
