@@ -175,8 +175,6 @@ def _solar_correction(
     rad7_solar_corr = (rad7_corr_emiss - rad_solar) / emiss7
     return rad7_solar_corr, rad7from14_bkg
 
-
-
 def calculate_albedo(L: int, W: int, sza: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
         # ── Daylight flag ─────────────────────────────────────────────────────────
@@ -193,7 +191,7 @@ def calculate_albedo(L: int, W: int, sza: np.ndarray) -> tuple[np.ndarray, np.nd
             vis_brightness = (255.0 * np.sqrt(np.clip(refl2, 0, None))).astype(np.float32)
 
         return albedo, vis_brightness, is_day, sza_cos
-
+    
 
 # ── Main Part I function ──────────────────────────────────────────────────────
 def run_part1(
@@ -244,6 +242,8 @@ def run_part1(
     fire_id_ctr  = 0
 
     
+
+
     albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, sza)
 
     # ── FPT mitigation: build hybrid longwave band (ATBD 3.4.2.2) ────────────
