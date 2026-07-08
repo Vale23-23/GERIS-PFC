@@ -1,1 +1,1 @@
-{"planck_fk1": 200248.0, "planck_fk2": 3685.8701171875, "planck_bc1": 0.4898500144481659, "planck_bc2": 0.9993100166320801}
+{"planck_fk1": 200248.0, "planck_fk2": 3685.8701171875, "planck_bc1": 0.4898500144481659, "planck_bc2": 0.9993100166320801, "planck_units": {"fk1": "mW m-2 sr-1 (cm-1)-1", "fk2": "K", "bc1": "K", "bc2": "1"}, "fpt_threshold_exceeded_count": 0}

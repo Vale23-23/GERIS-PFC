@@ -692,7 +692,24 @@ def load_fdca_input(
     # ── FPT: Focal Plane Temperature de ABI ──────────────────────────────────
     # ABI en GOES-19 opera a ~85-87 K (criogénico) → por debajo del umbral 90 K
     # → no se activa el modo híbrido de B13 (FPT_THRESHOLD = 90 K en constants.py)
-    FPT = 85.0
+    # ── FPT: Focal Plane Temperature de ABI (ATBD 3.4.2.2) ───────────────────
+    # El L1b de B07 no trae la temperatura literal (telemetría interna, no
+    # pública), pero sí un contador de QC que ya indica si el umbral de 90 K
+    # fue superado en ese escaneo. Lo mapeamos a un valor consistente con el
+    # test `FPT > FPT_THRESHOLD` que usa run_part1().
+    from fdca.constants import FPT_THRESHOLD
+
+    def load_fpt_flag(base: str, timestamp: str) -> float:
+        path = os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_planck.json")
+        if not os.path.exists(path):
+            return 0.0  # sin dato → no activa la rama híbrida
+        with open(path) as f:
+            raw = json.load(f)
+        exceeded = raw.get("fpt_threshold_exceeded_count", 0)
+        return (FPT_THRESHOLD + 1.0) if exceeded else 0.0
+
+    FPT = load_fpt_flag(base, timestamp)
+
 
     # ── Armar FDCAInput ───────────────────────────────────────────────────────
     inp = FDCAInput(
