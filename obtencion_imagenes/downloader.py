@@ -224,6 +224,13 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
                         "bc2": ds["planck_bc2"].attrs.get("units"),
                     },
                 }
+                # FPT real (ATBD 3.4.2.2): el L1b no trae la temperatura literal,
+                # sino un contador de QC que indica si el umbral de 90 K fue
+                # superado en ese escaneo (tratable como booleano).
+                if "focal_plane_temperature_threshold_exceeded_count" in ds.variables:
+                    planck_coeffs["fpt_threshold_exceeded_count"] = int(
+                        ds["focal_plane_temperature_threshold_exceeded_count"].values
+                    )
 
             ds.close()
 
