@@ -150,6 +150,7 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
     file_path   = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}.npy")
     coeffs_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_planck.json")
     units_path  = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_units.json")
+    dqf_path    = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_dqf.npy")
 
     band = product_cfg.get("band")
 
@@ -166,6 +167,9 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
     # de los coeficientes Planck, esto se guarda para TODOS los productos
     # (B02, DQF, TPW, etc.), no solo las bandas IR.
     need_units = not os.path.exists(units_path)
+
+    # ¿Hace falta generar el .npy con el Data Quality Flag?
+    need_dqf  = band == 7 and not os.path.exists(dqf_path)
 
     # Si ya existe todo lo necesario, no hacemos nada.
     if not need_npy and not need_json and not need_units:
@@ -232,6 +236,11 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
                         ds["focal_plane_temperature_threshold_exceeded_count"].values
                     )
 
+            # DQF por pixel, recortado a la región (misma grilla que la radiancia).
+            # DQF==4 marca los pixeles con focal_plane_temperature_threshold_exceeded_qf.
+            if need_dqf and "DQF" in ds_cropped.variables:
+                np.save(dqf_path, ds_cropped["DQF"].values.astype(np.int8))
+                
             ds.close()
 
         if data.size == 0:
