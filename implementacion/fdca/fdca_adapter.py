@@ -554,8 +554,24 @@ def load_fdca_input(
             "bc1": raw["planck_bc1"],
             "bc2": raw["planck_bc2"],
         }
-
     
+    def load_fpt_flag(base: str, timestamp: str) -> float:
+        """Valor escalar de FPT comparable contra FPT_THRESHOLD (ATBD 3.4.2.2)."""
+        path = os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_planck.json")
+        if not os.path.exists(path):
+            return 0.0  # sin dato → no activa la rama híbrida
+        with open(path) as f:
+            raw = json.load(f)
+        exceeded = raw.get("fpt_threshold_exceeded_count", 0)
+        return (FPT_THRESHOLD + 1.0) if exceeded else 0.0
+
+
+    def load_data_quality(base: str, timestamp: str) -> np.ndarray | None:
+        """DQF crudo de B07 (códigos 0-4, ver ATBD / GOES-R doc). None si no se descargó."""
+        path = os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_dqf.npy")
+        if not os.path.exists(path):
+            return None
+        return np.load(path)
 
 
     from fdca.planck import planck_temp_from_coeffs, planck_rad
@@ -672,11 +688,16 @@ def load_fdca_input(
             print(f"  {'refl2 range':<22}: {np.nanmin(refl2):.3f} – {np.nanmax(refl2):.3f}")
 
 
-    # ── Emissividad ────────────────────────────────────────────────────────────
+    # ── Emisividad ────────────────────────────────────────────────────────────
     # Valores típicos de vegetación/suelo para Uruguay
     # Para producción: usar ABI ANC emissivity product (si está disponible)
     emiss7  = np.full(shape, 0.95, dtype=np.float32)
     emiss14 = np.full(shape, 0.97, dtype=np.float32)
+     
+    # Global Emissivity (input) in Table 3.2 Input list of required non-ABI ancillary dynamic data
+    # VER ESTO, SE DESCARGA LA BASE DE DATOS DE UNA PAGINA CON PREVIO REGISTRO
+
+
 
     # ── TPW ───────────────────────────────────────────────────────────────────
     tpw = get_tpw_estimate(lat2d, lon2d, dt)
@@ -699,17 +720,9 @@ def load_fdca_input(
     # test `FPT > FPT_THRESHOLD` que usa run_part1().
     from fdca.constants import FPT_THRESHOLD
 
-    def load_fpt_flag(base: str, timestamp: str) -> float:
-        path = os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_planck.json")
-        if not os.path.exists(path):
-            return 0.0  # sin dato → no activa la rama híbrida
-        with open(path) as f:
-            raw = json.load(f)
-        exceeded = raw.get("fpt_threshold_exceeded_count", 0)
-        return (FPT_THRESHOLD + 1.0) if exceeded else 0.0
-
+    # ── FPT: Focal Plane Temperature de ABI (ATBD 3.4.2.2) ───────────────────
     FPT = load_fpt_flag(base, timestamp)
-
+    data_quality = load_data_quality(base, timestamp)
 
     # ── Armar FDCAInput ───────────────────────────────────────────────────────
     inp = FDCAInput(
@@ -729,7 +742,7 @@ def load_fdca_input(
         usgs_eco=masks["usgs_eco"],
         scan_time=dt,
         prev_fire_mask=None,
-        data_quality=None,
+        data_quality=data_quality,
     )
 
     if verbose:
