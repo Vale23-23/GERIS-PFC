@@ -36,6 +36,12 @@ MAX_LOCAL_ZENITH   = 80.0     # Max satellite zenith angle [deg]
 MAX_SZA_DAYLIGHT   = 85.0     # Solar zenith for daylight flag [deg]
 GLINT_THRESHOLD    = 10.0     # Sun glint / sub-solar block-out [deg]
 
+
+# __ others
+
+CH_DIFF = 2 #2 K 
+BRIGHTNESS_THRESHOLD = 273 #K
+
 # ── Cloud thresholds ────────────────────────────────────────────────────────
 CLOUD_BT14_THRESH        = 270.0
 CLOUD_BT7_BT14_NEG       = -4.0
