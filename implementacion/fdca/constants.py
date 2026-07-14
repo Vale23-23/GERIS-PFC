@@ -25,7 +25,12 @@ SAT_TEMP_CH7  = 411.86        # Channel 7 saturation temperature [K]
 SAT_TEMP_CH14 = 340.0         # Channel 14 saturation temperature [K]
 SAT_BUFF      = 5.0           # Saturation buffer [K]
 FPT_THRESHOLD = 90.0          # Focal Plane Temperature threshold [K]
-MIN_BT        = 200.0         # Minimum usable brightness temperature [K]
+MIN_BT        = 200.0         # Minimum usable brightness temperature [K] # HAYQUE  VER DONDE SE USA ESTO
+
+# ── Along scan reflectivity test thresholds ──────────────────────────────────
+MIN_BT7 = 150.0 
+MAX_BT7 = 320.0
+MIN_REFL = 0.2
 
 # Effective saturation thresholds for the "saturated flag" test (sat - 0.1 K)
 SAT_FLAG_CH7  = SAT_TEMP_CH7  - 0.10   # 411.76 K

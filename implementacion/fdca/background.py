@@ -152,6 +152,7 @@ def compute_background(
     land_mask: np.ndarray,
     sza_cos: np.ndarray,
     is_day: np.ndarray,
+    trace: Optional[list] = None,   #If a list is given, its filed with diagnosis foreach iteration
 ) -> Optional[BackgroundStats]:
     """
     Compute background statistics for pixel (i0, j0).
@@ -179,6 +180,15 @@ def compute_background(
 
         n_valid = int(valid_mask[i_lo:i_hi+1, j_lo:j_hi+1].sum())
 
+        if trace is not None:
+            trace.append({
+                'n_iter': n_iter,
+                'half': half,
+                'window_size': window_size,
+                'n_valid': n_valid,
+                'frac_valid': n_valid / window_size,
+                'cumple_20pct': n_valid >= BKG_VALID_FRAC * window_size,
+            })
         if n_valid >= BKG_VALID_FRAC * window_size:
             # ── Extract valid pixel values ──────────────────────────────────
             vm = valid_mask[i_lo:i_hi+1, j_lo:j_hi+1]
@@ -207,6 +217,17 @@ def compute_background(
 
             # Visible histogram
             vis_hist_mean, vis_hist_std, vis_peak = _histogram_stats(vis_vals)
+            
+            if trace is not None:
+                trace.append({
+                    'fase': 'enfoques',
+                    't7_stat_mean': t7_stat_mean, 't7_stat_std': t7_stat_std,
+                    't14_stat_mean': t14_stat_mean, 't14_stat_std': t14_stat_std,
+                    't7_hist_mean': t7_hist_mean, 't7_hist_std': t7_hist_std,
+                    't14_hist_mean': t14_hist_mean, 't14_hist_std': t14_hist_std,
+                    'bt7_vals': bt7_vals, 'bt14_vals': bt14_vals,   # arrays, para graficar despues
+                    'valid_bounds': (i_lo, i_hi, j_lo, j_hi),
+                })
 
             # ── Choose approach with lower BT7 std dev ──────────────────────
             if t7_stat_std <= t7_hist_std:
