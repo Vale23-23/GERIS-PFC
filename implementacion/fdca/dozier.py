@@ -6,7 +6,10 @@ Implements ATBD sections 3.4.2.10 and 3.4.2.12
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional
-from .planck import planck_rad, planck_temp, planck_deriv_T
+from .planck import (
+    planck_rad, planck_temp, planck_deriv_T,   # se mantienen por si algo externo los usa
+    planck_rad_from_coeffs, planck_temp_from_coeffs, planck_deriv_T_from_coeffs,
+)
 from .constants import (
     DOZIER_P_UPPER, DOZIER_P_LOWER, DOZIER_BISECT_N, DOZIER_NEWTON_MAX,
     DOZIER_NEWTON_TOL, MIN_FIRE_TEMP, MAX_SURF_TEMP,
@@ -36,6 +39,7 @@ def _dozier_rad_fire(rad_total: float, rad_bkg: float, p: float) -> float:
 def _solve_bisection(
     rad7: float, rad14: float,
     rad7_bkg: float, rad14_bkg: float,
+    coeffs7: dict, coeffs14: dict,
 ) -> tuple[float, float]:
     """
     15-iteration logarithmic bisection to find fire proportion p.
@@ -50,8 +54,8 @@ def _solve_bisection(
     def temp_diff_sign(p: float) -> float:
         rf7  = _dozier_rad_fire(rad7,  rad7_bkg,  p)
         rf14 = _dozier_rad_fire(rad14, rad14_bkg, p)
-        Tt7  = planck_temp(7,  rf7)
-        Tt14 = planck_temp(14, rf14)
+        Tt7  = planck_temp_from_coeffs(rf7,  **coeffs7)
+        Tt14 = planck_temp_from_coeffs(rf14, **coeffs14)
         return float(np.sign(Tt7 - Tt14))
 
     sign_lo = temp_diff_sign(p_lo)
@@ -70,7 +74,7 @@ def _solve_bisection(
 
     # Estimate Tt from final p
     rf7 = _dozier_rad_fire(rad7, rad7_bkg, p_mid)
-    Tt  = float(planck_temp(7, rf7))
+    Tt  = float(planck_temp_from_coeffs(rf7, **coeffs7))
     return p_mid, Tt
 
 
@@ -79,6 +83,7 @@ def _solve_newton(
     rad7: float, rad14: float,
     rad7_bkg: float, rad14_bkg: float,
     Tb: float,
+    coeffs7: dict, coeffs14: dict,
 ) -> tuple[float, float, bool]:
     """
     Newton-Raphson refinement of (p, Tt).
@@ -97,16 +102,16 @@ def _solve_newton(
 
     A7  = rad7
     A14 = rad14
-    Lb7  = planck_rad(7,  Tb)
-    Lb14 = planck_rad(14, Tb)
+    Lb7  = planck_rad_from_coeffs(Tb, **coeffs7)
+    Lb14 = planck_rad_from_coeffs(Tb, **coeffs14)
 
     converged = False
     for _ in range(DOZIER_NEWTON_MAX):
         if not np.isfinite(Tt) or Tt <= 0:
             break
 
-        B7  = p * planck_rad(7,  Tt)
-        B14 = p * planck_rad(14, Tt)
+        B7  = p * planck_rad_from_coeffs(Tt, **coeffs7)
+        B14 = p * planck_rad_from_coeffs(Tt, **coeffs14)
         C7  = (1.0 - p) * Lb7
         C14 = (1.0 - p) * Lb14
         f7  = B7  + C7  - A7
@@ -118,10 +123,10 @@ def _solve_newton(
             break
 
         # Jacobian
-        J00 = planck_rad(7,  Tt) - Lb7
-        J01 = planck_deriv_T(7,  Tt, p)
-        J10 = planck_rad(14, Tt) - Lb14
-        J11 = planck_deriv_T(14, Tt, p)
+        J00 = planck_rad_from_coeffs(Tt, **coeffs7) - Lb7
+        J01 = planck_deriv_T_from_coeffs(Tt, p, **coeffs7)
+        J10 = planck_rad_from_coeffs(Tt, **coeffs14) - Lb14
+        J11 = planck_deriv_T_from_coeffs(Tt, p, **coeffs14)
 
         det = J00 * J11 - J01 * J10
         if abs(det) < 1e-300:
@@ -190,6 +195,8 @@ def compute_dozier(
     rad7_bkg: float,
     rad14_bkg: float,
     Tb:       float,
+    coeffs7:  dict,
+    coeffs14: dict,
     is_potential_glint: bool = False,
 ) -> DozierResult:
     """
@@ -210,7 +217,9 @@ def compute_dozier(
 
     # ── Bisection ─────────────────────────────────────────────────────────
     try:
-        p_bis, Tt_bis = _solve_bisection(rad7, rad14, rad7_bkg, rad14_bkg)
+        p_bis, Tt_bis = _solve_bisection(
+            rad7, rad14, rad7_bkg, rad14_bkg, coeffs7, coeffs14
+        )
     except Exception:
         # Bisection failed entirely → last chance
         result.fire_temp = -999.0
@@ -223,6 +232,7 @@ def compute_dozier(
         rad7, rad14,
         rad7_bkg, rad14_bkg,
         Tb,
+        coeffs7, coeffs14,
     )
 
     if Tt <= 0 or not converged:
