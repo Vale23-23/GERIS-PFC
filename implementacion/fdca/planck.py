@@ -141,3 +141,74 @@ def planck_temp_from_coeffs(rad, fk1, fk2, bc1, bc2):
     with np.errstate(invalid="ignore", divide="ignore"):
         BT = (fk2 / np.log1p(fk1 / np.where(rad > 0, rad, np.nan)) - bc1) / bc2
     return BT
+
+def planck_rad_from_coeffs( T, fk1_target, fk2_target, bc1_target, bc2_target):
+    """
+    Inversión de planck_temp_from_coeffs: temperatura de brillo -> radiancia
+    cruda, en la unidad nativa del INSTRUMENTO/BANDA cuyos coeficientes se
+    pasan (mW m-2 sr-1 (cm-1)-1), no en la unidad genérica de planck_rad().
+
+    Se usa para responder: "si el canal `band_target` hubiera visto un
+    cuerpo negro a temperatura T, ¿qué radiancia cruda habría medido?"
+    usando los coeficientes reales de ESE canal (fk1_target, fk2_target,
+    bc1_target, bc2_target), no los de la banda de origen de T.
+
+    Fórmula (despejada de planck_temp_from_coeffs):
+        L = fk1 / (exp(fk2 / (BT*bc2 + bc1)) - 1)
+
+    Parameters
+    ----------
+    
+    T : array-like [K]
+        Temperatura de brillo de entrada (puede ser de OTRA banda, ej. BT14).
+    fk1_target, fk2_target, bc1_target, bc2_target : float
+        Coeficientes Planck de la banda EN LA QUE querés expresar la
+        radiancia resultante (ej. coeffs7 si querés "BT14 visto en rad7").
+
+    Returns
+    -------
+    ndarray
+        Radiancia en la unidad nativa del archivo .nc de esa banda
+        [mW m-2 sr-1 (cm-1)-1].
+    """
+    T = np.asarray(T, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        exponent = fk2_target / (T * bc2_target + bc1_target)
+        L = fk1_target / (np.expm1(exponent))
+    return L
+
+def planck_deriv_T_from_coeffs(T, p: float, fk1, fk2, bc1, bc2):
+    """
+    Derivada de p * L(T) respecto de T, usando la MISMA parametrización
+    de planck_rad_from_coeffs (coeficientes reales del instrumento), no la
+    fórmula de Planck genérica de planck_deriv_T.
+
+    Es el Jacobiano que necesita el Newton-Raphson de dozier.py para
+    trabajar en la unidad nativa del sensor (mW m-2 sr-1 (cm-1)-1) en vez
+    de la unidad genérica W m-2 sr-1 m-1 que usaba planck_deriv_T.
+
+    Derivación (a partir de L(T) = fk1 / (exp(x) - 1), con
+    x = fk2 / (T*bc2 + bc1)):
+
+        dx/dT   = -fk2*bc2 / (T*bc2 + bc1)^2
+        dL/dT   = -fk1 * exp(x) * dx/dT / (exp(x) - 1)^2
+                =  fk1 * fk2 * bc2 * exp(x) / [(T*bc2+bc1)^2 * (exp(x)-1)^2]
+
+    Parameters
+    ----------
+    T : float [K]
+    p : float  fracción de fuego en el píxel
+    fk1, fk2, bc1, bc2 : float  coeficientes Planck de la banda en la que
+        se está evaluando (misma banda que se usó para L(T) en el resto
+        del sistema de ecuaciones de Dozier).
+
+    Returns
+    -------
+    float
+    """
+    denom = T * bc2 + bc1
+    x = fk2 / denom
+    with np.errstate(over="ignore"):
+        ex = np.exp(x)
+    dLdT = fk1 * fk2 * bc2 * ex / (denom**2 * (ex - 1.0)**2)
+    return p * dLdT
