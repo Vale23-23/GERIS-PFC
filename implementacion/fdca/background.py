@@ -227,6 +227,7 @@ def compute_background(
                     't14_hist_mean': t14_hist_mean, 't14_hist_std': t14_hist_std,
                     'bt7_vals': bt7_vals, 'bt14_vals': bt14_vals,   # arrays, para graficar despues
                     'valid_bounds': (i_lo, i_hi, j_lo, j_hi),
+                    'valid_mask': vm,
                 })
 
             # ── Choose approach with lower BT7 std dev ──────────────────────
