@@ -72,6 +72,12 @@ class FDCAInput:
     prev_fire_mask: Optional[np.ndarray] = None  # seconds-since-2001 of last fire
     scan_time:      Optional[datetime]   = None  # UTC time of current scan
 
+    # ── Planck calibration coefficients (per-band, per-timestamp) ───────────
+    coeffs7:  Optional[dict] = None   # {"fk1":.., "fk2":.., "bc1":.., "bc2":..}
+    coeffs14: Optional[dict] = None
+    coeffs13: Optional[dict] = None
+    coeffs15: Optional[dict] = None
+
     # ── Optional data quality flags ──────────────────────────────────────────
     data_quality: Optional[np.ndarray] = None
 
@@ -144,6 +150,7 @@ def run_fdca(inp: FDCAInput) -> FDCAOutput:
         lza=inp.lza, azimuth=inp.azimuth,
         tpw=inp.tpw, emiss7=inp.emiss7, emiss14=inp.emiss14,
         lut_tpw=inp.lut_tpw, FPT=inp.FPT,
+        coeffs7=inp.coeffs7, coeffs14=inp.coeffs14, coeffs13=inp.coeffs13,
         land_cover=inp.land_cover, land_mask=inp.land_mask,
         desert_mask=inp.desert_mask, usgs_eco=inp.usgs_eco,
         data_quality=inp.data_quality,
