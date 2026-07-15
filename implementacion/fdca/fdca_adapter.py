@@ -334,7 +334,7 @@ def compute_glint_angle(sza: np.ndarray, lza: np.ndarray,
 
 # ── Conversiones radiométricas ────────────────────────────────────────────────
 
-def rad_to_bt(band: int, rad: np.ndarray) -> np.ndarray:
+def rad_to_bt(band: int, rad: np.ndarray) -> np.ndarray: # QUEDA PENDIENTE REVISAR SU USO
     """
     Radiancia → Temperatura de Brillo usando Planck inverso.
     Reutiliza planck_temp del FDCA para consistencia exacta.
@@ -618,19 +618,17 @@ def load_fdca_input(
     # Radiancias crudas tal cual vienen del .nc
     # Su unidad nativa es W * m^-2 * sr^-1 * µm^-1
     rad02     = load_band("ABI-L1b-Rad-B02", required=False)
-    
 
-    # ── Regenerar radiancias "consistentes" en W·m⁻²·sr⁻¹·m⁻¹ ────────────────
-    # El resto del pipeline (Dozier, background, FRP) fue validado con
-    # planck_rad/planck_temp en esta unidad. Para mantener consistencia
-    # interna, recalculamos rad7/rad14/rad13/rad15 a partir del BT correcto
-    # (ya invertido con los coeficientes reales) usando planck_rad genérico.
-    # TODO: reescribir Dozier/background/FRP para trabajar nativamente en
-    # mW m-2 sr-1 (cm-1)-1 y eliminar este paso (ver fix riguroso pendiente).
-    rad7  = planck_rad(7,  bt7)
-    rad14 = planck_rad(14, bt14)
-    rad13 = planck_rad(13, bt13) 
-    rad15 = planck_rad(15, bt15) 
+
+    # ── Radiancias en unidad nativa (mW m-2 sr-1 (cm-1)-1) ────────────────
+    # Antes acá se "regeneraban" rad7/rad14/... con planck_rad genérico
+    # (W m-2 sr-1 m-1), lo cual mezclaba dos sistemas de unidades distintos.
+    # Ahora nos quedamos directamente con las radiancias crudas del .nc,
+    # que ya están en la unidad nativa del instrumento — sin reconversión.
+    rad7  = rad7_raw
+    rad14 = rad14_raw
+    rad13 = rad13_raw
+    rad15 = rad15_raw
 
     if verbose:
         def band_info(name, arr):
@@ -740,6 +738,8 @@ def load_fdca_input(
         land_mask=masks["land_mask"],
         desert_mask=masks["desert_mask"],
         usgs_eco=masks["usgs_eco"],
+        coeffs7=coeffs7, coeffs14=coeffs14,
+        coeffs13=coeffs13, coeffs15=coeffs15,
         scan_time=dt,
         prev_fire_mask=None,
         data_quality=data_quality,
