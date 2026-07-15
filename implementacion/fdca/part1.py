@@ -26,7 +26,10 @@ from .constants import (
     MODIS_WATER_CODES, UMD_WATER_CODE, DESERT_BRIGHT,
     USGS_SEA_WATER, USGS_COAST_FRINGE, USGS_INLAND_WATER,
 )
-from .planck import planck_rad, planck_temp, temp_to_rad_in_band
+from .planck import (
+    planck_rad, planck_temp, temp_to_rad_in_band,
+    planck_rad_from_coeffs, planck_temp_from_coeffs,
+)
 from .background import BackgroundStats, compute_background
 from .dozier import DozierResult, compute_dozier, compute_frp, compute_pixel_area
 
@@ -148,14 +151,16 @@ def _apply_tpw_correction(rad: float, ext: float, trans: float) -> float:
     """
     return (rad - ext * rad) / trans
 
-
 # ── Solar reflectivity correction ────────────────────────────────────────────
 def _solar_correction(
     rad7_corr_emiss:    float,
     rad7_bkg_corr:      float,
     rad14_bkg_corr:     float,
     emiss7:             float,
+    coeffs7:  dict,
+    coeffs14: dict,
 ) -> float:
+
     """
     radsolar = rad7_bkg_corr/emiss7 - emiss7 * rad7from14_bkg_corr/emiss7
              = rad7_bkg_corr_emiss - emiss7 * planck_ch7(T_from_rad14_bkg_corr)
@@ -163,9 +168,9 @@ def _solar_correction(
     Returns rad7_corr corrected for solar reflectivity.
     """
     # Brightness temperature from background 14 µm corrected radiance
-    T_bkg14 = planck_temp(14, rad14_bkg_corr)
-    # Convert to Ch7 radiance space (Planck at Ch7 wavelength with T_bkg14)
-    rad7from14_bkg = planck_rad(7, T_bkg14)
+    T_bkg14 = planck_temp_from_coeffs(rad14_bkg_corr, **coeffs14)
+    # Convert to Ch7 radiance space (coefs reales Ch7, con T_bkg14)
+    rad7from14_bkg = planck_rad_from_coeffs(T_bkg14, **coeffs7)
 
     # Solar component
     rad7_bkg_corr_emiss = rad7_bkg_corr / emiss7
@@ -217,6 +222,9 @@ def run_part1(
     emiss14:     np.ndarray,           # Surface emissivity band 14
     lut_tpw:     np.ndarray,           # TPW LUT (6 rows × 35 cols)
     FPT:         float,                # Focal Plane Temperature [K]
+    coeffs7:     dict,                 # Coefs Planck reales Ch7 (fk1,fk2,bc1,bc2)
+    coeffs14:    dict,                 # Coefs Planck reales Ch14
+    coeffs13:    Optional[dict],       # Coefs Planck reales Ch13 (None si no hay B13)
     # ── Auxiliary static ─────────────────────────────────────────────────────
     land_cover:  np.ndarray,           # MODIS land mask values
     land_mask:   np.ndarray,           # Binary land mask (True = land)
@@ -249,8 +257,8 @@ def run_part1(
     # ── FPT mitigation: build hybrid longwave band (ATBD 3.4.2.2) ────────────
     use_hybrid = FPT > FPT_THRESHOLD
     if use_hybrid and bt13 is not None and rad13 is not None:
-        rad13_in_ch7 = planck_rad(7, bt13)   # ch13 BT → ch7 radiance space
-        rad14_in_ch7 = planck_rad(7, bt14)   # ch14 BT → ch7 radiance space
+        rad13_in_ch7 = planck_rad_from_coeffs(bt13, **coeffs7)   # ch13 BT → ch7 radiance space
+        rad14_in_ch7 = planck_rad_from_coeffs(bt14, **coeffs7)   # ch14 BT → ch7 radiance space
         refl_7_14 = rad7 - rad14_in_ch7
         refl_7_13 = rad7 - rad13_in_ch7
         # Pixel-by-pixel: choose smallest absolute radiance difference
@@ -263,7 +271,7 @@ def run_part1(
         rad14_eff = rad14
 
     # ── Reflectivity product (Refl) for all pixels (ATBD 3.4.2.2) ────────────
-    rad14_in_7 = planck_rad(7, bt14_eff)
+    rad14_in_7 = planck_rad_from_coeffs(bt14_eff, **coeffs7)
     refl       = rad7 - rad14_in_7
     # Where any input radiance < 0 → set Refl = -9999
     bad_rad = (rad7 < 0) | (rad14_eff < 0)
@@ -481,8 +489,8 @@ def run_part1(
             if r7_corr < 0 or r14_corr < 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
-            T7_corr  = float(planck_temp(7,  r7_corr))
-            T14_corr = float(planck_temp(14, r14_corr))
+            T7_corr  = float(planck_temp_from_coeffs(r7_corr,  **coeffs7))
+            T14_corr = float(planck_temp_from_coeffs(r14_corr, **coeffs14))
             if T7_corr <= 0 or T14_corr <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
@@ -505,8 +513,8 @@ def run_part1(
             r14_corr_em = r14_corr / em14
 
             # Background radiances (must be converted from BT → rad BEFORE TPW correction)
-            r7_bkg_raw  = planck_rad(7,  bkg.temp7_bkg_mean)
-            r14_bkg_raw = planck_rad(14, bkg.temp14_bkg_mean)
+            r7_bkg_raw  = planck_rad_from_coeffs(bkg.temp7_bkg_mean,  **coeffs7)
+            r14_bkg_raw = planck_rad_from_coeffs(bkg.temp14_bkg_mean, **coeffs14)
             r7_bkg_corr  = (r7_bkg_raw  - ext7  * r7_bkg_raw ) / trans7
             r14_bkg_corr = (r14_bkg_raw - ext14 * r14_bkg_raw) / trans14
 
@@ -516,7 +524,8 @@ def run_part1(
             # Solar reflectivity correction
             try:
                 r7_solar_corr, rad7from14_bkg = _solar_correction(
-                    r7_corr_em, r7_bkg_corr, r14_bkg_corr, em7
+                    r7_corr_em, r7_bkg_corr, r14_bkg_corr, em7,
+                    coeffs7, coeffs14,
                 )
             except Exception:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
@@ -531,9 +540,9 @@ def run_part1(
             if r7_diff <= 0 or r14_diff <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
-            T7c  = float(planck_temp(7,  r7_diff))
-            T14c = float(planck_temp(14, r14_diff))
-            Tbc  = float(planck_temp(7,  r7_bkg_corr))   # corrected background
+            T7c  = float(planck_temp_from_coeffs(r7_diff,     **coeffs7))
+            T14c = float(planck_temp_from_coeffs(r14_diff,    **coeffs14))
+            Tbc  = float(planck_temp_from_coeffs(r7_bkg_corr, **coeffs7))   # corrected background
 
             if T7c <= 0 or T14c <= 0 or Tbc <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
@@ -573,6 +582,7 @@ def run_part1(
                     r7_diff, r14_diff,
                     r7_bkg_corr, r14_bkg_corr,
                     Tbc,
+                    coeffs7, coeffs14,
                     is_potential_glint=is_glint,
                 )
                 # Update fail_char from Dozier result
