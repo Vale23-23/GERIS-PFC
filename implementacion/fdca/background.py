@@ -108,37 +108,59 @@ def _valid_background_mask(
                 continue
             warm = _is_warm(bt7[ii, jj], sza_cos[ii, jj], is_day[ii, jj])
             cold = (bt7[ii, jj] < BKG_COLD_THRESH) or (bt14[ii, jj] < BKG_COLD_THRESH)
-            vis_val = vis[ii, jj] if vis is not None else BKG_MIN_VIS
-            alb_val = albedo[ii, jj] if albedo is not None else 0.0
-            if not warm and not cold and vis_val >= BKG_MIN_VIS and alb_val < BKG_MAX_ALBEDO:
+            if warm or cold:
+                continue
+ 
+            # Reflective-pixel (cloud) screening via Channel 2 (ATBD 3.4.2.5).
+            # Channel 2 / Albedo only exist for sunlit pixels; at night (or when
+            # Channel 2 is unavailable) this sub-test simply does not apply, and
+            # the pixel is not disqualified because of it.
+            reflective = False
+            if is_day[ii, jj] and vis is not None and albedo is not None:
+                vis_val = vis[ii, jj]
+                alb_val = albedo[ii, jj]
+                if not np.isnan(vis_val) and not np.isnan(alb_val):
+                    reflective = (vis_val < BKG_MIN_VIS) or (alb_val > BKG_MAX_ALBEDO)
+ 
+            if not reflective:
                 valid_mask[ii, jj] = True
-
+ 
     return valid_mask, window_size
 
 
-def _histogram_stats(values: np.ndarray) -> tuple[float, float, float]:
+def _histogram_select(diff_vals: np.ndarray) -> tuple[np.ndarray, float]:
     """
-    Histogram-based mean/std for the given array.
-    Bins by integer rounding; find peak bin ± 1 neighbour; compute stats on those.
-
+    ATBD 3.4.2.5 "histogram approach":
+    Build ONE histogram from the integer-rounded (T7 - T14) background
+    difference values. Find the bin with the highest frequency, along with
+    its two closest neighbours (peak-1, peak, peak+1). Returns a boolean
+    mask (over diff_vals) selecting the pixels that fall in that 3-bin
+    range, to be reused for T7, T14 and visible-brightness statistics.
+ 
     Returns
     -------
-    mean, std, bin_peak_value
-    """
-    if len(values) == 0:
-        return np.nan, np.nan, np.nan
+    mask     : boolean array, same length as diff_vals
+    peak_val : the integer value of the peak (highest-frequency) bin
 
-    rounded = np.round(values).astype(int)
+    """
+
+    n = len(diff_vals)
+    if n == 0:
+        return np.zeros(0, dtype=bool), np.nan
+ 
+    rounded = np.round(diff_vals).astype(int)
     bins = np.bincount(rounded - rounded.min())
     peak_idx = np.argmax(bins)
     peak_val = rounded.min() + peak_idx
-
-    # Select values in [peak-1, peak+1]
+ 
     mask = (rounded >= peak_val - 1) & (rounded <= peak_val + 1)
-    sel = values[mask]
-    if len(sel) == 0:
-        return np.nan, np.nan, float(peak_val)
-    return float(np.mean(sel)), float(np.std(sel)), float(peak_val)
+
+    return mask, float(peak_val)
+
+def _mean_std(values: np.ndarray) -> tuple[float, float]:
+    if len(values) == 0:
+        return np.nan, np.nan
+    return float(np.mean(values)), float(np.std(values))
 
 
 def compute_background(
@@ -211,12 +233,15 @@ def compute_background(
             t14_stat_mean  = float(np.mean(bt14_vals))
             t14_stat_std   = float(np.std (bt14_vals))
 
-            # ── Histogram approach on (BT7 - BT14) difference ──────────────
-            t7_hist_mean,  t7_hist_std,  _ = _histogram_stats(bt7_vals)
-            t14_hist_mean, t14_hist_std, _ = _histogram_stats(bt14_vals)
-
-            # Visible histogram
-            vis_hist_mean, vis_hist_std, vis_peak = _histogram_stats(vis_vals)
+            # ── Histogram approach (ATBD 3.4.2.5) ────────────────────────────
+            # ONE histogram, built on the rounded (T7 - T14) difference. The
+            # peak bin (+/- 1 neighbour) selects a subset of pixels that is
+            # then reused to compute T7, T14 and visible-brightness means/std
+    
+            hist_mask, diff_peak = _histogram_select(diff_vals)
+            t7_hist_mean,  t7_hist_std  = _mean_std(bt7_vals [hist_mask])
+            t14_hist_mean, t14_hist_std = _mean_std(bt14_vals[hist_mask])
+            vis_hist_mean, vis_hist_std = _mean_std(vis_vals [hist_mask])
             
             if trace is not None:
                 trace.append({
@@ -225,37 +250,53 @@ def compute_background(
                     't14_stat_mean': t14_stat_mean, 't14_stat_std': t14_stat_std,
                     't7_hist_mean': t7_hist_mean, 't7_hist_std': t7_hist_std,
                     't14_hist_mean': t14_hist_mean, 't14_hist_std': t14_hist_std,
+                    'diff_peak': diff_peak, 'n_hist_selected': int(hist_mask.sum()),
                     'bt7_vals': bt7_vals, 'bt14_vals': bt14_vals,   # arrays, para graficar despues
                     'valid_bounds': (i_lo, i_hi, j_lo, j_hi),
                     'valid_mask': vm,
                 })
 
-            # ── Choose approach with lower BT7 std dev ──────────────────────
+            # ── Choose approach with lower BT7 std dev (ATBD 3.4.2.5) ────────
+            # This single comparison governs both temp7_bkg_mean and
+            # temp14_bkg_mean. Vis brightness is a special case: "for daylit
+            # pixels, the Channel 2 approach is always based on a histogram"
+            # (ATBD), so vis_mean_bkg always comes from the histogram
+            # selection regardless of which approach won for T7/T14.
+
             if t7_stat_std <= t7_hist_std:
                 chosen = "stat"
                 temp7_mean  = t7_stat_mean
                 temp14_mean = t14_stat_mean
-                # Visible: use histogram_bin_largest_count → peak bin value
-                vis_mean_bkg = vis_peak
+        
             else:
                 chosen = "hist"
                 temp7_mean  = t7_hist_mean
                 temp14_mean = t14_hist_mean
-                vis_mean_bkg = vis_hist_mean
+            
+            vis_mean_bkg = vis_hist_mean
 
             # ── Full window (non-filtered) stats for debugging ──────────────
             bt7_full  = bt7_win.ravel()
             bt14_full = bt14_win.ravel()
             refl_full = refl_win.ravel()
 
+            # Exclude the -9999 bad-radiance sentinel (set in run_part1 when
+            # rad7/rad14 < 0) so it doesn't corrupt Reflb / Rad_Diff_Sigma.
+            refl_good = refl_full[refl_full > -9998.0]
+            if refl_good.size == 0:
+                refl_good = refl_full  # fallback: whole window was bad
+
             stats = BackgroundStats(
                 temp7_bkg_mean           = temp7_mean,
                 temp14_bkg_mean          = temp14_mean,
-                vis_mean_bkg             = float(vis_mean_bkg) if vis_mean_bkg is not None else np.nan,
+                vis_mean_bkg             = float(vis_mean_bkg) if not np.isnan(vis_mean_bkg) else np.nan,
                 temp7_bkg_stddev         = t7_stat_std if chosen == "stat" else t7_hist_std,
                 temp14_bkg_stddev        = t14_stat_std if chosen == "stat" else t14_hist_std,
                 vis_bkg_histogram_stddev = float(vis_hist_std),
-                histogram_bin_largest_count = float(vis_peak),
+                # Table 3.6: same quantity as vis_diff_histogram (mean vis
+                # brightness via the histogram technique); kept as a separate
+                # legacy field for output parity with the reference code.
+                histogram_bin_largest_count = float(vis_hist_mean),
                 n_passes                 = n_iter,
                 n_valid                  = n_valid,
                 bkg_count_frac           = n_valid / window_size,
@@ -273,8 +314,8 @@ def compute_background(
                 temp7_stddev             = float(np.std (bt7_full)),
                 temp14_bkg_avg           = float(np.mean(bt14_full)),
                 temp14_stddev            = float(np.std (bt14_full)),
-                reflb                    = float(np.mean(refl_full)),
-                rad_diff_sigma           = float(np.std (refl_full)),
+                reflb                    = float(np.mean(refl_good)),
+                rad_diff_sigma           = float(np.std (refl_good)),
                 half_width               = half,
             )
             return stats
