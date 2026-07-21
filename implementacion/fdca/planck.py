@@ -142,7 +142,7 @@ def planck_temp_from_coeffs(rad, fk1, fk2, bc1, bc2):
         BT = (fk2 / np.log1p(fk1 / np.where(rad > 0, rad, np.nan)) - bc1) / bc2
     return BT
 
-def planck_rad_from_coeffs( T, fk1_target, fk2_target, bc1_target, bc2_target):
+def planck_rad_from_coeffs( T, fk1, fk2, bc1, bc2):
     """
     Inversión de planck_temp_from_coeffs: temperatura de brillo -> radiancia
     cruda, en la unidad nativa del INSTRUMENTO/BANDA cuyos coeficientes se
@@ -150,18 +150,17 @@ def planck_rad_from_coeffs( T, fk1_target, fk2_target, bc1_target, bc2_target):
 
     Se usa para responder: "si el canal `band_target` hubiera visto un
     cuerpo negro a temperatura T, ¿qué radiancia cruda habría medido?"
-    usando los coeficientes reales de ESE canal (fk1_target, fk2_target,
-    bc1_target, bc2_target), no los de la banda de origen de T.
+    usando los coeficientes reales de ESE canal (fk1, fk2, bc1, bc2),
+    no los de la banda de origen de T.
 
     Fórmula (despejada de planck_temp_from_coeffs):
         L = fk1 / (exp(fk2 / (BT*bc2 + bc1)) - 1)
 
     Parameters
     ----------
-    
     T : array-like [K]
         Temperatura de brillo de entrada (puede ser de OTRA banda, ej. BT14).
-    fk1_target, fk2_target, bc1_target, bc2_target : float
+    fk1, fk2, bc1, bc2 : float
         Coeficientes Planck de la banda EN LA QUE querés expresar la
         radiancia resultante (ej. coeffs7 si querés "BT14 visto en rad7").
 
@@ -173,8 +172,8 @@ def planck_rad_from_coeffs( T, fk1_target, fk2_target, bc1_target, bc2_target):
     """
     T = np.asarray(T, dtype=np.float64)
     with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-        exponent = fk2_target / (T * bc2_target + bc1_target)
-        L = fk1_target / (np.expm1(exponent))
+        exponent = fk2 / (T * bc2 + bc1)
+        L = fk1 / (np.expm1(exponent))
     return L
 
 def planck_deriv_T_from_coeffs(T, p: float, fk1, fk2, bc1, bc2):
