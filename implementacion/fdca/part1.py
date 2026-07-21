@@ -247,7 +247,7 @@ def _solar_correction(
     rad7_solar_corr = (rad7_corr_emiss - rad_solar) / emiss7
     return rad7_solar_corr, rad7from14_bkg
 
-def calculate_albedo(L: int, W: int, sza: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def calculate_albedo(L: int, W: int, sza: np.ndarray, refl2: Optional[np.ndarray] = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
         # ── Daylight flag ─────────────────────────────────────────────────────────
         is_day = (sza >= 0.0) & (sza <= MAX_SZA_DAYLIGHT)
@@ -319,7 +319,7 @@ def run_part1(
     
 
 
-    albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, sza)
+    albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, sza, refl2)
 
     # ── FPT mitigation: build hybrid longwave band (ATBD 3.4.2.2) ────────────
     use_hybrid = FPT > FPT_THRESHOLD
@@ -364,9 +364,10 @@ def run_part1(
                 fire_mask[i, j] = FireMask.ZENITH_BLOCK
                 continue
 
-            # Sun-glint / sub-solar block-out
+            # Sun-glint / sub-solar block-out (ATBD 3.4.2.3: code 60, advance to next pixel)
             if lza[i, j] < GLINT_THRESHOLD or glint_angle[i, j] < GLINT_THRESHOLD:
                 fire_mask[i, j] = FireMask.GLINT_BLOCK
+                continue
 
             # Bad/unusable pixels
             MISS_VAL = np.nan
@@ -401,11 +402,20 @@ def run_part1(
             if rad7[i, j] < 0 or rad14_eff[i, j] < 0:
                 fire_mask[i, j] = FireMask.NEG_RAD;        continue
 
+            # ── Per ATBD 3.4.2.3: initialize valid pixels to FIRE_FREE (100) ─
+            # El ATBD dice que todos los píxeles no-espacio se inicializan a 100.
+            # Los que llegan hasta aquí pasaron todos los tests de descarte previos.
+            fire_mask[i, j] = FireMask.FIRE_FREE
+
             # ── Minimum BT difference (warm pixels) ──────────────────────────
+            # ATBD: "If either of the Ch7 and Ch14 BTs are > 273K and the
+            # difference is 2K or less, the pixel is skipped (code 100)."
+            # "If the difference is < 2K and either Ch7 or Ch14 ≤ 273K → code 201"
             diff_bt = bt7[i, j] - bt14_eff[i, j]
             if (bt7[i, j] > 273 or bt14_eff[i, j] > 273) and abs(diff_bt) <= 2.0:
-                fire_mask[i, j] = FireMask.FIRE_FREE;      continue
-            if abs(diff_bt) < 2.0 and (bt7[i, j] <= 273 or bt14_eff[i, j] <= 273):
+                # fire_mask ya es FIRE_FREE (100), simplemente avanzar
+                continue
+            if abs(diff_bt) <= 2.0 and (bt7[i, j] <= 273 and bt14_eff[i, j] <= 273):
                 fire_mask[i, j] = FireMask.TOO_COLD;       continue
 
             # ── Day-dependent thresholds ──────────────────────────────────────
@@ -415,32 +425,40 @@ def run_part1(
             bt7_refl_thr = BT7_REFL_THRESH_NIGHT + (BT7_REFL_THRESH_SOLAR * sc if day_pixel else 0)
 
             # ── Cloud tests (ATBD 3.4.2.3) ────────────────────────────────────
+            # ATBD: "Each test is predicated on a prior test having been passed
+            # (the pixel must still retain a mask code of 100)."
+            # Nótese que los píxeles nublados NO se descartan acá — "These
+            # cloudy pixels MAY be found to contain fires later."
             is_cloudy = False
-            if fire_mask[i, j] == FireMask.FIRE_FREE:
 
+            if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if bt14_eff[i, j] < CLOUD_BT14_THRESH:
                     fire_mask[i, j] = FireMask.CLOUD_BT14;  is_cloudy = True
 
+            if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if bt7[i, j] - bt14_eff[i, j] < CLOUD_BT7_BT14_NEG:
                     fire_mask[i, j] = FireMask.CLOUD_BT14_BT15_NEG; is_cloudy = True
 
+            if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if (bt7[i, j] - bt14_eff[i, j] > CLOUD_BT7_BT14_POS
                         and bt7[i, j] < CLOUD_BT7_FOR_POS):
                     fire_mask[i, j] = FireMask.CLOUD_BT7_BT14_POS; is_cloudy = True
 
+            if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if day_pixel and refl2 is not None:
                     sza_d = sza[i, j]
                     if (sza_d <= 70 or (sza_d <= 60 and lza[i, j] <= 60)):
                         if not np.isnan(albedo[i, j]) and albedo[i, j] > CLOUD_ALBEDO_THRESH:
                             fire_mask[i, j] = FireMask.CLOUD_ALBEDO; is_cloudy = True
 
+            if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if bt15 is not None:
                     if bt15[i, j] <= CLOUD_BT15_THRESH:
                         fire_mask[i, j] = FireMask.CLOUD_BT15; is_cloudy = True
-                    if bt14_eff[i, j] < CLOUD_BT14_THRESH:
+                    elif bt14_eff[i, j] < CLOUD_BT14_THRESH:
                         if bt14_eff[i, j] - bt15[i, j] < CLOUD_BT14_BT15_NEG:
                             fire_mask[i, j] = FireMask.CLOUD_BT14_BT15_NEG; is_cloudy = True
-                        if bt14_eff[i, j] - bt15[i, j] > CLOUD_BT14_BT15_POS:
+                        elif bt14_eff[i, j] - bt15[i, j] > CLOUD_BT14_BT15_POS:
                             fire_mask[i, j] = FireMask.CLOUD_BT14_BT15_POS; is_cloudy = True
 
             # ── Along-scan reflectivity test (ATBD 3.4.2.4) ──────────────────

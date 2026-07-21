@@ -278,13 +278,14 @@ def compute_background(
             # ── Full window (non-filtered) stats for debugging ──────────────
             bt7_full  = bt7_win.ravel()
             bt14_full = bt14_win.ravel()
-            refl_full = refl_win.ravel()
 
-            # Exclude the -9999 bad-radiance sentinel (set in run_part1 when
-            # rad7/rad14 < 0) so it doesn't corrupt Reflb / Rad_Diff_Sigma.
-            refl_good = refl_full[refl_full > -9998.0]
-            if refl_good.size == 0:
-                refl_good = refl_full  # fallback: whole window was bad
+            # ── Reflb and Rad_Diff_Sigma (ATBD Table 3.6) ────────────────────
+            # "The mean/std of the Ch7 minus Ch14 radiance difference (in Ch7
+            # space) for all [valid] pixels within the immediate vicinity."
+            # Must be computed on valid pixels only (not full window).
+            refl_valid = refl_vals[refl_vals > -9998.0]
+            if refl_valid.size == 0:
+                refl_valid = refl_vals  # fallback: all valid were sentinel
 
             stats = BackgroundStats(
                 temp7_bkg_mean           = temp7_mean,
@@ -314,8 +315,8 @@ def compute_background(
                 temp7_stddev             = float(np.std (bt7_full)),
                 temp14_bkg_avg           = float(np.mean(bt14_full)),
                 temp14_stddev            = float(np.std (bt14_full)),
-                reflb                    = float(np.mean(refl_good)),
-                rad_diff_sigma           = float(np.std (refl_good)),
+                reflb                    = float(np.mean(refl_valid)),
+                rad_diff_sigma           = float(np.std (refl_valid)),
                 half_width               = half,
             )
             return stats
