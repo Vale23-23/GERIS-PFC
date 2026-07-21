@@ -529,17 +529,21 @@ def run_part1(
                          or bt7[i, j] - bkg.temp7_bkg_mean < 0)):
                 continue
 
-            # FailChar = 1
+            # FailChar = 1: pixel is NOT a fire (ATBD 3.4.2.7)
+            # "the algorithm concludes that the pixel is a non-fire pixel"
             fc = FailChar.NONE
             if ((bt7[i, j] - bt14_eff[i, j] < std_7b14b)
                     and (refl_ij < std_reflb_max or pass_along)):
                 fc = FailChar.F1
+                fail_char_arr[i, j] = fc
+                continue   # Not a fire
 
-            # FailChar = 2
+            # FailChar = 2: pixel is NOT a fire (ATBD 3.4.2.7)
             if ((bt7[i, j] - bkg.temp7_bkg_mean < std_7b)
                     and (refl_ij < std_reflb_max or pass_along)):
-                if fc == FailChar.NONE:
-                    fc = FailChar.F2
+                fc = FailChar.F2
+                fail_char_arr[i, j] = fc
+                continue   # Not a fire
 
             fail_char_arr[i, j] = fc
 
