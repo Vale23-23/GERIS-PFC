@@ -109,28 +109,95 @@ class FireCandidate:
 # ── Helper: contextual thresholds (ATBD 3.4.2.6) ────────────────────────────
 def _contextual_thresholds(bkg: BackgroundStats, sza_cos: float):
     """
+    Umbrales contextuales (ATBD 3.4.2.6) — cuatro pruebas de desviación estándar
+    escaladas y acotadas, calculadas sobre las estadísticas de background de 3.4.2.5.
+
     Returns (std_7b14b, std_7b, std_reflb, std_reflb_max, pass_along_scan_fn)
     """
     n_pass = bkg.n_passes
 
-    # Std Dev (Tb3.9 - Tb11.2) test  →  max 4.0
+    # Std. Dev. (Tb3.9 – Tb11.2) test [ATBD 3.4.2.6]:
+    # desvío estándar de (BT7-BT14) dentro de la ventana de background,
+    # escalado x3.0, con techo en 4.0K. Se usa para descartar como "no-fuego"
+    # a píxeles cuya diferencia térmica no se aparta lo suficiente del ruido
+    # normal de la ventana circundante.
     std_7b14b = min(4.0, 3.0 * bkg.std_dev_7_14_diff)
 
-    # Std Dev (Tb3.9) test  →  clamp [4.0, 10.0]
+    # Std. Dev. (Tb3.9) test [ATBD 3.4.2.6]:
+    # desvío estándar de BT7 dentro de la ventana, escalado x3.75, más un offset
+    # que crece con la cantidad de expansiones de ventana (n_passes/3, tope 5.0) —
+    # a mayor n_passes, la ventana es más grande y heterogénea, así que se tolera
+    # más variación antes de considerar "anómalo" un BT7. Acotado entre 4K y 10K.
     bg_offset = min(5.0, n_pass / 3.0)
     std_7b = 3.75 * bkg.temp7_bkg_stddev + bg_offset
     std_7b = max(4.0, min(10.0, std_7b))
 
-    # Std Dev (Reflb) test  →  clamp [0.25, 1.0]
+    # Std. Dev. (Reflb) test [ATBD 3.4.2.6]:
+    # desvío estándar del producto de reflectividad Refl (BT7-BT14 en espacio
+    # de radiancia de canal 7) dentro de la ventana, escalado x3.0, acotado
+    # entre 0.25 y 1.0. Umbral "estricto" para el test de reflectividad —
+    # se usa junto con std_7b14b/std_7b para descartar no-fuegos.
     std_reflb = 3.0 * bkg.rad_diff_sigma
     std_reflb = max(0.25, min(1.0, std_reflb))
 
-    # Std Dev (Reflb) max test  →  clamp [2.5, 10.0]
+    # Std. Dev. (Reflb) max test [ATBD 3.4.2.6]:
+    # segunda versión del test de Reflb, con escalado más laxo (x2.5 en vez
+    # de x3.0) y un offset que también crece con n_passes (mismo patrón que
+    # std_7b: ventanas más grandes toleran más variación). Acotado entre
+    # 2.5 y 10.0. Es el umbral "permisivo" — se usa en OR con el along-scan
+    # test para no descartar fuegos reales por variación local de reflectividad.
     std_reflb_max = 2.5 * bkg.rad_diff_sigma + 0.5 * min(5.0, n_pass / 3.0)
     std_reflb_max = max(2.5, min(10.0, std_reflb_max))
 
     return std_7b14b, std_7b, std_reflb, std_reflb_max
+def _along_scan_reflectivity_test(
+    refl: np.ndarray, i: int, j: int, W: int,
+    std_reflb: float, bt7_ij: float, bt7_refl_thr: float,
+) -> bool:
+    """
+    Along scan-line radiance test [ATBD 3.4.2.6].
 
+    Chequea que el píxel de interés no sea un "salto" anómalo aislado
+    comparándolo contra los píxeles ±2 elementos en la misma fila (no los
+    adyacentes ±1 — la prueba busca anomalías localizadas, no bordes suaves).
+
+    Si AMBOS vecinos (j-2 y j+2) tienen Refl por debajo de std_reflb
+    (es decir, el entorno es "plano", sin actividad térmica) Y el BT7 del
+    píxel de interés está por debajo del umbral T3.9ReflThreshold (315K de
+    noche, 315+5*cos(SZA) de día — ATBD 3.4.2.3), entonces el test da False:
+    el píxel se interpreta como ruido aislado, no como fuego real.
+    En cualquier otro caso (vecinos con actividad, o BT7 alto) el test pasa (True).
+    """
+    def _neighbor(jj):
+        jj = max(0, min(W - 1, jj))
+        return refl[i, jj]
+
+    r_m2 = _neighbor(j - 2)
+    r_p2 = _neighbor(j + 2)
+    if abs(r_m2) < std_reflb and abs(r_p2) < std_reflb:
+        if bt7_ij < bt7_refl_thr:
+            return False
+    return True
+
+
+def _background_albedo(vis_mean_bkg: float, sza_cos: float, day_pixel: bool) -> float:
+    """
+    ABkg — Albedo de fondo [ATBD 3.4.2.6].
+
+    Convierte el brillo visible de fondo (Vis_Brightness_Value, calculado en
+    3.4.2.5 con el enfoque estadístico o histograma según cuál ganó) a un
+    valor de albedo comparable con el albedo del propio píxel (refl2/cos(SZA)).
+
+    ABkg = ((Vis_Brightness_Value / 25.5)^2) / (cos(SZA) * 100)
+
+    Solo tiene sentido de día (sin Canal 2 visible no hay brillo que convertir).
+    Se usa más adelante (ATBD 3.4.2.8) para detectar nubes/humo semitransparente:
+    la diferencia Albedo_pixel - ABkg indica cuánto se "iluminó" el píxel
+    respecto a su entorno esperado.
+    """
+    if not day_pixel or np.isnan(vis_mean_bkg):
+        return np.nan
+    return ((vis_mean_bkg / 25.5) ** 2) / (max(sza_cos, 1e-6) * 100.0)
 
 # ── TPW look-up correction (ATBD 3.4.2.8) ────────────────────────────────────
 def _tpw_lut_indices(tpw_mm: float, lza_deg: float) -> tuple[int, int]:
@@ -423,21 +490,10 @@ def run_part1(
             std_7b14b, std_7b, std_reflb, std_reflb_max = _contextual_thresholds(bkg, sc)
 
             # Along-scan ±2 test (used in 3.4.2.6)
-            def _along_scan_test() -> bool:
-                r_m2 = _refl_neighbor(j-2)
-                r_p2 = _refl_neighbor(j+2)
-                if abs(r_m2) < std_reflb and abs(r_p2) < std_reflb:
-                    if bt7[i, j] < bt7_refl_thr:
-                        return False
-                return True
-
-            pass_along = _along_scan_test()
-
+            pass_along = _along_scan_reflectivity_test(refl, i, j, W, std_reflb, bt7[i, j], bt7_refl_thr)
+            
             # Background albedo (daylight only)
-            alb_bkg = np.nan
-            if day_pixel and not np.isnan(bkg.vis_mean_bkg):
-                vis_cnt = bkg.vis_mean_bkg
-                alb_bkg = ((vis_cnt / 25.5) ** 2) / (max(sc, 1e-6) * 100.0)
+            alb_bkg = _background_albedo(bkg.vis_mean_bkg, sc, day_pixel)    
 
             # ── Apply thresholds to identify fire pixels (ATBD 3.4.2.7) ──────
             # Saturated / max-iterations quick path
