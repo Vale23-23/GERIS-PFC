@@ -642,10 +642,13 @@ def run_part1(
             elif T7c - Tbc < 2.0:
                 fc = FailChar.F5
 
-            # Sun-glint flag
-            if day_pixel and not np.isnan(alb_ij):
-                if alb_ij >= 0.25 or (not np.isnan(alb_bkg) and alb_ij - alb_bkg > 0.07):
-                    fc = FailChar.F8
+            # Sun-glint flag (ATBD 3.4.2.9)
+            # Solo se setea F8 si el pixel NO fue flaggeado por F3/F4/F5/F10
+            # (esos ya tienen su camino definido: skip Dozier → last chance)
+            if fc == FailChar.NONE:
+                if day_pixel and not np.isnan(alb_ij):
+                    if alb_ij >= 0.25 or (not np.isnan(alb_bkg) and alb_ij - alb_bkg > 0.07):
+                        fc = FailChar.F8
 
             fail_char_arr[i, j] = fc
 
