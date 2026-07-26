@@ -64,6 +64,11 @@ from pathlib import Path
 from datetime import datetime, timezone
 import pyproj
 
+from dotenv import load_dotenv
+load_dotenv()   # lee .env si existe; no falla si no existe
+
+import xarray as xr
+
 # ── Constantes físicas para conversión de radiancia B02 ──────────────────────
 # Irradiancia solar exoatmosférica para ABI Band 2 (0.64 µm) [W·m⁻²·µm⁻¹]
 # Valor de la tabla de calibración ABI (GOES-R PUG-L1B, Tabla 7-6)
@@ -481,6 +486,77 @@ def get_tpw_estimate(lat: np.ndarray, lon: np.ndarray,
 
     return tpw.astype(np.float32)
 
+def load_emissivity_camel(
+    camel_nc_path: str,
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Carga emisividad CAMEL V3 climatología e interpola a bandas ABI 7 y 14.
+    Parameters
+    ----------
+    camel_nc_path : str
+        Ruta al archivo CAM5K30EMCLIM_emis_climatology_MMMonth_V003.nc
+    lat_grid, lon_grid : np.ndarray
+        Grillas de latitud/longitud de la escena ABI (mismo shape)
+    Returns
+    -------
+    emiss7, emiss14 : np.ndarray  (mismo shape que lat_grid)
+        Emisividad interpolada a 3.9 µm y 11.2 µm. np.nan donde no hay dato
+        válido (agua, sin cobertura, fill value, o píxel de espacio).
+    """
+    ds = xr.open_dataset(camel_nc_path)  # decode_cf=True por defecto → NaN + escala ya aplicados
+    wl = ds["wavelength"].values.astype(float)  # µm, longitud = n canales espectrales
+
+    def _nearest_pair(target_um: float) -> tuple[int, int]:
+        idx = np.argsort(np.abs(wl - target_um))[:2]
+        return tuple(sorted(int(i) for i in idx))
+
+    idx7  = _nearest_pair(3.9)
+    idx14 = _nearest_pair(11.2)
+
+    # Dimensión espectral: la que tiene el mismo largo que 'wavelength'
+    # (no se asume un nombre fijo, por si difiere del producto mensual)
+    spectral_dim = next(d for d in ds["camel_emis"].dims if ds.sizes[d] == len(wl))
+    emis = ds["camel_emis"]
+
+    def _interp_band(target_um: float, idx_pair: tuple[int, int]):
+        wl0, wl1 = wl[idx_pair[0]], wl[idx_pair[1]]
+        e0 = emis.isel({spectral_dim: idx_pair[0]})
+        e1 = emis.isel({spectral_dim: idx_pair[1]})
+        w = (target_um - wl0) / (wl1 - wl0)
+        return (1 - w) * e0 + w * e1
+
+    emis7_da  = _interp_band(3.9,  idx7)
+    emis14_da = _interp_band(11.2, idx14)
+
+    # ── Selección puntual, con manejo explícito de NaN (píxeles de espacio) ──
+    # .sel(..., method="nearest") no tolera NaN en el indexador — hay que
+    # sacar esos píxeles antes de la selección y reinsertar NaN después.
+    lat_flat = lat_grid.ravel()
+    lon_flat = lon_grid.ravel()
+    valid = ~(np.isnan(lat_flat) | np.isnan(lon_flat))
+
+    emiss7_flat  = np.full(lat_flat.shape, np.nan, dtype=np.float32)
+    emiss14_flat = np.full(lat_flat.shape, np.nan, dtype=np.float32)
+
+    if valid.any():
+        pixel_lat = xr.DataArray(lat_flat[valid], dims="pixel")
+        pixel_lon = xr.DataArray(lon_flat[valid], dims="pixel")
+
+        emiss7_flat[valid]  = emis7_da.sel(
+            latitude=pixel_lat, longitude=pixel_lon, method="nearest"
+        ).values
+        emiss14_flat[valid] = emis14_da.sel(
+            latitude=pixel_lat, longitude=pixel_lon, method="nearest"
+        ).values
+
+    ds.close()
+    return (
+        emiss7_flat.reshape(lat_grid.shape),
+        emiss14_flat.reshape(lat_grid.shape),
+    )
+
 
 # ── Función principal ─────────────────────────────────────────────────────────
 
@@ -686,14 +762,27 @@ def load_fdca_input(
             print(f"  {'refl2 range':<22}: {np.nanmin(refl2):.3f} – {np.nanmax(refl2):.3f}")
 
 
-    # ── Emisividad ────────────────────────────────────────────────────────────
-    # Valores típicos de vegetación/suelo para Uruguay
-    # Para producción: usar ABI ANC emissivity product (si está disponible)
-    emiss7  = np.full(shape, 0.95, dtype=np.float32)
-    emiss14 = np.full(shape, 0.97, dtype=np.float32)
-     
-    # Global Emissivity (input) in Table 3.2 Input list of required non-ABI ancillary dynamic data
-    # VER ESTO, SE DESCARGA LA BASE DE DATOS DE UNA PAGINA CON PREVIO REGISTRO
+    # ── Emisividad: MEaSUREs CAMEL V3 climatología ───────────────────────────
+    # La descarga es responsabilidad de downloader.py/pipeline.py.
+    # Acá solo se busca localmente el .nc ya descargado; si falta, se avisa y se usa el placeholder usado previamente.
+    import glob
+    camel_dir  = region_cfg.get("camel_emissivity_dir", os.path.join(base, "camel_emissivity"))
+    matches    = glob.glob(os.path.join(camel_dir, f"*{dt.month:02d}Month*.nc"))
+    camel_path = matches[0] if matches else None
+
+    if camel_path is not None:
+        emiss7, emiss14 = load_emissivity_camel(camel_path, lat2d, lon2d)
+        emiss7  = np.where(np.isnan(emiss7),  0.95, emiss7 ).astype(np.float32)
+        emiss14 = np.where(np.isnan(emiss14), 0.97, emiss14).astype(np.float32)
+        if verbose:
+            print(f"  {'Emisividad':<22}: CAMEL V3 clim. ({os.path.basename(camel_path)})")
+    else:
+        emiss7  = np.full(shape, 0.95, dtype=np.float32)
+        emiss14 = np.full(shape, 0.97, dtype=np.float32)
+        if verbose:
+            print(f"  {'Emisividad':<22}: ⚠ placeholder — corré "
+                  f"'python pipeline.py download-camel --month {dt.month} --region {region}' "
+                  f"en la branch de descarga")
 
 
 
