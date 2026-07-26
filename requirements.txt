@@ -13,3 +13,5 @@ geopandas
 shapely
 h5py
 boto3
+earthaccess>=0.11
+python-dotenv
