@@ -18,6 +18,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import downloader
 import manifest
 
+from dotenv import load_dotenv
+load_dotenv()   # lee .env de la raíz del repo si existe; no falla si no existe
+
 
 def load_config(path="config.yaml"):
     with open(path) as f:
@@ -355,6 +358,23 @@ def cmd_retry(args, cfg):
     print(f"\n✔ Reintentos completados: descargados={downloaded}  |  ya existían={skipped}  |  errores={errors}")
     print(f"📋 Manifest actualizado en: {output_root}/manifest.json")
 
+def cmd_download_camel(args, cfg):
+    region_cfg = cfg["regions"].get(args.region)
+    if not region_cfg:
+        print(f"❌ Región '{args.region}' no encontrada en config.yaml")
+        return
+
+    output_root = os.path.join(cfg["output_root"], args.region)
+    camel_dir   = region_cfg.get(
+        "camel_emissivity_dir",
+        os.path.join(output_root, "camel_emissivity"),
+    )
+
+    try:
+        path = downloader.download_camel_climatology(args.month, camel_dir)
+        print(f"✅ Climatología CAMEL V3 lista para el mes {args.month:02d}: {path}")
+    except Exception as e:
+        print(f"❌ Error descargando climatología CAMEL: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="GOES dataset pipeline")
@@ -393,6 +413,11 @@ def main():
     rt.add_argument("--products", nargs="+", help="Limit retry to these product IDs")
     rt.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
 
+    # download-camel
+    dc = sub.add_parser("download-camel", help="Descarga climatología de emisividad CAMEL V3 (LP DAAC)")
+    dc.add_argument("--region", required=True, help="Region key from config.yaml")
+    dc.add_argument("--month",  required=True, type=int, choices=range(1, 13), help="Mes calendario (1-12)")
+
     sp = sub.add_parser("spatial-report", help="Muestra el fuego por departamento para un timestamp")
     sp.add_argument("--region", required=True, help="Región (ej: uruguay)")
     sp.add_argument("--timestamp", required=True, help="Timestamp (ej: 20250926_1900)")
@@ -412,6 +437,8 @@ def main():
         cmd_fire_stats(args, cfg)
     elif args.command == "retry":
         cmd_retry(args, cfg)
+    elif args.command == "download-camel":
+        cmd_download_camel(args, cfg)
     elif args.command == "spatial-report":
         cmd_spatial_report(args, cfg)
     elif args.command == "visualize":     
