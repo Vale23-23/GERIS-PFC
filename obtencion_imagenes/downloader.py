@@ -6,6 +6,7 @@ import os
 import numpy as np
 import pyproj
 from goes2go import GOES
+import earthaccess
 
 # Bandas de alta resolución que no pueden cargarse con nearesttime() completo
 # porque el full disk pesa demasiado (21696x21696 píxeles)
@@ -303,3 +304,43 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
             "product_path": s3_path,
         }
 
+def find_camel_climatology_file(camel_dir: str, month: int) -> str | None:
+    """
+    Busca localmente el archivo de climatología CAMEL V3 para el mes dado.
+    Devuelve la ruta si existe, None si falta.
+    """
+    if not os.path.isdir(camel_dir):
+        return None
+    frag = f"{month:02d}Month"
+    matches = [f for f in os.listdir(camel_dir) if frag in f and f.endswith(".nc")]
+    return os.path.join(camel_dir, matches[0]) if matches else None
+
+
+def download_camel_climatology(month: int, out_dir: str) -> str:
+    """
+    Descarga el archivo de climatología mensual CAMEL V3 (CAM5K30EMCLIM)
+    para el mes calendario dado, vía earthaccess.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    existing = find_camel_climatology_file(out_dir, month)
+    if existing is not None:
+        return existing
+
+    auth = earthaccess.login(strategy="environment")
+    if not auth.authenticated:
+        raise RuntimeError(
+            "No se pudo autenticar con Earthdata. Verificá que .env tenga "
+            "EARTHDATA_USERNAME y EARTHDATA_PASSWORD correctos."
+        )
+
+    results = earthaccess.search_data(short_name="CAM5K30EMCLIM", version="003")
+    frag = f"{month:02d}Month"
+    match = [r for r in results if frag in r["umm"]["GranuleUR"]]
+    if not match:
+        raise FileNotFoundError(
+            f"No se encontró granule CAM5K30EMCLIM para el mes {month:02d} en CMR."
+        )
+
+    downloaded = earthaccess.download(match, out_dir)
+    return downloaded[0]
