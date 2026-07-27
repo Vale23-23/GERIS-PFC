@@ -1,0 +1,9 @@
+numpy
+pyproj
+matplotlib
+xarray
+netCDF4
+python-dotenv
+PyYAML
+Pillow
+requests
