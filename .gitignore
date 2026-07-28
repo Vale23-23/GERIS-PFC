@@ -8,6 +8,7 @@ obtencion_imagenes/dataset/
 *.npy
 *.npz
 *.nc
+
 implementacion/data/
 
 # Entorno virtual
@@ -32,3 +33,4 @@ goes2go/
 .ipynb_checkpoints/
 prueba.ipynb
 
+implementacion/fdca/__pycache__
