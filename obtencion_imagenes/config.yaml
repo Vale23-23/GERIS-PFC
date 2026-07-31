@@ -29,12 +29,19 @@ products:
     dtype: float32
     description: "Longwave IR 11.2µm - thermal context"
 
-  - id: ABI-L2-FDCF
+  - id: ABI-L2-FDCF-Mask
+    product: ABI-L2-FDCF
+    band: null
+    variable: Mask
+    dtype: int16
+    description: "Fire detection mask - ground truth label"
+
+  - id: ABI-L2-FDCF-DQF
     product: ABI-L2-FDCF
     band: null
     variable: DQF
     dtype: int8
-    description: "Fire detection mask - ground truth label"
+    description: "Data Quality Flag"
 
   # ── Bandas nuevas para FDCA ───────────────────────────────────────────────
   - id: ABI-L1b-Rad-B13
