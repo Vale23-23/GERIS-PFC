@@ -2,8 +2,8 @@
 pipeline.py — CLI entry point for the GOES dataset pipeline.
 
 Usage:
-  python pipeline.py download --region uruguay --start "2025-09-01 00:00" --end "2025-09-30 23:00" --products ABI-L1b-Rad-B07 ABI-L2-FDCF
-  python pipeline.py status   --region uruguay --products ABI-L1b-Rad-B07 ABI-L2-FDCF
+  python pipeline.py download --region uruguay --start "2025-09-01 00:00" --end "2025-09-30 23:00" --products ABI-L1b-Rad-B07 ABI-L1b-Rad-B14 ABI-L2-FDCF-Mask ABI-L2-FDCF-DQF ABI-L1b-Rad-B13 ABI-L1b-Rad-B15 ABI-L1b-Rad-B02
+  python pipeline.py status   --region uruguay --products ABI-L1b-Rad-B07 ABI-L1b-Rad-B14 ABI-L2-FDCF-Mask ABI-L2-FDCF-DQF ABI-L1b-Rad-B13 ABI-L1b-Rad-B15 ABI-L1b-Rad-B02
   python pipeline.py list-products
   python pipeline.py list-regions
 """
