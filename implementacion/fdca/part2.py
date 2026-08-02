@@ -60,6 +60,81 @@ def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
 
     return False, "" # devuelve qué test disparó la eliminación 
 
+def _reassign_cloud_glint_edge(cand: FireCandidate, day_off: float) -> bool:
+    """
+    Sun-glint / cloud-fog edge re-evaluation (ATBD 3.4.2.14, segunda mitad).
+
+    Solo aplica a candidatos con flag F9 o F10 (glint / smoke-nube fina,
+    ver 3.4.2.8-3.4.2.9). Si el albedo indica borde de nube/glint Y la
+    BT7 corregida está por debajo del umbral, corresponde reasignar a F11.
+
+    Returns
+    -------
+    bool — True si corresponde reasignar a F11 (el llamador hace la mutación)
+    """
+    if cand.fail_char not in (FailChar.F9, FailChar.F10):
+        return False
+
+    alb  = cand.albedo     if not np.isnan(cand.albedo)     else 0.0
+    albb = cand.albedo_bkg if not np.isnan(cand.albedo_bkg) else 0.0
+
+    cloud_test = (alb > 0.25 or alb - albb >= 0.10)
+    bt_test    = cand.bt7_corr < 292.5 + day_off
+    return cloud_test and bt_test
+
+
+def _reassign_fog_edge(cand: FireCandidate, sza_cos: float) -> bool:
+    """
+    Segundo test de reasignación a F11 (ATBD 3.4.2.15, distinto del de
+    3.4.2.14: acá la condición es sobre la diferencia BT3.9-BT11.2 del
+    background, no sobre albedo). Aplica a cualquier candidato con flag
+    >= F9 (incluye los ya reasignados a F11 en 3.4.2.14 — el test es
+    idempotente en ese caso).
+    """
+    if cand.fail_char < FailChar.F9:
+        return False
+
+    bkg_diff = cand.bt7_bkg - cand.bt14_bkg
+    fog_c1 = sza_cos * 20.0 + 5.0 - bkg_diff < 1.5
+    fog_c2 = cand.bt7_corr - cand.bt7_bkg <= 4.0
+    return fog_c1 and fog_c2
+
+
+def _upgrade_confidence(cand: FireCandidate) -> tuple[Optional[int], int]:
+    """
+    High/medium confidence upgrade (ATBD 3.4.2.15).
+    Solo evalúa candidatos con flag en {F3, F4, F6, F8} y fire_temp < 0
+    (o sea, que Part I no encontró solución válida de Dozier).
+
+    Returns
+    -------
+    (fire_code, flag_delta) — fire_code es None si no corresponde evaluar
+    (el llamador debe usar el resultado de _assign_fire_category en ese caso).
+    flag_delta es 0, 20 o 30, para sumar a cand.fail_char.
+    """
+    if cand.fail_char not in (FailChar.F3, FailChar.F4, FailChar.F6, FailChar.F8):
+        return None, 0
+
+    Tt = cand.fire_temp
+    if Tt is None or np.isnan(Tt) or Tt >= 0:
+        return None, 0
+
+    thr1_h, thr2_h = _high_med_thresholds(cand, "high")
+    thr1_m, thr2_m = _high_med_thresholds(cand, "medium")
+
+    bt7c = cand.bt7_corr
+    Tb7  = cand.bt7_bkg
+    Tb14 = cand.bt14_bkg
+    refl_test = (cand.refl_pixel - cand.reflb >= cand.std_dev_reflb_max
+                 or _refl_along_scan_part2(cand))
+
+    if bt7c - Tb7 > thr1_h and Tb7 - Tb14 > thr2_h and refl_test:
+        return FireMask.HIGH_PROB, 30
+    if bt7c - Tb7 > thr1_m and Tb7 - Tb14 > thr2_m and refl_test:
+        return FireMask.MED_PROB, 20
+    return FireMask.LOW_PROB, 0
+
+
 def _high_med_thresholds(
     cand: FireCandidate, confidence: str
 ) -> tuple[float, float]:
@@ -121,7 +196,6 @@ def _refl_along_scan_part2(cand: FireCandidate) -> bool:
     """Along-scan test (same as Part I)."""
     return cand.pass_along_scan
 
-
 def run_part2(
     candidates:    List[FireCandidate],
     fire_mask:     np.ndarray,
@@ -150,81 +224,42 @@ def run_part2(
 
     for cand in candidates:
         i, j = cand.i, cand.j
-        bt7   = cand.bt7
-        bt7_bkg = cand.bt7_bkg
-        refl  = cand.refl_pixel
-        reflb = cand.reflb
         sza_cos = np.cos(np.radians(cand.sza))
-        is_day = cand.is_day
+        is_day  = cand.is_day
 
+        # ── 3.4.2.14 (primera mitad): eliminación de falsas alarmas ─────────
         eliminated, _reason_314 = _eliminate_false_alarm(cand)
         if eliminated:
-            continue   # Not a fire
-
+            continue
         day_off = sza_cos * 20.0 if is_day else 0.0
 
-        # ── Sun-glint re-evaluation ────────────────────────────────────────────
-        # ── Cloud/fog edge re-evaluation (ATBD 3.4.2.14) ─────────────────────
+        # ── 3.4.2.14 (segunda mitad): re-evaluación glint/borde-de-nube ─────
         fc = cand.fail_char
-        alb  = cand.albedo     if not np.isnan(cand.albedo)     else 0.0
-        albb = cand.albedo_bkg if not np.isnan(cand.albedo_bkg) else 0.0
+        if _reassign_cloud_glint_edge(cand, day_off):
+            cand.fail_char = FailChar.F11
+            fail_char_arr[i, j] = FailChar.F11
+            fc = FailChar.F11
 
-        if fc in (FailChar.F9, FailChar.F10):
-            cloud_test = (alb > 0.25 or alb - albb >= 0.10)
-            bt_test    = cand.bt7_corr < 292.5 + day_off
-            if cloud_test and bt_test:
-                cand.fail_char = FailChar.F11
-                fail_char_arr[i, j] = FailChar.F11
-                fc = FailChar.F11
+        # ── 3.4.2.15: segundo test de borde-de-nube/niebla ───────────────────
+        if _reassign_fog_edge(cand, sza_cos):
+            cand.fail_char = FailChar.F11
+            fail_char_arr[i, j] = FailChar.F11
+            fc = FailChar.F11
 
-        # ── Fog/cloud-edge fog flag (ATBD 3.4.2.15 edge case) ─────────────────
-        if fc >= FailChar.F9:
-            bt7c   = cand.bt7_corr
-            Tb7    = cand.bt7_bkg
-            Tb14   = cand.bt14_bkg
-            bkg_diff = Tb7 - Tb14
-            fog_c1 = sza_cos * 20.0 + 5.0 - bkg_diff < 1.5
-            fog_c2 = bt7c - Tb7 <= 4.0
-            if fog_c1 and fog_c2:
-                cand.fail_char = FailChar.F11
-                fail_char_arr[i, j] = FailChar.F11
-                fc = FailChar.F11
-
-        # ── High / medium probability categorization ──────────────────────────
+        # ── 3.4.2.15: categorización + upgrade de confianza ──────────────────
         fire_code = _assign_fire_category(cand, fire_mask)
 
-        # For possible fire pixels (fc in 3,4,6,8 → attempt up/down-grade)
-        Tt = cand.fire_temp
-        if fc in (FailChar.F3, FailChar.F4, FailChar.F6, FailChar.F8):
-            if Tt is not None and not np.isnan(Tt) and Tt < 0:
-                # Check high confidence
-                thr1_h, thr2_h = _high_med_thresholds(cand, "high")
-                thr1_m, thr2_m = _high_med_thresholds(cand, "medium")
-
-                bt7c   = cand.bt7_corr
-                Tb7    = cand.bt7_bkg
-                Tb14   = cand.bt14_bkg
-                refl_test = (refl - reflb >= cand.std_dev_reflb_max
-                             or _refl_along_scan_part2(cand))
-
-                if (bt7c - Tb7 > thr1_h
-                        and Tb7 - Tb14 > thr2_h
-                        and refl_test):
-                    fire_code = FireMask.HIGH_PROB
-                    cand.fail_char += 30
-                elif (bt7c - Tb7 > thr1_m
-                        and Tb7 - Tb14 > thr2_m
-                        and refl_test):
-                    fire_code = FireMask.MED_PROB
-                    cand.fail_char += 20
-                else:
-                    fire_code = FireMask.LOW_PROB
+        upgraded_code, flag_delta = _upgrade_confidence(cand)
+        if upgraded_code is not None:
+            fire_code = upgraded_code
+            cand.fail_char += flag_delta
 
         # No FRP for passes > 10
         if cand.n_passes > BKG_MAX_ITER:
             cand.frp = -99.0
 
         # Finalize fire_temp / fire_area for non-processed categories
+        Tt = cand.fire_temp
         if fire_code != FireMask.PROCESSED:
             if Tt is not None and not np.isnan(Tt) and Tt < MIN_FIRE_TEMP:
                 cand.fire_area = -999.0
@@ -250,7 +285,7 @@ def run_part2(
         if temporally_filtered:
             fire_code += 20   # 10→30, 11→31, ... 15→35
 
-        # ── Write final mask code ─────────────────────────────────────────────
+        # ── Write final mask code (3.4.2.17/18: salida) ──────────────────────
         fire_mask[i, j] = fire_code
         confirmed.append(cand)
 
