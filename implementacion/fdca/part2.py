@@ -22,6 +22,43 @@ def _std_reflb_part2(rad_diff_sigma: float) -> float:
     """
     return max(2.5, 2.5 * rad_diff_sigma)
 
+def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
+    """
+    Threshold tests to eliminate false alarms (ATBD 3.4.2.14).
+    Si alguno de los tres tests OR da True, el candidato se descarta como fuego.
+
+    Returns
+    -------
+    (eliminated, reason) — reason ∈ {"cond1", "cond2", "cond3", ""}
+    """
+    bt7     = cand.bt7
+    bt7_bkg = cand.bt7_bkg
+    refl    = cand.refl_pixel
+    reflb   = cand.reflb
+    sza_cos = np.cos(np.radians(cand.sza))
+    is_day  = cand.is_day
+    day_off = sza_cos * 20.0 if is_day else 0.0
+
+    # cálculo de std_reflb_p2 y refl_ok
+    std_reflb_p2 = _std_reflb_part2(cand.rad_diff_sigma)
+    refl_ok = (refl - reflb < std_reflb_p2) or _refl_along_scan_part2(cand)
+
+    if (bt7 - bt7_bkg < 2.0) and refl_ok:
+        return True, "cond1"
+
+    if (bt7 < 290.0 + day_off
+            and bt7 - bt7_bkg < 10.0
+            and bt7 - cand.bt14 < 25.0
+            and refl_ok):
+        return True, "cond2"
+
+    if (bt7 < 290.0 + day_off
+            and bt7_bkg < 280.0 + day_off
+            and cand.n_passes >= BKG_MAX_ITER
+            and refl_ok):
+        return True, "cond3"
+
+    return False, "" # devuelve qué test disparó la eliminación 
 
 def _high_med_thresholds(
     cand: FireCandidate, confidence: str
@@ -120,32 +157,11 @@ def run_part2(
         sza_cos = np.cos(np.radians(cand.sza))
         is_day = cand.is_day
 
-        std_reflb_p2 = _std_reflb_part2(cand.rad_diff_sigma)
-
-        # ── Threshold tests to eliminate false alarms (ATBD 3.4.2.14) ────────
-
-        # Test 1: BT7 - Tb3.9 < 2 AND (Refl check OR along-scan)
-        cond1 = (bt7 - bt7_bkg < 2.0) and \
-                (refl - reflb < std_reflb_p2 or _refl_along_scan_part2(cand))
-        if cond1:
+        eliminated, _reason_314 = _eliminate_false_alarm(cand)
+        if eliminated:
             continue   # Not a fire
 
-        # Test 2: BT7 too low AND BT7-Tb3.9 < 10 AND BT7-BT14 < 25
         day_off = sza_cos * 20.0 if is_day else 0.0
-        cond2 = (bt7 < 290.0 + day_off
-                 and bt7 - bt7_bkg < 10.0
-                 and bt7 - cand.bt14 < 25.0
-                 and (refl - reflb < std_reflb_p2 or _refl_along_scan_part2(cand)))
-        if cond2:
-            continue
-
-        # Test 3: BT7 low AND Tb3.9 low AND many background passes
-        cond3 = (bt7 < 290.0 + day_off
-                 and bt7_bkg < 280.0 + day_off
-                 and cand.n_passes >= BKG_MAX_ITER
-                 and (refl - reflb < std_reflb_p2 or _refl_along_scan_part2(cand)))
-        if cond3:
-            continue
 
         # ── Sun-glint re-evaluation ────────────────────────────────────────────
         # ── Cloud/fog edge re-evaluation (ATBD 3.4.2.14) ─────────────────────
