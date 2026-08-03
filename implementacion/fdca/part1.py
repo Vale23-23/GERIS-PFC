@@ -437,7 +437,7 @@ def run_part1(
 
             if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if bt7[i, j] - bt14_eff[i, j] < CLOUD_BT7_BT14_NEG:
-                    fire_mask[i, j] = FireMask.CLOUD_BT14_BT15_NEG; is_cloudy = True
+                    fire_mask[i, j] = FireMask.CLOUD_BT7_BT14_NEG; is_cloudy = True
 
             if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if (bt7[i, j] - bt14_eff[i, j] > CLOUD_BT7_BT14_POS
