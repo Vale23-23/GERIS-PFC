@@ -4,6 +4,7 @@
 # Dataset — nunca subir al repo, usar Hugging Face
 obtencion_imagenes/dataset/
 implementacion/data
+dataset/
 
 # Archivos de datos
 *.npy
@@ -12,6 +13,7 @@ implementacion/data
 
 # Entorno virtual
 .venv/
+geris
 
 # Checkpoints del modelo
 entrenamiento/checkpoints/
