@@ -12,7 +12,7 @@ def load(output_root):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, list):
-                return {} # Reset si detecta formato viejo
+                return {}
             return data
     except:
         return {}
@@ -25,7 +25,7 @@ def save(output_root, entries):
 
 def update(output_root, new_results, all_required_ids, region_cfg):
     """
-    Actualiza el manifest con bandas y estadísticas de fuego.
+    Updates the manifest with bands and fire statistics.
     """
     manifest = load(output_root)
 
@@ -52,7 +52,7 @@ def update(output_root, new_results, all_required_ids, region_cfg):
             if file_path and os.path.exists(file_path):
                 mask = np.load(file_path)
                 
-                # En este pipeline, ABI-L2-FDCF ya viene codificado como 0 = fuego de alta confianza.
+                # In this pipeline, ABI-L2-FDCF is already encoded as 0 = high-confidence fire.
                 fire_pixels = int(np.sum(mask == 0))
                 has_fire = fire_pixels > 0
                         
@@ -66,17 +66,16 @@ def update(output_root, new_results, all_required_ids, region_cfg):
 
         manifest[ts]["bands"][prod_id] = band_data
 
-    # Recalcular integridad del timestamp
+    # Recalculate timestamp integrity
     for ts, data in manifest.items():
         ok_products = {p for p, info in data["bands"].items() if info["status"] in ("downloaded", "exists")}
         data["status"] = "complete" if all(pid in ok_products for pid in all_required_ids) else "incomplete"
 
     save(output_root, manifest)
-    export_metadata_csv(output_root) # Genera automáticamente el CSV para Hugging Face
     return manifest
 
 def export_metadata_csv(output_root):
-    """Aplatana el JSON a un CSV completo con toda la información disponible."""
+    """Flattens the JSON to a complete CSV with all available information."""
     import csv
     data = load(output_root)
     if not data:
@@ -103,7 +102,7 @@ def export_metadata_csv(output_root):
                 'total_fire_pixels': fire.get("fire_pixels", 0)
             }
 
-            # Agregar información de cada banda
+            # Add information to each band
             bands = info.get("bands", {})
             for band_id in ['ABI-L1b-Rad-B07', 'ABI-L1b-Rad-B14', 'ABI-L2-FDCF']:
                 band_info = bands.get(band_id, {})
@@ -116,8 +115,8 @@ def export_metadata_csv(output_root):
 def status_report(output_root, required_products=None):
     manifest = load(output_root)
     if not manifest:
-        print("Manifest vacío.")
+        print("Manifest is empty.")
         return
     total = len(manifest)
     complete = sum(1 for v in manifest.values() if v.get("status") == "complete")
-    print(f"\n📊 Estado en {output_root}: {complete}/{total} completos.")
+    print(f"\n📊 Status at {output_root}: {complete}/{total} complete.")

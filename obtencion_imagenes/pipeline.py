@@ -19,7 +19,7 @@ import downloader
 import manifest
 
 from dotenv import load_dotenv
-load_dotenv()   # lee .env de la raíz del repo si existe; no falla si no existe
+load_dotenv()   # Reads .env from repo root if it exists; doesn't fail if missing
 
 
 def load_config(path="config.yaml"):
@@ -49,18 +49,18 @@ def get_timestamps(start_str, end_str, interval_hours=1):
 def cmd_download(args, cfg):
     region = cfg["regions"].get(args.region)
     if not region:
-        print(f"❌ Región '{args.region}' no encontrada en config.yaml")
+        print(f"❌ Region '{args.region}' not found in config.yaml")
         return
 
     product_ids = args.products
     products    = [p for p in cfg["products"] if p["id"] in product_ids]
     if not products:
-        print("❌ Ningún producto válido encontrado. Usa 'list-products' para ver opciones.")
+        print("❌ No valid products found. Use 'list-products' to see options.")
         return
 
     unknown = set(product_ids) - {p["id"] for p in products}
     if unknown:
-        print(f"⚠️  Productos desconocidos ignorados: {', '.join(unknown)}")
+        print(f"⚠️  Unknown products ignored: {', '.join(unknown)}")
 
     timestamps   = get_timestamps(args.start, args.end, args.interval)
     output_root  = os.path.join(cfg["output_root"], args.region)
@@ -69,7 +69,7 @@ def cmd_download(args, cfg):
     max_workers  = args.workers or cfg["max_workers"]
 
     tasks = [(ts, prod) for ts in timestamps for prod in products]
-    print(f"🚀 Descargando {len(tasks)} archivos con {max_workers} workers...\n")
+    print(f"🚀 Downloading {len(tasks)} files with {max_workers} workers...\n")
 
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -87,13 +87,13 @@ def cmd_download(args, cfg):
                 
                 if result["status"] == "error":
                     print(f"  ❌ {result['timestamp']}  {result['product']:<30}  {result.get('substatus', result['status'])}")
-                    print(f"     👉 Detalle real: {result.get('error')}")
+                    print(f"     👉 Real detail: {result.get('error')}")
                 else:
                     print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
             
             except Exception as e:
-                # Esto atrapa errores inesperados del downloader
-                print(f"  ❌ Error crítico en descarga: {e}")
+                # This catches unexpected errors from the downloader
+                print(f"  ❌ Critical error in download: {e}")
 
     # 1. Obtenemos los IDs de los productos configurados para verificar integridad
     all_product_ids = [p["id"] for p in products] 
@@ -108,19 +108,18 @@ def cmd_download(args, cfg):
     downloaded = sum(1 for r in results if r["status"] == "downloaded")
     skipped    = sum(1 for r in results if r["status"] == "exists")
     errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
-    print(f"\n✔ Descargados: {downloaded}  |  Ya existían: {skipped}  |  Errores: {errors}")
-    print(f"📋 Manifest actualizado en: {output_root}/manifest.json")
+    print(f"\n✔ Downloaded: {downloaded}  |  Already existed: {skipped}  |  Errors: {errors}")
+    print(f"📋 Manifest updated at: {output_root}/manifest.json")
 
 
 def cmd_status(args, cfg):
     output_root = os.path.join(cfg["output_root"], args.region)
     required    = args.products if args.products else None
     manifest.status_report(output_root, required_products=required)
-    manifest.export_metadata_csv(output_root)
 
 
 def cmd_list_products(cfg):
-    print("\n📡 Productos disponibles en config.yaml:\n")
+    print("\n📡 Available products in config.yaml:\n")
     for p in cfg["products"]:
         band = f"B{p['band']:02d}" if p.get("band") else "  -"
         print(f"  {p['id']:<30}  {band}  {p['description']}")
@@ -139,8 +138,8 @@ def cmd_visualize(args, cfg):
     mask_path = os.path.join(output_root, "ABI-L2-FDCF",     f"{ts}.npy")
 
     if not os.path.exists(rad_path):
-        print(f"❌ No se encontró la imagen de radiancia para {ts}")
-        print(f"   Buscando en: {rad_path}")
+        print(f"❌ No image found for {ts}")
+        print(f"   Looking in: {rad_path}")
         return
 
     rad  = np.load(rad_path)
@@ -204,7 +203,7 @@ def cmd_visualize(args, cfg):
         mask_int = mask.astype(np.int8)
         # Fuego = DQF==0 (buena calidad), pero solo si no es un archivo todo-ceros
         if np.all(mask_int == 0):
-            print("⚠️  Este timestamp tiene una máscara inválida (toda la imagen es DQF=0, región no procesada)")
+            print("⚠️  This timestamp has an invalid mask (entire image is DQF=0, region not processed)")
             fuego = np.zeros_like(mask_int, dtype=float)
         else:
             fuego = (mask_int == 0).astype(float)
@@ -216,7 +215,7 @@ def cmd_visualize(args, cfg):
             cmap="Reds",
             vmin=0, vmax=1,
         )
-        axes[1].set_title(f"Máscara de fuego — {int(fuego.sum())} píxeles detectados")
+        axes[1].set_title(f"Fire mask — {int(fuego.sum())} pixels detected")
         add_map_features(axes[1])
         plt.colorbar(im2, ax=axes[1], shrink=0.7)
 
@@ -230,13 +229,13 @@ def cmd_fire_stats(args, cfg):
     mask_folder  = os.path.join(output_root, "ABI-L2-FDCF")
 
     if not os.path.exists(mask_folder):
-        print(f"❌ No se encontró la carpeta de máscaras: {mask_folder}")
-        print("   Asegurate de haber descargado el producto ABI-L2-FDCF.")
+        print(f"❌ No image folder found for fire masks: {mask_folder}")
+        print("   Make sure you have downloaded the ABI-L2-FDCF product.")
         return
 
     archivos = sorted([f for f in os.listdir(mask_folder) if f.endswith(".npy")])
     if not archivos:
-        print("⚠️  No hay máscaras descargadas todavía.")
+        print("⚠️  No fire masks downloaded yet.")
         return
 
     con_fuego, sin_fuego, invalidos, detalles = [], [], [], []
@@ -257,26 +256,26 @@ def cmd_fire_stats(args, cfg):
 
     total_validos = len(con_fuego) + len(sin_fuego)
     total = len(archivos)
-    print(f"\n🔥 ESTADÍSTICAS DE FUEGO — {args.region}")
+    print(f"\n🔥 FIRE STATISTICS — {args.region}")
     print(f"{'='*45}")
-    print(f"  Total archivos              : {total}")
+    print(f"  Total files              : {total}")
     if invalidos:
-        print(f"  ⚠️  Inválidos (no procesados): {len(invalidos)}")
-    print(f"  Timestamps válidos          : {total_validos}")
-    print(f"  Con fuego detectado         : {len(con_fuego)}  ({100*len(con_fuego)/total_validos:.1f}%)" if total_validos else "")
-    print(f"  Sin fuego                   : {len(sin_fuego)}  ({100*len(sin_fuego)/total_validos:.1f}%)" if total_validos else "")
+        print(f"  ⚠️  Invalid (not processed): {len(invalidos)}")
+    print(f"  Valid timestamps          : {total_validos}")
+    print(f"  With fire detected         : {len(con_fuego)}  ({100*len(con_fuego)/total_validos:.1f}%)" if total_validos else "")
+    print(f"  Without fire                : {len(sin_fuego)}  ({100*len(sin_fuego)/total_validos:.1f}%)" if total_validos else "")
 
     if detalles:
         detalles.sort(key=lambda x: x[1], reverse=True)
-        print(f"\n🔝 Top 10 timestamps con más píxeles de fuego:")
-        print(f"  {'Timestamp':<20} {'Píxeles fuego':>15}")
+        print(f"\n🔝 Top 10 timestamps with most fire pixels:")
+        print(f"  {'Timestamp':<20} {'Fire pixels':>15}")
         print(f"  {'-'*35}")
         for ts, n in detalles[:10]:
             print(f"  {ts:<20} {n:>15,}")
 
 
 def cmd_list_regions(cfg):
-    print("\n🗺  Regiones disponibles en config.yaml:\n")
+    print("\n🗺  Available regions in config.yaml:\n")
     for name, coords in cfg["regions"].items():
         print(f"  {name:<20}  lat [{coords['lat_min']}, {coords['lat_max']}]  "
               f"lon [{coords['lon_min']}, {coords['lon_max']}]")
@@ -285,13 +284,13 @@ def cmd_list_regions(cfg):
 def cmd_retry(args, cfg):
     region = cfg["regions"].get(args.region)
     if not region:
-        print(f"❌ Región '{args.region}' no encontrada en config.yaml")
+        print(f"❌ Region '{args.region}' not found in config.yaml")
         return
 
     output_root = os.path.join(cfg["output_root"], args.region)
     manifest_entries = load_manifest(output_root)
     if not manifest_entries:
-        print(f"❌ No se encontró manifest.json o está vacío en: {output_root}")
+        print(f"❌ No manifest.json found or it is empty in: {output_root}")
         return
 
     product_map = {p["id"]: p for p in cfg["products"]}
@@ -302,19 +301,19 @@ def cmd_retry(args, cfg):
     ]
 
     if not retry_entries:
-        print("✅ No hay descargas con error pendientes de reintento.")
+        print("✅ No failed downloads pending retry.")
         return
 
     if args.products:
         unknown = set(args.products) - set(product_map)
         if unknown:
-            print(f"⚠️  Productos desconocidos ignorados: {', '.join(unknown)}")
+            print(f"⚠️  Unknown products ignored: {', '.join(unknown)}")
 
     tasks = []
     for entry in retry_entries:
         prod = product_map.get(entry["product"])
         if not prod:
-            print(f"⚠️  Producto no definido en config.yaml: {entry['product']}")
+            print(f"⚠️  Product not defined in config.yaml: {entry['product']}")
             continue
 
         # Convertimos el string "20250901_1200" a un objeto datetime
@@ -322,7 +321,7 @@ def cmd_retry(args, cfg):
         tasks.append((ts_obj, prod))
     
     if not tasks:
-        print("❌ No hay tareas válidas para reintentar.")
+        print("❌ No valid tasks to retry.")
         return
 
     max_workers = args.workers or cfg["max_workers"]
