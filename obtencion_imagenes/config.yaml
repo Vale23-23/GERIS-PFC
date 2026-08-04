@@ -14,7 +14,6 @@ regions:
     lon_min: -62.0
     lon_max: -48.0
 products:
-  # ── Bandas que ya existían (modelo de detección) ──────────────────────────
   - id: ABI-L1b-Rad-B07
     product: ABI-L1b-Rad
     band: 7
@@ -43,7 +42,6 @@ products:
     dtype: int8
     description: "Data Quality Flag"
 
-  # ── Bandas nuevas para FDCA ───────────────────────────────────────────────
   - id: ABI-L1b-Rad-B13
     product: ABI-L1b-Rad
     band: 13
