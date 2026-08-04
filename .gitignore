@@ -3,6 +3,7 @@
 
 # Dataset — nunca subir al repo, usar Hugging Face
 obtencion_imagenes/dataset/
+implementacion/data
 
 # Archivos de datos
 *.npy
