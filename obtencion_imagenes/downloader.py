@@ -303,6 +303,59 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
             "product_path": s3_path,
         }
 
+def check_s3_exists(product_cfg, timestamp):
+    """
+    Check if a GOES product file exists on the public NOAA S3 bucket.
+
+    Uses anonymous access (no credentials needed) to list objects matching
+    the expected path pattern for the given product/timestamp.
+
+    Returns
+    -------
+    (exists: bool, s3_path: str)
+        exists  — True if at least one matching object was found.
+        s3_path — The S3 prefix that was checked (useful for error messages).
+    """
+    import boto3
+    from botocore import UNSIGNED
+    from botocore.config import Config
+
+    bucket = "noaa-goes19"
+    product_name = product_cfg["product"]
+    band = product_cfg.get("band")
+    domain = "F"  # Full disk
+
+    # Build the S3 prefix: ABI-L1b-RadF/YYYY/DDD/HH/
+    # or ABI-L2-FDCF/YYYY/DDD/HH/
+    if band:
+        s3_product = f"{product_name}{domain}"
+    else:
+        s3_product = f"{product_name}"
+
+    day_of_year = timestamp.timetuple().tm_yday
+    hour = timestamp.hour
+    prefix = f"{s3_product}/{timestamp.year}/{day_of_year:03d}/{hour:02d}/"
+
+    # Filter by band channel if applicable
+    if band:
+        channel_str = f"C{band:02d}"
+    else:
+        channel_str = None
+
+    s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+
+    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=100)
+    contents = response.get("Contents", [])
+
+    if channel_str:
+        matches = [obj for obj in contents if channel_str in obj["Key"]]
+    else:
+        matches = contents
+
+    s3_path = f"{bucket}/{prefix}"
+    return len(matches) > 0, s3_path
+
+
 def find_camel_climatology_file(camel_dir: str, month: int) -> str | None:
     """
     Locally searches for the CAMEL V3 climatology file for the given month.
