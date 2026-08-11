@@ -120,6 +120,7 @@ python pipeline.py download \
   --start "2025-09-01 00:00" \
   --end "2025-09-02 23:00" \
   --products ABI-L1b-Rad-B14
+  --interval 10
 ```
 
 ### 5. Verificar el estado del dataset
