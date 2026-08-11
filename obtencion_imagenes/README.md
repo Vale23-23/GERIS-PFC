@@ -357,6 +357,40 @@ snapshot_download(
 
 ### Error Handling and Data Gaps
 
+#### Corrupt files in cache (truncated file / xarray backend error)
+
+If you see errors like:
+
+```
+❌ error_local
+👉 Real detail: File exists on S3 but download failed: Unable to synchronously open file (truncated file: eof = ...)
+```
+
+or:
+
+```
+👉 Real detail: did not find a match in any of xarray's currently installed IO backends
+```
+
+It means `goes2go` has corrupt `.nc` files in its local cache (`~/data/noaa-goes19/`). These were downloaded incompletely due to an internet interruption or timeout.
+
+**Solution:** Delete the cache and retry:
+
+```bash
+rm -rf ~/data/noaa-goes19/
+python pipeline.py retry --region uruguay
+```
+
+This is safe: the cache is just a temporary intermediary. Your actual dataset (the `.npy` files in `dataset/`) is not affected. The files will be re-downloaded from AWS automatically.
+
+If you don't want to delete the entire cache, you can delete only the corrupt files (suspiciously small ones):
+
+```bash
+find ~/data/noaa-goes19/ -name "*.nc" -size -1M -delete
+```
+
+#### Data Gaps from NOAA
+
 Notes on data availability (Gaps):
 Some download commands may return FileNotFound or IndexError errors. This doesn't always indicate a script failure — it reflects the lack of operational data on NOAA's servers (AWS). The GOES-19 satellite began its operational phase on April 7, 2025; any earlier date will result in an error.
 
