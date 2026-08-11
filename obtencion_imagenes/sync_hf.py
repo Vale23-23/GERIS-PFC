@@ -191,6 +191,50 @@ def main():
 
     print(f"⬆️  Uploading {len(files)} files...")
     try:
+        # ── Merge manifest with remote version ────────────────────────────────
+        # This ensures that when multiple team members upload different months,
+        # the manifest accumulates all timestamps instead of being overwritten.
+        manifest_rel = "uruguay/manifest.json"
+        local_manifest_path = DATASET_DIR / "uruguay" / "manifest.json"
+
+        if local_manifest_path.exists():
+            import json
+            import tempfile
+
+            # Load local manifest
+            with open(local_manifest_path, "r", encoding="utf-8") as f:
+                local_manifest = json.load(f)
+
+            # Try to download remote manifest from HF
+            remote_manifest = {}
+            try:
+                from huggingface_hub import hf_hub_download
+                remote_file = hf_hub_download(
+                    repo_id=HF_REPO, repo_type="dataset",
+                    filename=manifest_rel, token=token,
+                )
+                with open(remote_file, "r", encoding="utf-8") as f:
+                    remote_manifest = json.load(f)
+                print(f"  🔀 Merging manifest: {len(remote_manifest)} remote + {len(local_manifest)} local timestamps")
+            except Exception:
+                # No remote manifest yet, that's fine
+                print(f"  📄 No remote manifest found, uploading local as-is")
+
+            # Merge: remote as base, local overwrites (local has fresher data)
+            merged = {**remote_manifest, **local_manifest}
+            print(f"  📋 Merged manifest: {len(merged)} total timestamps")
+
+            # Write merged manifest to a temp file for upload
+            merged_tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False, encoding="utf-8"
+            )
+            json.dump(merged, merged_tmp, indent=2)
+            merged_tmp.close()
+
+            # Replace the manifest in the upload list with the merged version
+            files = [(local, rel) for local, rel in files if rel != manifest_rel]
+            files.append((Path(merged_tmp.name), manifest_rel))
+
         operations = [
             CommitOperationAdd(path_in_repo=rel, path_or_fileobj=str(local))
             for local, rel in files
@@ -203,6 +247,14 @@ def main():
             operations=operations,
             commit_message="sync dataset",
         )
+
+        # Clean up temp file
+        if local_manifest_path.exists():
+            try:
+                os.unlink(merged_tmp.name)
+            except Exception:
+                pass
+
         print(f"\n✅ Dataset was succesfully synchronized.")
         print(f"   Ver en: https://huggingface.co/datasets/{HF_REPO}")
     except Exception as e:
