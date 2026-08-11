@@ -1,52 +1,51 @@
-# Obtención de Imágenes GOES-19
+# GOES-19 Image Acquisition
 
-Este módulo descarga imágenes satelitales del satélite GOES-19 y las guarda en tu computadora para usarlas en el entrenamiento de modelos de detección.
+This module downloads satellite images from the GOES-19 satellite and saves them to your computer for use in training detection models.
 
 ---
 
-## ¿Qué hace esto?
+## What does this do?
 
-El satélite GOES-19 toma fotos de Sudamérica cada hora. Este código descarga esas imágenes, las recorta a la región que nos interesa (por ejemplo, Uruguay), y las guarda ordenadas por carpetas.
+The GOES-19 satellite takes photos of South America every ten minutes. This code downloads those images, crops them to the region of interest (for example, Uruguay), and saves them organized into folders.
 
-Cada imagen se guarda como un archivo `.npy` (formato numérico de Python). Hay un archivo por hora, por producto.
+Each image is saved as an `.npy` file (Python's numeric format). There is one file per ten minutes, per product.
 
 
- El campo DQF (Data Quality Flag) del producto FDCF indica:
-            DQF = 0: fuego detectado con buena calidad → marcamos como 1
-            DQF = 1: píxel de tierra sin fuego (buena calidad)
-            DQF = 2: inválido por nube opaca
-            DQF = 3: inválido por tipo de superficie o sun glint
-            DQF = 4: inválido por datos de entrada malos
-            DQF = 5: inválido por fallo del algoritmo
+The DQF (Data Quality Flag) field of the FDCF product indicates:
+            DQF = 0: fire detected with good quality → marked as 1
+            DQF = 1: land pixel with no fire (good quality)
+            DQF = 2: invalid due to opaque cloud
+            DQF = 3: invalid due to surface type or sun glint
+            DQF = 4: invalid due to bad input data
+            DQF = 5: invalid due to algorithm failure
 ---
 
-## Archivos del proyecto
+## Project files
 
 ```
 obtencion_imagenes/
-├── config.yaml      ← Configuración: qué descargar y de qué región
-├── pipeline.py      ← El script principal que vas a usar
-├── downloader.py    ← Lógica interna de descarga (no tocar)
-├── manifest.py      ← Registro de qué se descargó (no tocar)
+├── config.yaml      ← Configuration: what to download and from which region
+├── pipeline.py      ← The main script you'll use
+├── downloader.py    ← Internal download logic (do not touch)
+├── manifest.py      ← Log of what was downloaded (do not touch)
 ```
 
-Los demas archivos son legacy.
 ---
 
-## Antes de empezar
+## Before you start
 
-Asegurate de tener las dependencias instaladas. Usar un evironment. Desde la carpeta raíz del proyecto:
+Make sure you have the dependencies installed. Use an environment. From the project's root folder:
 
 ```bash
 pip install goes2go pyproj pyyaml numpy
 ```
-o
+or
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Todos los comandos se corren desde dentro de la carpeta `obtencion_imagenes/`:
+All commands are run from inside the `obtencion_imagenes/` folder:
 
 ```bash
 cd obtencion_imagenes
@@ -54,31 +53,30 @@ cd obtencion_imagenes
 
 ---
 
-## Uso básico
+## Basic usage
 
-### 1. Ver qué productos están disponibles
+### 1. See which products are available
 
 ```bash
 python pipeline.py list-products
 ```
 
-Esto muestra los productos configurados, por ejemplo:
+This shows the products configured, for example:
 
 ```
-📡 Productos disponibles en config.yaml:
+📡 Available products in config.yaml:
 
   ABI-L1b-Rad-B07     B07  Shortwave IR 3.9µm - fire thermal signature
   ABI-L1b-Rad-B14     B14  Longwave IR 11.2µm - thermal context
   ABI-L2-FDCF           -  Fire detection mask - ground truth label
 ```
-
-### 2. Ver qué regiones están disponibles
+### 2. See which regions are available
 
 ```bash
 python pipeline.py list-regions
 ```
 
-### 3. Descargar imágenes
+### 3. Download images
 
 ```bash
 python pipeline.py download \
@@ -86,33 +84,35 @@ python pipeline.py download \
   --start "2025-09-01 00:00" \
   --end "2025-09-02 23:00" \
   --products ABI-L1b-Rad-B07 ABI-L2-FDCF
+  --interval 10
 ```
 
-Esto descarga la Banda 7 y la máscara de fuego para Uruguay, hora por hora, entre el 1 y el 2 de septiembre de 2025.
+This downloads Band 7 and the fire mask for Uruguay every ten minutes, between September 1 and 2, 2025.
 
-Start of operational data: April 7, 2025 
+Start of operational data: April 7, 2025
 
-Mientras descarga, vas a ver algo así:
+While downloading, you'll see something like this:
 
 ```
-🚀 Descargando 48 archivos con 4 workers...
+🚀 Downloading 48 files with 4 workers...
 
   💾 20250901_0000  ABI-L1b-Rad-B07    downloaded
   💾 20250901_0000  ABI-L2-FDCF        downloaded
   ✅ 20250901_0100  ABI-L1b-Rad-B07    exists
   ...
 
-✔ Descargados: 40  |  Ya existían: 8  |  Errores: 0
+✔ Downloaded: 40  |  Already existed: 8  |  Errors: 0
 ```
 
-- 💾 = descargado ahora
-- ✅ = ya existía, no se volvió a descargar
-- ⚠️ = no había datos para esa hora
-- ❌ = error de conexión u otro problema
+- 💾 = downloaded now
+- ✅ = already existed, not downloaded again
+- ⚠️ = no data available for that hour
+- ❌ = connection error or other problem
 
-### 4. Agregar una banda nueva sin re-descargar todo
 
-Si ya tenés la Banda 7 descargada y querés agregar la Banda 14, simplemente corrés el mismo comando con el nuevo producto. El script detecta automáticamente qué ya existe y solo descarga lo que falta:
+### 4. Add a new band without re-downloading everything
+
+If you already have Band 7 downloaded and want to add Band 14, simply run the same command with the new product. The script automatically detects what already exists and only downloads what's missing:
 
 ```bash
 python pipeline.py download \
@@ -123,7 +123,7 @@ python pipeline.py download \
   --interval 10
 ```
 
-### 5. Verificar el estado del dataset
+### 5. Check the dataset status
 
 ```bash
 python pipeline.py status \
@@ -131,51 +131,51 @@ python pipeline.py status \
   --products ABI-L1b-Rad-B07 ABI-L1b-Rad-B14 ABI-L2-FDCF
 ```
 
-Esto muestra cuántos archivos se descargaron por producto y si hay timestamps incompletos (horas donde falta algún producto):
+This shows how many files were downloaded per product and whether there are incomplete timestamps (hours where some product is missing):
 
 ```
-📦 Estado por producto:
+📦 Status by product:
   ABI-L1b-Rad-B07     ✅ 48  ❌ 0
   ABI-L1b-Rad-B14     ✅ 48  ❌ 0
   ABI-L2-FDCF         ✅ 48  ❌ 0
 
-✅ Timestamps completos (todos los productos): 48
+✅ Complete timestamps (all products): 48
 ```
 
-### 6. Reintentar descargar imagenes que dan error
+### 6. Retry downloading images that returned errors
 
-Con esto puedes ejecutar:
+With this you can run:
 ```bash
 python pipeline.py retry --region uruguay --products ABI-L1b-Rad-B07 ABI-L2-FDCF
 ```
 ```bash
-o simplemente:
+or simply:
 python pipeline.py retry --region uruguay
 ```
 
-Si la terminal devuelve algo como:
+If the terminal returns something like:
 ❌ 20250922_1600  ABI-L1b-Rad-B07                 error
 ❌ 20250922_1600 -> error_aws_gap
 
-significa que el error es que no se encuentra el archivo en AWS.
+it means the error is that the file cannot be found on AWS.
 
-### 7. Ver estadísticas de fuego
+### 7. View fire statistics
 
 ```bash
 python pipeline.py fire-stats --region uruguay
 ```
 
-Muestra cuántos timestamps tienen fuego detectado, el porcentaje, y un ranking de los 10 con más píxeles de fuego:
+Shows how many timestamps have detected fire, the percentage, and a ranking of the top 10 with the most fire pixels:
 
 ```
-🔥 ESTADÍSTICAS DE FUEGO — uruguay
+🔥 FIRE STATISTICS — uruguay
 =============================================
-  Total timestamps analizados : 48
-  Con fuego detectado         : 12  (25.0%)
-  Sin fuego                   : 36  (75.0%)
+  Total timestamps analyzed   : 48
+  With fire detected          : 12  (25.0%)
+  Without fire                : 36  (75.0%)
 
-🔝 Top 10 timestamps con más píxeles de fuego:
-  Timestamp              Píxeles fuego
+🔝 Top 10 timestamps with most fire pixels:
+  Timestamp              Fire pixels
   -----------------------------------
   20250915_1400                    143
   20250912_1600                     87
@@ -185,21 +185,21 @@ Muestra cuántos timestamps tienen fuego detectado, el porcentaje, y un ranking 
 
 python pipeline.py spatial-report --region uruguay --timestamp 20250926_1900
 
-### 8. Visualizar una imagen y su máscara
+### 8. Visualize an image and its mask
 
 ```bash
 python pipeline.py visualize --region uruguay --timestamp 20250901_1200
 ```
 
-Abre una ventana con dos paneles: la imagen de la Banda 7 (infrarrojo térmico) a la izquierda y la máscara de fuego a la derecha. Útil para inspeccionar visualmente el dataset antes de entrenar.
+Opens a window with two panels: the Band 7 image (thermal infrared) on the left and the fire mask on the right. Useful for visually inspecting the dataset before training.
 
-Si no sabés qué timestamps tienen fuego, primero corré `fire-stats` para ver el ranking.
+If you don't know which timestamps have fire, first run `fire-stats` to see the ranking.
 
 ---
 
-## ¿Dónde se guardan los archivos?
+## Where are the files saved?
 
-Los archivos se guardan en una carpeta `dataset/` dentro de `obtencion_imagenes/`, organizada así:
+Files are saved in a `dataset/` folder inside `obtencion_imagenes/`, organized as follows:
 
 ```
 dataset/
@@ -212,14 +212,14 @@ dataset/
     │   └── ...
     ├── ABI-L2-FDCF/
     │   └── ...
-    └── manifest.json   ← registro de todo lo descargado
+    └── manifest.json   ← log of everything downloaded
 ```
 
-Cada archivo `.npy` es una imagen recortada a la región elegida, guardada como una matriz numérica.
+Each `.npy` file is an image cropped to the chosen region, saved as a numeric matrix.
 
-El archivo `manifest.json` es un registro automático de todo lo que se descargó, con estado y dimensiones. No hace falta abrirlo manualmente.
+The `manifest.json` file is an automatic log of everything that was downloaded, with status and dimensions. There's no need to open it manually.
 
-Ejemplo de estructura:
+Example structure:
 
 {
   "20250901_1100": {
@@ -246,11 +246,11 @@ Ejemplo de estructura:
 
 ---
 
-## Agregar un nuevo producto o región
+## Adding a new product or region
 
-### Nuevo producto (banda)
+### New product (band)
 
-Abrí `config.yaml` y agregá un bloque nuevo bajo `products`:
+Open `config.yaml` and add a new block under `products`:
 
 ```yaml
   - id: ABI-L1b-Rad-B02
@@ -258,14 +258,14 @@ Abrí `config.yaml` y agregá un bloque nuevo bajo `products`:
     band: 2
     variable: Rad
     dtype: float32
-    description: "Visible 0.64µm - luz visible"
+    description: "Visible 0.64µm - visible light"
 ```
 
-Después podés descargarlo con `--products ABI-L1b-Rad-B02` sin tocar ningún otro archivo.
+You can then download it with `--products ABI-L1b-Rad-B02` without touching any other file.
 
-### Nueva región
+### New region
 
-Agregá una entrada bajo `regions` en `config.yaml`:
+Add an entry under `regions` in `config.yaml`:
 
 ```yaml
   patagonia:
@@ -275,18 +275,18 @@ Agregá una entrada bajo `regions` en `config.yaml`:
     lon_max: -60.0
 ```
 
-Y usala con `--region patagonia`.
+And use it with `--region patagonia`.
 
 ---
 
-## Opciones avanzadas
+## Advanced options
 
-| Opción | Descripción | Default |
+| Option | Description | Default |
 |---|---|---|
-| `--interval N` | Descargar cada N horas en vez de cada 1 | 1 |
-| `--workers N` | Cuántas descargas en paralelo | 4 (config.yaml) |
+| `--interval N` | Download every N hours instead of every 1 | 1 |
+| `--workers N` | How many parallel downloads | 4 (config.yaml) |
 
-Ejemplo: descargar cada 3 horas con 6 workers:
+Example: download every 3 hours with 6 workers:
 
 ```bash
 python pipeline.py download \
@@ -298,47 +298,47 @@ python pipeline.py download \
   --workers 6
 ```
 
-> ⚠️ No uses más de 8 workers. Los servidores de NOAA pueden bloquear conexiones si se hacen demasiadas descargas simultáneas.
+> ⚠️ Don't use more than 8 workers. NOAA's servers may block connections if too many simultaneous downloads are made.
 
 ---
 
-## Sincronizar el dataset con Hugging Face
+## Syncing the dataset with Hugging Face
 
-El dataset se almacena de forma compartida en Hugging Face para que todo el equipo pueda acceder a él sin necesidad de descargar todo desde cero.
+The dataset is stored in a shared way on Hugging Face so the whole team can access it without needing to download everything from scratch.
 
-### ¿Cuándo usar este script?
+### When should you use this script?
 
-Usá `sync_hf.py` cada vez que descargues datos nuevos con `pipeline.py` y quieras que el resto del equipo los tenga disponibles. El flujo típico es:
+Use `sync_hf.py` every time you download new data with `pipeline.py` and want the rest of the team to have it available. The typical flow is:
 
-1. Descargás datos nuevos con `pipeline.py`
-2. Verificás que todo esté bien con `pipeline.py status`
-3. Subís los cambios a Hugging Face con `sync_hf.py`
+1. Download new data with `pipeline.py`
+2. Verify everything is fine with `pipeline.py status`
+3. Upload the changes to Hugging Face with `sync_hf.py`
 
-Solo la persona que descargó los datos necesita correr este script. Los demás simplemente descargan desde HF.
+Only the person who downloaded the data needs to run this script. Everyone else just downloads from HF.
 
-### Subir datos a Hugging Face
+### Upload data to Hugging Face
 
-Desde la raíz del proyecto:
+From the project root:
 
 ```bash
 .venv/bin/python obtencion_imagenes/sync_hf.py
 ```
 
-Vas a ver algo así:
+You'll see something like this:
 
 ```
-📦 Repositorio listo: https://huggingface.co/datasets/tu-usuario/goes19-uruguay-fires
-⬆️  Subiendo dataset/ → tu-usuario/GERIS-Goes19-uruguay-fires ...
+📦 Repository ready: https://huggingface.co/datasets/tu-usuario/goes19-uruguay-fires
+⬆️  Uploading dataset/ → tu-usuario/GERIS-Goes19-uruguay-fires ...
 
-✅ Dataset sincronizado correctamente.
-   Ver en: https://huggingface.co/datasets/tu-usuario/GERIS-Goes19-uruguay-fires
+✅ Dataset synced successfully.
+   View at: https://huggingface.co/datasets/tu-usuario/GERIS-Goes19-uruguay-fires
 ```
 
-El script solo sube los archivos nuevos o modificados, no vuelve a subir lo que ya estaba.
+The script only uploads new or modified files; it doesn't re-upload what was already there.
 
-### Descargar el dataset (para el resto del equipo)
+### Download the dataset (for the rest of the team)
 
-Si sos un compañero que quiere tener el dataset localmente, desde la raíz del proyecto:
+If you're a teammate who wants to have the dataset locally, from the project root:
 
 ```bash
 .venv/bin/python -c "
@@ -352,18 +352,18 @@ snapshot_download(
 "
 ```
 
-> ⚠️ El token de Hugging Face es personal y privado. No lo compartas ni lo subas a GitHub. Ya está protegido en el archivo `.env` que está en el `.gitignore`.
+> ⚠️ The Hugging Face token is personal and private. Don't share it or upload it to GitHub. It's already protected in the `.env` file, which is in `.gitignore`.
 
 
-### Manejo de Errores y Gaps de Datos
+### Error Handling and Data Gaps
 
-Notas sobre la disponibilidad de datos (Gaps):
-Es posible que algunos comandos de descarga devuelvan errores de tipo FileNotFound o IndexError. Esto no siempre indica un fallo en el script, sino que refleja la falta de datos operativos en los servidores de NOAA (AWS). El satélite GOES-19 comenzó su fase operativa el 7 de abril de 2025; cualquier fecha anterior resultará en error.
+Notes on data availability (Gaps):
+Some download commands may return FileNotFound or IndexError errors. This doesn't always indicate a script failure — it reflects the lack of operational data on NOAA's servers (AWS). The GOES-19 satellite began its operational phase on April 7, 2025; any earlier date will result in an error.
 
-Si un timestamp de 2025 falla persistentemente, podés verificar la existencia del archivo directamente en el bucket de AWS S3 usando el siguiente comando (requiere AWS CLI):
+If a 2025 timestamp fails persistently, you can verify the file's existence directly in the AWS S3 bucket using the following command (requires AWS CLI):
 
 ```bash
 aws s3 ls s3://noaa-goes19/ABI-L1b-RadF/2025/265/17/ --no-sign-request
 ```
 
-Si el comando devuelve una lista vacía, el dato es un Data Gap oficial del satélite y no está disponible para descarga.
+If the command returns an empty list, the data is an official Data Gap from the satellite and is not available for download.
