@@ -35,10 +35,10 @@ def load_manifest(output_root):
         return json.load(f)
 
 
-def get_timestamps(start_str, end_str, interval_hours=1):
+def get_timestamps(start_str, end_str, interval_minutes=60):
     start = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
     end   = datetime.strptime(end_str,   "%Y-%m-%d %H:%M")
-    delta = timedelta(hours=interval_hours)
+    delta = timedelta(minutes=interval_minutes)
     ts, t = [], start
     while t <= end:
         ts.append(t)
@@ -385,7 +385,7 @@ def main():
     dl.add_argument("--start",    required=True,  help='Start datetime "YYYY-MM-DD HH:MM"')
     dl.add_argument("--end",      required=True,  help='End datetime "YYYY-MM-DD HH:MM"')
     dl.add_argument("--products", required=True,  nargs="+", help="Product IDs from config.yaml")
-    dl.add_argument("--interval", type=int, default=1, help="Interval in hours (default: 1)")
+    dl.add_argument("--interval", type=int, default=60, help="Interval in minutes (default: 60)")
     dl.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
 
     # status
