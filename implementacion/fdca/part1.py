@@ -1,5 +1,5 @@
 """
-FDCA Part I – Loop over all pixels
+FDCA Part I - Loop over all pixels
 Implements ATBD sections 3.4.2.1 through 3.4.2.13
 """
 
@@ -7,25 +7,7 @@ import numpy as np
 from typing import Optional, List
 from dataclasses import dataclass, field
 
-from .constants import (
-    FireMask, FailChar,
-    SAT_TEMP_CH7, SAT_TEMP_CH14, SAT_BUFF,
-    SAT_FLAG_CH7, SAT_FLAG_CH14,
-    FPT_THRESHOLD, MIN_BT,
-    MAX_LOCAL_ZENITH, MAX_SZA_DAYLIGHT, GLINT_THRESHOLD,
-    CLOUD_BT14_THRESH, CLOUD_BT7_BT14_NEG, CLOUD_BT7_BT14_POS,
-    CLOUD_BT7_FOR_POS, CLOUD_ALBEDO_THRESH,
-    CLOUD_BT15_THRESH, CLOUD_BT14_BT15_NEG, CLOUD_BT14_BT15_POS,
-    BT7_MIN_NIGHT, BT7_MIN_SOLAR_COEF,
-    BT7_REFL_THRESH_NIGHT, BT7_REFL_THRESH_SOLAR,
-    CLOUD_ADJ_ALBEDO_LOW, CLOUD_ADJ_ALBEDO_HIGH,
-    CLOUD_ADJ_BT7_COEF, CLOUD_ADJ_BT14_COEF,
-    CLOUD_ADJ_BT7_FIXED, CLOUD_ADJ_BT14_FIXED,
-    DIFFRAC_CH7_SUB, DIFFRAC_CH7_DIV, DIFFRAC_CH14_SUB, DIFFRAC_CH14_DIV,
-    MIN_FIRE_TEMP, MAX_SURF_TEMP, MIN_PIXEL_AREA,
-    MODIS_WATER_CODES, UMD_WATER_CODE, DESERT_BRIGHT,
-    USGS_SEA_WATER, USGS_COAST_FRINGE, USGS_INLAND_WATER,
-)
+from fdca.constants import *
 from .planck import (
     planck_rad, planck_temp, temp_to_rad_in_band,
     planck_rad_from_coeffs, planck_temp_from_coeffs,
@@ -316,9 +298,6 @@ def run_part1(
     candidates:  List[FireCandidate] = []
     fire_id_ctr  = 0
 
-    
-
-
     albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, sza, refl2)
 
     # ── FPT mitigation: build hybrid longwave band (ATBD 3.4.2.2) ────────────
@@ -342,8 +321,18 @@ def run_part1(
     refl       = rad7 - rad14_in_7
     # Where any input radiance < 0 → set Refl = -9999
     bad_rad = (rad7 < 0) | (rad14_eff < 0)
-    refl    = np.where(bad_rad, -9999.0, refl)
+    if rad13 is not None:
+        bad_rad = bad_rad | (rad13 < 0)
+    refl = np.where(bad_rad, -9999.0, refl)
 
+    # ── Helper: test de ecosistema inválido código 150, incluye 4 vecinos
+    #    inmediatos (ATBD 3.4.2.3). Definido como closure para no repasar
+    #    land_cover/desert_mask como parámetros en cada llamada del loop.
+    def _invalid_ecosystem_150(ii: int, jj: int) -> bool:
+        return (land_cover[ii, jj] in MODIS_WATER_CODES
+                or land_cover[ii, jj] == UMD_WATER_CODE
+                or desert_mask[ii, jj] == DESERT_BRIGHT)
+    
     # ── Pixel loop ────────────────────────────────────────────────────────────
     # Cache for background (skip recompute for same scan element if prev was OK)
     prev_j_bkg: Optional[int]    = None
@@ -351,13 +340,12 @@ def run_part1(
 
     for i in range(L):
         for j in range(W):
+            # ATBD 3.4.2.3 ─────────────────────────────────────────────────────
 
             # ── Space pixel ───────────────────────────────────────────────────
             if np.isnan(bt7[i, j]):
                 fire_mask[i, j] = FireMask.SPACE
                 continue
-
-            # ATBD 3.4.2.3 ─────────────────────────────────────────────────────
 
             # Satellite zenith angle test
             if lza[i, j] > MAX_LOCAL_ZENITH:
@@ -384,10 +372,17 @@ def run_part1(
             if bt14_eff[i, j] < MIN_BT:
                 fire_mask[i, j] = FireMask.UNUS_CH14;  continue
 
-            # ── Ecosystem / surface mask tests ────────────────────────────────
-            if (land_cover[i, j] in MODIS_WATER_CODES
-                    or land_cover[i, j] == UMD_WATER_CODE
-                    or desert_mask[i, j] == DESERT_BRIGHT):
+            # ── Ecosystem / surface mask tests (ATBD 3.4.2.3) ────
+            # El chequeo de vecinos es exclusivo del código 150; 151/152/153
+            # se evalúan solo sobre el píxel propio (ver viñetas del ATBD).
+            is_bad_eco = _invalid_ecosystem_150(i, j)
+            if not is_bad_eco:
+                for ni, nj in ((i-1, j), (i+1, j), (i, j-1), (i, j+1)): # edge pixels are simply ignored
+                    if 0 <= ni < L and 0 <= nj < W and _invalid_ecosystem_150(ni, nj):
+                        is_bad_eco = True
+                        break
+
+            if is_bad_eco:
                 fire_mask[i, j] = FireMask.BAD_ECOSYSTEM;  continue
 
             eco = usgs_eco[i, j]
@@ -403,8 +398,6 @@ def run_part1(
                 fire_mask[i, j] = FireMask.NEG_RAD;        continue
 
             # ── Per ATBD 3.4.2.3: initialize valid pixels to FIRE_FREE (100) ─
-            # El ATBD dice que todos los píxeles no-espacio se inicializan a 100.
-            # Los que llegan hasta aquí pasaron todos los tests de descarte previos.
             fire_mask[i, j] = FireMask.FIRE_FREE
 
             # ── Minimum BT difference (warm pixels) ──────────────────────────
@@ -413,9 +406,8 @@ def run_part1(
             # "If the difference is < 2K and either Ch7 or Ch14 ≤ 273K → code 201"
             diff_bt = bt7[i, j] - bt14_eff[i, j]
             if (bt7[i, j] > 273 or bt14_eff[i, j] > 273) and abs(diff_bt) <= 2.0:
-                # fire_mask ya es FIRE_FREE (100), simplemente avanzar
                 continue
-            if abs(diff_bt) <= 2.0 and (bt7[i, j] <= 273 and bt14_eff[i, j] <= 273):
+            if abs(diff_bt) < 2.0 and (bt7[i, j] <= 273 or bt14_eff[i, j] <= 273):
                 fire_mask[i, j] = FireMask.TOO_COLD;       continue
 
             # ── Day-dependent thresholds ──────────────────────────────────────
@@ -427,8 +419,7 @@ def run_part1(
             # ── Cloud tests (ATBD 3.4.2.3) ────────────────────────────────────
             # ATBD: "Each test is predicated on a prior test having been passed
             # (the pixel must still retain a mask code of 100)."
-            # Nótese que los píxeles nublados NO se descartan acá — "These
-            # cloudy pixels MAY be found to contain fires later."
+            # "cloudy pixels MAY be found to contain fires later."
             is_cloudy = False
 
             if fire_mask[i, j] == FireMask.FIRE_FREE:
@@ -461,6 +452,7 @@ def run_part1(
                         elif bt14_eff[i, j] - bt15[i, j] > CLOUD_BT14_BT15_POS:
                             fire_mask[i, j] = FireMask.CLOUD_BT14_BT15_POS; is_cloudy = True
 
+                       
             # ── Along-scan reflectivity test (ATBD 3.4.2.4) ──────────────────
             alb_ij  = albedo[i, j] if refl2 is not None else np.nan
             refl_ij = refl[i, j]
@@ -469,10 +461,12 @@ def run_part1(
                 jj = max(0, min(W-1, jj))
                 return refl[i, jj]
 
-            if day_pixel and not np.isnan(alb_ij):
-                if alb_ij >= CLOUD_ALBEDO_THRESH and bt7[i, j] < 320.0:
-                    if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
-                        fire_mask[i, j] = FireMask.ALONG_SCAN_DAY;   continue
+            if day_pixel:
+                # if it's daytime but there's no available albedo, the test is not applied
+                if not np.isnan(alb_ij):
+                    if alb_ij >= CLOUD_ALBEDO_THRESH and bt7[i, j] < MAX_BT7:
+                        if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
+                            fire_mask[i, j] = FireMask.ALONG_SCAN_DAY;   continue
             else:
                 if bt7[i, j] < bt7_min and bt7[i, j] >= MIN_BT:
                     if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
@@ -756,7 +750,3 @@ def run_part1(
             candidates.append(cand)
 
     return fire_mask, fail_char_arr, candidates
-
-
-# Expose BKG_MAX_ITER for part2
-from .constants import BKG_MAX_ITER
