@@ -53,6 +53,22 @@ def get_goes2go_cache_dir():
     except Exception:
         return os.path.expanduser("~/data")
 
+def configure_goes2go_cache_dir():
+    """
+    If the GERIS_GOES2GO_CACHE environment variable is set (typically in each
+    machine's local .env), redirects goes2go's internal cache (where the full
+    full-disk .nc file is downloaded before cropping) to that path.
+    If the variable is not set, this function is a no-op and behavior is 
+    identical to today (goes2go's default, typically ~/data).
+
+    Must be called once, before the first download.
+    """
+    cache_dir = os.environ.get("GERIS_GOES2GO_CACHE")
+    if not cache_dir:
+        return
+    from goes2go.config import config as g2g_config
+    os.makedirs(cache_dir, exist_ok=True)
+    g2g_config["default"]["save_dir"] = cache_dir
 
 def extract_units_metadata(da) -> dict:
     """
