@@ -45,20 +45,39 @@ def goes_xy_slices(ds, lat_min, lat_max, lon_min, lon_max):
     return x_slice, y_slice
 
 
+def _get_g2g_config():
+    """
+    Returns the `config` object (nested dict) from goes2go, regardless of
+    whether the installed version exposes it as `goes2go.config` (current API,
+    goes2go >= 2024.x) or as the submodule `goes2go.config.config` (legacy API,
+    in case someone on the team has an older version installed).
+    Raises an ImportError if neither path works, so as not to
+    mask a genuine installation issue.
+    """
+    try:
+        from goes2go import config as g2g_config
+        return g2g_config
+    except ImportError:
+        pass
+    from goes2go.config import config as g2g_config  # fallback, versiones viejas
+    return g2g_config
+
+
 def get_goes2go_cache_dir():
     """Returns the directory where goes2go saves downloaded files."""
     try:
-        from goes2go.config import config as g2g_config
+        g2g_config = _get_g2g_config()
         return g2g_config.get("default", {}).get("save_dir", os.path.expanduser("~/data"))
     except Exception:
         return os.path.expanduser("~/data")
+
 
 def configure_goes2go_cache_dir():
     """
     If the GERIS_GOES2GO_CACHE environment variable is set (typically in each
     machine's local .env), redirects goes2go's internal cache (where the full
     full-disk .nc file is downloaded before cropping) to that path.
-    If the variable is not set, this function is a no-op and behavior is 
+    If the variable is not set, this function is a no-op and behavior is
     identical to today (goes2go's default, typically ~/data).
 
     Must be called once, before the first download.
@@ -66,7 +85,7 @@ def configure_goes2go_cache_dir():
     cache_dir = os.environ.get("GERIS_GOES2GO_CACHE")
     if not cache_dir:
         return
-    from goes2go.config import config as g2g_config
+    g2g_config = _get_g2g_config()
     os.makedirs(cache_dir, exist_ok=True)
     g2g_config["default"]["save_dir"] = cache_dir
 
@@ -100,15 +119,15 @@ def extract_units_metadata(da) -> dict:
     cf_decoded = ("scale_factor" in enc) or ("add_offset" in enc)
 
     return {
-        "units":        attrs.get("units"),
-        "long_name":    attrs.get("long_name"),
-        "valid_range":  valid_range,
-        "cf_decoded":   cf_decoded,     # True -> .values is already in physical units
-        "scale_factor": enc.get("scale_factor"),
-        "add_offset":   enc.get("add_offset"),
+        "units": attrs.get("units"),
+        "long_name": attrs.get("long_name"),
+        "valid_range": valid_range,
+        "cf_decoded": cf_decoded, # True -> .values is already in physical units
+        "scale_factor": float(enc["scale_factor"]) if "scale_factor" in enc else None,
+        "add_offset": float(enc["add_offset"]) if "add_offset" in enc else None,
         "packed_dtype": str(enc.get("dtype")) if "dtype" in enc else None,
     }
-
+    
 
 def download_highres(timestamp, product_cfg, region_cfg, satellite, domain, folder=None):
     """
@@ -126,7 +145,7 @@ def download_highres(timestamp, product_cfg, region_cfg, satellite, domain, fold
     import xarray as xr
     band = product_cfg.get("band")
     g = GOES(satellite=satellite, product=product_cfg["product"], domain=domain, bands=band)
-    files_df = g.nearesttime(timestamp, return_as="filelist")
+    files_df = g.nearesttime(timestamp, return_as="filelist", save_dir=get_goes2go_cache_dir())
     if files_df is None or len(files_df) == 0:
         raise RuntimeError(f"goes2go found no files for {product_cfg['id']} at {timestamp}")
     relative_path = files_df.iloc[0]["file"]
@@ -203,7 +222,7 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
         else:
             g  = GOES(satellite=satellite, product=product_cfg["product"], domain=domain,
                     bands=band if band else None)
-            ds = g.nearesttime(timestamp)
+            ds = g.nearesttime(timestamp, save_dir=get_goes2go_cache_dir())
             xs, ys = goes_xy_slices(ds, **region_cfg)
             ds_cropped = ds.sel(x=xs, y=ys)
             da = ds_cropped[product_cfg["variable"]]
