@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import downloader
+#import downloader
 import manifest
 
 from dotenv import load_dotenv
@@ -34,6 +34,26 @@ def load_manifest(output_root):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+# --- Workaround para bug de OpenSSL (ASN1_R_NOT_ENOUGH_DATA en Windows) ---
+# Ver: https://github.com/openssl/openssl/issues/31807
+# https://github.com/python/cpython/issues/151504
+# Debe ejecutarse ANTES de cualquier import que traiga aiohttp (goes2go -> s3fs -> aiobotocore -> aiohttp)
+import ssl
+import certifi
+
+_original_create_default_context = ssl.create_default_context
+
+def _patched_create_default_context(purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
+    # Si no se especificó una fuente de certificados explícita, usamos el bundle
+    # de certifi en vez de dejar que Python intente leer el almacén de Windows
+    # (ese camino es el que dispara el bug de OpenSSL).
+    if cafile is None and capath is None and cadata is None:
+        cafile = certifi.where()
+    return _original_create_default_context(purpose, cafile=cafile, capath=capath, cadata=cadata)
+
+ssl.create_default_context = _patched_create_default_context
+
+import downloader
 
 def get_timestamps(start_str, end_str, interval_minutes=60):
     start = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
@@ -424,6 +444,8 @@ def main():
     args = parser.parse_args()
     cfg  = load_config(os.path.join(os.path.dirname(__file__), "config.yaml"))
 
+    print("GERIS_GOES2GO_CACHE =", os.environ.get("GERIS_GOES2GO_CACHE"))
+
     # Allows each person to redirect downloads to their own disk (e.g. an external drive) by setting these variables
     # in their local .env, without touching the shared config.yaml. If unset, behavior is unchanged.
     if os.environ.get("GERIS_OUTPUT_ROOT"):
@@ -450,7 +472,9 @@ def main():
         cmd_visualize(args, cfg)
     else:
         parser.print_help()
-    
+
+downloader.configure_goes2go_cache_dir()
+print("goes2go cache =", downloader.get_goes2go_cache_dir())
 
 def cmd_spatial_report(args, cfg):
     import numpy as np
