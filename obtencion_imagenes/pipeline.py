@@ -424,6 +424,12 @@ def main():
     args = parser.parse_args()
     cfg  = load_config(os.path.join(os.path.dirname(__file__), "config.yaml"))
 
+    # Allows each person to redirect downloads to their own disk (e.g. an external drive) by setting these variables
+    # in their local .env, without touching the shared config.yaml. If unset, behavior is unchanged.
+    if os.environ.get("GERIS_OUTPUT_ROOT"):
+        cfg["output_root"] = os.environ["GERIS_OUTPUT_ROOT"]
+    downloader.configure_goes2go_cache_dir()
+
     if args.command == "download":
         cmd_download(args, cfg)
     elif args.command == "status":
