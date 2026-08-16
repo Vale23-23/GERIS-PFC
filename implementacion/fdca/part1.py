@@ -98,14 +98,14 @@ def _contextual_thresholds(bkg: BackgroundStats, sza_cos: float):
     """
     n_pass = bkg.n_passes
 
-    # Std. Dev. (Tb3.9 – Tb11.2) test [ATBD 3.4.2.6]:
+    # Std. Dev. (Tb3.9 – Tb11.2) test:
     # desvío estándar de (BT7-BT14) dentro de la ventana de background,
     # escalado x3.0, con techo en 4.0K. Se usa para descartar como "no-fuego"
     # a píxeles cuya diferencia térmica no se aparta lo suficiente del ruido
     # normal de la ventana circundante.
     std_7b14b = min(4.0, 3.0 * bkg.std_dev_7_14_diff)
 
-    # Std. Dev. (Tb3.9) test [ATBD 3.4.2.6]:
+    # Std. Dev. (Tb3.9) test:
     # desvío estándar de BT7 dentro de la ventana, escalado x3.75, más un offset
     # que crece con la cantidad de expansiones de ventana (n_passes/3, tope 5.0) —
     # a mayor n_passes, la ventana es más grande y heterogénea, así que se tolera
@@ -114,7 +114,7 @@ def _contextual_thresholds(bkg: BackgroundStats, sza_cos: float):
     std_7b = 3.75 * bkg.temp7_bkg_stddev + bg_offset
     std_7b = max(4.0, min(10.0, std_7b))
 
-    # Std. Dev. (Reflb) test [ATBD 3.4.2.6]:
+    # Std. Dev. (Reflb) test:
     # desvío estándar del producto de reflectividad Refl (BT7-BT14 en espacio
     # de radiancia de canal 7) dentro de la ventana, escalado x3.0, acotado
     # entre 0.25 y 1.0. Umbral "estricto" para el test de reflectividad —
@@ -122,7 +122,7 @@ def _contextual_thresholds(bkg: BackgroundStats, sza_cos: float):
     std_reflb = 3.0 * bkg.rad_diff_sigma
     std_reflb = max(0.25, min(1.0, std_reflb))
 
-    # Std. Dev. (Reflb) max test [ATBD 3.4.2.6]:
+    # Std. Dev. (Reflb) max test:
     # segunda versión del test de Reflb, con escalado más laxo (x2.5 en vez
     # de x3.0) y un offset que también crece con n_passes (mismo patrón que
     # std_7b: ventanas más grandes toleran más variación). Acotado entre
@@ -140,8 +140,7 @@ def _along_scan_reflectivity_test(
     Along scan-line radiance test [ATBD 3.4.2.6].
 
     Chequea que el píxel de interés no sea un "salto" anómalo aislado
-    comparándolo contra los píxeles ±2 elementos en la misma fila (no los
-    adyacentes ±1 — la prueba busca anomalías localizadas, no bordes suaves).
+    comparándolo contra los píxeles ±2 elementos en la misma fila.
 
     Si AMBOS vecinos (j-2 y j+2) tienen Refl por debajo de std_reflb
     (es decir, el entorno es "plano", sin actividad térmica) Y el BT7 del
