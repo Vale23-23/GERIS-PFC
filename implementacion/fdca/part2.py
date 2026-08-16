@@ -7,11 +7,7 @@ import numpy as np
 from typing import List, Optional
 from datetime import datetime, timedelta
 
-from .constants import (
-    FireMask, FailChar,
-    BKG_MAX_ITER, MIN_FIRE_TEMP, MAX_SURF_TEMP,
-    TEMPORAL_WINDOW_H, TEMPORAL_PIXEL_RAD,
-)
+from fdca.constants import *
 from .part1 import FireCandidate
 
 
