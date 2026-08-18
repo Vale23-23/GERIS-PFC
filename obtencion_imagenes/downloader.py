@@ -172,6 +172,7 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
     """
     import time
     import json
+    import shutil
 
     PLANCK_BANDS = {7, 13, 14, 15}  # IR bands where brightness temperature is relevant
 
@@ -182,9 +183,16 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
     file_path   = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}.npy")
     coeffs_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_planck.json")
     units_path  = os.path.join(folder, "units.json")
-    dqf_path    = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_dqf.npy")
 
     band = product_cfg.get("band")
+
+    legacy_dqf_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_dqf.npy")
+    dqf_folder = os.path.join(output_root, "ABI-L1b-Rad-B07-DFQ") if band == 7 else folder
+    dqf_path   = os.path.join(dqf_folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_dqf.npy")
+    if band == 7:
+        os.makedirs(dqf_folder, exist_ok=True)
+        if os.path.exists(legacy_dqf_path) and not os.path.exists(dqf_path):
+            shutil.copy2(legacy_dqf_path, dqf_path)
 
     # is it necessary to generate the .npy file? If it already exists, we skip downloading.
     need_npy = not os.path.exists(file_path)
