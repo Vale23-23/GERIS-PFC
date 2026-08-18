@@ -33,7 +33,9 @@ Usage:
 """
 
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -44,7 +46,61 @@ ENV_FILE        = Path(__file__).parent.parent / ".env"
 
 VALID_EXTENSIONS = {".npy", ".json", ".nc"}
 EXCLUDE_FILES    = {"metadata.csv"}
+
+# HF tiene dos límites distintos que chocan entre sí:
+#   1) Un commit con demasiados archivos de una hace timeout (504) al
+#      construir el árbol del lado del servidor.
+#   2) Máximo 128 commits/hora por repo (429 Too Many Requests).
+# Con lotes chicos evitás el (1) pero te quedás sin cupo por el (2) antes
+# de terminar. Con ~55-60k archivos, un lote de ~1000 mantiene el total
+# de commits bien por debajo de 128/hora y sigue siendo chico para el (1).
+COMMIT_BATCH_SIZE   = 1000
+MAX_RETRIES         = 6
+RETRY_BACKOFF_SEC   = 20   # backoff genérico para 502/503/504, se multiplica por intento
+SLEEP_BETWEEN_COMMITS = 3  # pausa entre lotes para no ráfaguear el rate limit
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def chunked(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def parse_retry_after(msg: str):
+    """Extrae 'Retry after N seconds' del mensaje de error 429 de HF."""
+    m = re.search(r"Retry after (\d+) seconds", msg)
+    return int(m.group(1)) if m else None
+
+
+def commit_with_retry(api, **kwargs):
+    """create_commit con reintentos: respeta 'Retry after' en 429, y hace
+    backoff exponencial para 502/503/504/timeouts transitorios."""
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return api.create_commit(**kwargs)
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+
+            if "429" in msg:
+                wait = parse_retry_after(msg) or 300
+                wait += 5  # margen de seguridad
+                if attempt == MAX_RETRIES:
+                    raise
+                print(f"    ⏳ Rate limit (429). Esperando {wait}s antes de reintentar "
+                      f"(intento {attempt}/{MAX_RETRIES})...")
+                time.sleep(wait)
+                continue
+
+            transient = "504" in msg or "502" in msg or "503" in msg or "timeout" in msg.lower()
+            if not transient or attempt == MAX_RETRIES:
+                raise
+            wait = RETRY_BACKOFF_SEC * attempt
+            print(f"    ⚠️  Intento {attempt}/{MAX_RETRIES} falló ({msg[:120]}...). "
+                  f"Reintentando en {wait}s...")
+            time.sleep(wait)
+    raise last_err
 
 
 def load_token():
@@ -191,6 +247,29 @@ def main():
 
     print(f"⬆️  Uploading {len(files)} files...")
     try:
+        # ── Saltar archivos que ya están en HF ──────────────────────────────
+        # Sin esto, cada corrida vuelve a hashear/verificar TODOS los archivos
+        # (incluso los ya subidos) antes de descartarlos como "sin cambios".
+        # Con list_repo_files (una sola llamada) sabemos de antemano cuáles
+        # ya están, y directamente no los mandamos a la cola de subida.
+        print("  🔎 Consultando qué archivos ya existen en el repo remoto...")
+        try:
+            remote_files = set(api.list_repo_files(repo_id=HF_REPO, repo_type="dataset"))
+        except Exception as e:
+            print(f"  ⚠️  No se pudo listar archivos remotos ({e}). Se sube todo igual.")
+            remote_files = set()
+
+        manifest_rel_check = "uruguay/manifest.json"
+        before = len(files)
+        files = [
+            (local, rel) for local, rel in files
+            if rel == manifest_rel_check or rel not in remote_files
+        ]
+        skipped = before - len(files)
+        if skipped:
+            print(f"  ⏭️  {skipped} archivos ya estaban en HF, se saltean "
+                  f"({len(files)} quedan por subir)")
+
         # ── Merge manifest with remote version ────────────────────────────────
         # This ensures that when multiple team members upload different months,
         # the manifest accumulates all timestamps instead of being overwritten.
@@ -235,18 +314,31 @@ def main():
             files = [(local, rel) for local, rel in files if rel != manifest_rel]
             files.append((Path(merged_tmp.name), manifest_rel))
 
-        operations = [
-            CommitOperationAdd(path_in_repo=rel, path_or_fileobj=str(local))
-            for local, rel in files
-        ]
+        # ── Commit en lotes ──────────────────────────────────────────────
+        # Un solo commit con miles de archivos hace timeout (504) del lado
+        # de HF al construir el árbol. Lo partimos en lotes chicos; los
+        # blobs LFS ya subidos en corridas anteriores se dedupean por hash,
+        # así que reintentar es barato.
+        batches = list(chunked(files, COMMIT_BATCH_SIZE))
+        n_batches = len(batches)
+        print(f"  📦 Subiendo en {n_batches} lotes de hasta {COMMIT_BATCH_SIZE} archivos c/u")
 
-        api.create_commit(
-            repo_id=HF_REPO,
-            repo_type="dataset",
-            token=token,
-            operations=operations,
-            commit_message="sync dataset",
-        )
+        for i, batch in enumerate(batches, start=1):
+            operations = [
+                CommitOperationAdd(path_in_repo=rel, path_or_fileobj=str(local))
+                for local, rel in batch
+            ]
+            print(f"  ⬆️  Lote {i}/{n_batches} ({len(batch)} archivos)...")
+            commit_with_retry(
+                api,
+                repo_id=HF_REPO,
+                repo_type="dataset",
+                token=token,
+                operations=operations,
+                commit_message=f"sync dataset (batch {i}/{n_batches})",
+            )
+            if i < n_batches:
+                time.sleep(SLEEP_BETWEEN_COMMITS)
 
         # Clean up temp file
         if local_manifest_path.exists():
