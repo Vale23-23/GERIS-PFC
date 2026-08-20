@@ -349,21 +349,64 @@ def rad_to_bt(band: int, rad: np.ndarray) -> np.ndarray: # QUEDA PENDIENTE REVIS
     return bt.astype(np.float32)
 
 
-def rad_b02_to_reflectance(rad: np.ndarray, sza: np.ndarray) -> np.ndarray:
+def rad_b02_to_reflectance(rad: np.ndarray) -> np.ndarray:
     """
-    Convierte radiancia B02 [W·m⁻²·sr⁻¹·µm⁻¹] a factor de reflectancia [-].
+    Convert B02 radiance [W·m⁻²·sr⁻¹·µm⁻¹] to reflectance factor [-].
 
-    refl = π * Rad / (ESUN_B02 * cos(SZA))
+    refl = π * Rad / ESUN_B02
 
-    Noche (SZA ≥ 90°) → NaN (no hay luz solar).
-    El FDCA usa este valor como 'refl2' para los tests de nube y glint diurnos.
+    Do NOT divide by cos(SZA) here: refl2 must stay as the raw reflectance
+    factor (ATBD Table 3.1), not normalized by solar angle. The division by
+    cos(SZA) happens exactly once, in part1.calculate_albedo(), where
+    refl2 / cos(SZA) produces Albedo (ATBD Table 3.4). Dividing here too would
+    make calculate_albedo() divide by cos(SZA) twice, and vis_brightness
+    (255*sqrt(refl2)) would end up wrong with nothing downstream to correct it.
+
+    FDCA uses this value as 'refl2' for the daytime cloud and glint tests.
     """
     import math
-    cos_sza = np.cos(np.radians(sza))
-    # Evitar división por cero en píxeles nocturnos
-    cos_sza_safe = np.where(cos_sza > 0.0, cos_sza, np.nan)
-    refl = math.pi * rad / (ESUN_B02 * cos_sza_safe)
+    refl = math.pi * rad / (ESUN_B02)
     return np.clip(refl, 0.0, 1.5).astype(np.float32)   # clip para sat/ruido
+
+
+def resample_b02_to_grid(rad: np.ndarray, target_shape: tuple[int, int],
+                          max_pixel_slack: int = 4) -> np.ndarray:
+    """Reduce B02 to the 2 km thermal grid using area-block averaging.
+
+    B02 should be exactly `factor`x finer than the thermal grid in each axis
+    (nominally factor=4, since B02 is 0.5 km and B07/14 are 2 km). In
+    practice, per-band crops can be off by a few lines/columns because each
+    band's bounding box gets rounded to its own native pixel size
+    independently upstream. This pads B02 with NaN (ignored by np.nanmean)
+    up to the exact expected size instead of failing outright, as long as
+    the mismatch is small (<= max_pixel_slack pixels per axis).
+    """
+    target_h, target_w = target_shape
+    height, width = rad.shape
+
+    factor_h = round(height / target_h)
+    factor_w = round(width / target_w)
+    if factor_h != factor_w or factor_h < 1:
+        raise ValueError(
+            f"B02 shape {rad.shape} no es compatible con la grilla {target_shape} "
+            f"(factor_h={factor_h}, factor_w={factor_w})"
+        )
+    factor = factor_h
+    expected_h, expected_w = target_h * factor, target_w * factor
+
+    pad_h = expected_h - height
+    pad_w = expected_w - width
+    if pad_h < 0 or pad_w < 0 or max(pad_h, pad_w) > max_pixel_slack:
+        raise ValueError(
+            f"B02 shape {rad.shape} difiere demasiado de lo esperado "
+            f"({expected_h}, {expected_w}) para factor={factor}."
+        )
+    if pad_h or pad_w:
+        rad = np.pad(rad, ((0, pad_h), (0, pad_w)), constant_values=np.nan)
+
+    valid_rad = np.where(rad >= 0, rad, np.nan)
+    blocks = valid_rad.reshape(target_h, factor, target_w, factor)
+    return np.nanmean(blocks, axis=(1, 3)).astype(np.float32)
 
 
 # ── Máscaras de superficie ────────────────────────────────────────────────────
@@ -746,12 +789,11 @@ def load_fdca_input(
 
     # ── Reflectancia B02 ──────────────────────────────────────────────────────
     if rad02 is not None:
-        # Submuestrear B02 de (893,1212) a (224,303) promediando bloques
-        from PIL import Image
-        H, W = shape
-        img = Image.fromarray(rad02).resize((W, H), Image.BILINEAR)
-        rad02_resized = np.array(img, dtype=np.float32)
-        refl2 = rad_b02_to_reflectance(rad02_resized, sza)
+        # B02 es aproximadamente 4x más fino que la grilla térmica.
+        # El ATBD pide reflectancia muestreada a 2 km: promediar bloques
+        # conserva el promedio espacial y evita interpolar valores inválidos.
+        rad02_resized = resample_b02_to_grid(rad02, shape)
+        refl2 = rad_b02_to_reflectance(rad02_resized)
     else:
         refl2 = None
 
