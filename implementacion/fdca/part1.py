@@ -460,16 +460,17 @@ def run_part1(
                 jj = max(0, min(W-1, jj))
                 return refl[i, jj]
 
-            if day_pixel:
+            if day_pixel and fire_mask[i, j] == FireMask.FIRE_FREE:
                 # if it's daytime but there's no available albedo, the test is not applied
                 if not np.isnan(alb_ij):
                     if alb_ij >= CLOUD_ALBEDO_THRESH and bt7[i, j] < MAX_BT7:
                         if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
                             fire_mask[i, j] = FireMask.ALONG_SCAN_DAY;   continue
             else:
-                if bt7[i, j] < bt7_min and bt7[i, j] >= MIN_BT:
-                    if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
-                        fire_mask[i, j] = FireMask.ALONG_SCAN_NIGHT; continue
+                if fire_mask[i, j] == FireMask.FIRE_FREE:
+                    if bt7[i, j] < bt7_min and bt7[i, j] >= MIN_BT:
+                        if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
+                            fire_mask[i, j] = FireMask.ALONG_SCAN_NIGHT; continue
 
             # ── Saturation flag ───────────────────────────────────────────────
             sat_flag = (bt7[i, j] >= SAT_FLAG_CH7 or bt14_eff[i, j] >= SAT_FLAG_CH14)
