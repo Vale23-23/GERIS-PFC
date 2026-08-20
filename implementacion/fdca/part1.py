@@ -670,7 +670,8 @@ def run_part1(
             pix_area = compute_pixel_area(i, j, latitudes, longitudes)
 
             # ── Last-chance fire test (ATBD 3.4.2.11) ────────────────────────
-            if skip_dozier or not doz.valid:
+            glint_low_temp = (fc == FailChar.F8 and doz.valid and doz.fire_temp < 400.0)
+            if skip_dozier or not doz.valid or glint_low_temp:
                 lct1 = ((bt7[i, j] - bkg.temp7_bkg_mean >= std_7b)
                         and (bt14_eff[i, j] - bkg.temp14_bkg_mean >= -20.0))
                 lct2 = ((refl_ij - bkg.reflb >= std_reflb_max) and pass_along)
