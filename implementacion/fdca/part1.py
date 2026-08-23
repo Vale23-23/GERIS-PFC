@@ -274,10 +274,14 @@ def run_part1(
     coeffs14:    dict,                 # Coefs Planck reales Ch14
     coeffs13:    Optional[dict],       # Coefs Planck reales Ch13 (None si no hay B13)
     # ── Auxiliary static ─────────────────────────────────────────────────────
-    land_cover:  np.ndarray,           # MODIS land mask values
+    #land_cover:  np.ndarray,           # MODIS land mask values
     land_mask:   np.ndarray,           # Binary land mask (True = land)
-    desert_mask: np.ndarray,           # Desert mask
-    usgs_eco:    np.ndarray,           # USGS ecosystem type
+    #desert_mask: np.ndarray,           # Desert mask
+    #usgs_eco:    np.ndarray,           # USGS ecosystem type
+    eco_mask:    np.ndarray,           # precomputed mask codes 150/151/152/153
+                                        # (BAD_ECOSYSTEM/SEA_WATER/COAST_FRINGE/INLAND_WATER).
+                                        # saved as int8: values > 127 suffer overflow
+                                        # and are recovered by reinterpreting as uint8.
     data_quality: Optional[np.ndarray],
 ) -> tuple[np.ndarray, np.ndarray, List[FireCandidate]]:
     """
@@ -324,13 +328,11 @@ def run_part1(
         bad_rad = bad_rad | (rad13 < 0)
     refl = np.where(bad_rad, -9999.0, refl)
 
-    # ── Helper: test de ecosistema inválido código 150, incluye 4 vecinos
-    #    inmediatos (ATBD 3.4.2.3). Definido como closure para no repasar
-    #    land_cover/desert_mask como parámetros en cada llamada del loop.
-    def _invalid_ecosystem_150(ii: int, jj: int) -> bool:
-        return (land_cover[ii, jj] in MODIS_WATER_CODES
-                or land_cover[ii, jj] == UMD_WATER_CODE
-                or desert_mask[ii, jj] == DESERT_BRIGHT)
+    # ── Codes 150/151/152/153 from precomputed mask (ATBD 3.4.2.3) ────
+    # eco_mask replaces the previous calculation based on land_cover/desert_mask/
+    # usgs_eco. It was saved as int8 and values > 127 (150, 153, etc.)
+    # overflowed; the real code is recovered by reinterpreting as uint8.
+    eco_mask_fixed = eco_mask.astype(np.uint8)
     
     # ── Pixel loop ────────────────────────────────────────────────────────────
     # Cache for background (skip recompute for same scan element if prev was OK)
@@ -372,25 +374,16 @@ def run_part1(
                 fire_mask[i, j] = FireMask.UNUS_CH14;  continue
 
             # ── Ecosystem / surface mask tests (ATBD 3.4.2.3) ────
-            # El chequeo de vecinos es exclusivo del código 150; 151/152/153
-            # se evalúan solo sobre el píxel propio (ver viñetas del ATBD).
-            is_bad_eco = _invalid_ecosystem_150(i, j)
-            if not is_bad_eco:
-                for ni, nj in ((i-1, j), (i+1, j), (i, j-1), (i, j+1)): # edge pixels are simply ignored
-                    if 0 <= ni < L and 0 <= nj < W and _invalid_ecosystem_150(ni, nj):
-                        is_bad_eco = True
-                        break
-
-            if is_bad_eco:
+            # Codes 150/151/152/153 taken directly from eco_mask_fixed.
+            eco_code = int(eco_mask_fixed[i, j])
+            if eco_code == FireMask.BAD_ECOSYSTEM:
                 fire_mask[i, j] = FireMask.BAD_ECOSYSTEM;  continue
-
-            eco = usgs_eco[i, j]
-            if eco == USGS_SEA_WATER:
-                fire_mask[i, j] = FireMask.SEA_WATER;     continue
-            if eco in USGS_COAST_FRINGE:
-                fire_mask[i, j] = FireMask.COAST_FRINGE;  continue
-            if eco in USGS_INLAND_WATER:
-                fire_mask[i, j] = FireMask.INLAND_WATER;  continue
+            if eco_code == FireMask.SEA_WATER:
+                fire_mask[i, j] = FireMask.SEA_WATER;      continue
+            if eco_code == FireMask.COAST_FRINGE:
+                fire_mask[i, j] = FireMask.COAST_FRINGE;   continue
+            if eco_code == FireMask.INLAND_WATER:
+                fire_mask[i, j] = FireMask.INLAND_WATER;   continue
 
             # ── Radiance quality check ────────────────────────────────────────
             if rad7[i, j] < 0 or rad14_eff[i, j] < 0:
