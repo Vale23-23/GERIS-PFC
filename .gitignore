@@ -9,6 +9,8 @@ obtencion_imagenes/dataset/
 *.npz
 *.nc
 
+!implementacion/mask_example.npy
+
 implementacion/data/
 
 # Entorno virtual
@@ -17,10 +19,10 @@ implementacion/data/
 # Checkpoints del modelo
 entrenamiento/checkpoints/
 
+
 # Caché de Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 
 # Caché de goes2go (descarga archivos NetCDF localmente)
 goes2go/
@@ -33,5 +35,5 @@ goes2go/
 .ipynb_checkpoints/
 prueba.ipynb
 
-implementacion/fdca/__pycache__
 geris
+
