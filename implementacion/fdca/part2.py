@@ -201,7 +201,6 @@ def run_part2(
     -------
     fire_mask, fail_char_arr (updated), confirmed_fires list
     """
-    TEMPORAL_SECS = TEMPORAL_WINDOW_H * 3600.0
     confirmed: List[FireCandidate] = []
 
     for cand in candidates:
@@ -213,7 +212,7 @@ def run_part2(
         eliminated, _reason_314 = _eliminate_false_alarm(cand)
         if eliminated:
             continue
-        day_off = sza_cos * 20.0 if is_day else 0.0
+        day_off = sza_cos * P2_DAY_OFFSET_COEF if is_day else 0.0
 
         # ── 3.4.2.14 (second half): re-evaluation of glint/cloud edge ─────
         fc = cand.fail_char
@@ -260,7 +259,7 @@ def run_part2(
                     ni, nj = i + di, j + dj
                     if 0 <= ni < L and 0 <= nj < W:
                         last_t = prev_fire_mask[ni, nj]
-                        if last_t > 0 and (current_epoch - last_t) <= TEMPORAL_WINDOW_H * 3600.0:
+                        if last_t > 0 and (current_epoch - last_t) <= TEMPORAL_WINDOW_S:
                             temporally_filtered = True
                             break
                 if temporally_filtered:

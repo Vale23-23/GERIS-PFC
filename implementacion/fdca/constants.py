@@ -151,7 +151,7 @@ FRP_NPASSES_EXCEEDED = -99.0
 FRP_NOT_CALCULATED = -9.0    # ATBD 3.4.2.12: fuego real sin FRP calculado (códigos 11/12/15, o n_passes>10)
 
 # ── Temporal filter ──────────────────────────────────────────────────────────
-TEMPORAL_WINDOW_H  = 12       # Hours to look back
+TEMPORAL_WINDOW_S  = 43200       # Seconds to look back
 TEMPORAL_PIXEL_RAD = 1        # Pixel search radius for temporal match
 TEMPORAL_FILTER_CODE_OFFSET = 20   # Fire code +20 if there was a prior fire close in time
 
