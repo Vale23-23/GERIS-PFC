@@ -106,10 +106,6 @@ DOZIER_NEWTON_TOL = 1e-6
 MIN_FIRE_TEMP     = 400.0     # Minimum valid fire temperature [K]
 MAX_SURF_TEMP     = 350.0     # Maximum surface temperature [K]
 
-# ── Temporal filter ──────────────────────────────────────────────────────────
-TEMPORAL_WINDOW_H  = 12       # Hours to look back
-TEMPORAL_PIXEL_RAD = 1        # Pixel search radius for temporal match
-
 # ── Ecosystem / land mask codes ──────────────────────────────────────────────
 MODIS_WATER_CODES = {7, 6, 0, 3, 5}
 UMD_WATER_CODE    = 0
@@ -117,6 +113,47 @@ DESERT_BRIGHT     = 2
 USGS_SEA_WATER    = 15
 USGS_COAST_FRINGE = {80, 85}
 USGS_INLAND_WATER = {14, 73, 74, 75}
+
+# ── Part II — False alarm elimination (ATBD 3.4.2.14) ────────────────────────
+
+P2_DAY_OFFSET_COEF = 20.0
+
+DELTA_BT7_TB7_MIN = 2.0
+
+BT7_WARM_NIGHT     = 290.0
+DELTA_BT7_TB7_MAX  = 10.0
+DELTA_BT7_BT14_MAX = 25.0
+
+TB7_COLD_NIGHT = 280.0
+
+STD_REFLB_P2_SCALE = 2.5
+STD_REFLB_P2_FLOOR = 2.5
+
+CLOUD_EDGE_ALBEDO_MIN      = 0.25   
+CLOUD_EDGE_ALBEDO_DIFF_MIN = 0.10   
+CLOUD_EDGE_BT7_MAX_NIGHT   = 292.5  
+
+# ── Part II — 3.4.2.15: cloud/fog edge re-test ────────────────────
+FOG_EDGE_DAY_OFFSET_ADD = 5.0    
+FOG_EDGE_DIFF_THRESH    = 1.5    
+FOG_EDGE_BT7_DELTA_MAX  = 4.0    
+
+# ── Part II — 3.4.2.15: high/medium confidence thresholds ─────────
+CONF_WINDOW_OFFSET_CAP     = 5.0   # min(5, n_passes/3) — mismo patrón que 3.4.2.6 en Part I
+CONF_WINDOW_OFFSET_DIVISOR = 3.0
+CONF_BASE_THRESH_HIGH      = 7.0   
+CONF_BASE_THRESH_MEDIUM    = 5.0   
+CONF_ADD_HIGH              = 5.0   
+CONF_ADD_MEDIUM            = 3.0   
+
+LOW_FIRE_SIZE = -999.0
+FRP_NPASSES_EXCEEDED = -99.0
+FRP_NOT_CALCULATED = -9.0    # ATBD 3.4.2.12: fuego real sin FRP calculado (códigos 11/12/15, o n_passes>10)
+
+# ── Temporal filter ──────────────────────────────────────────────────────────
+TEMPORAL_WINDOW_S  = 43200       # Seconds to look back
+TEMPORAL_PIXEL_RAD = 1        # Pixel search radius for temporal match
+TEMPORAL_FILTER_CODE_OFFSET = 20   # Fire code +20 if there was a prior fire close in time
 
 # ── Fire mask codes (Table 3.11) ─────────────────────────────────────────────
 class FireMask:

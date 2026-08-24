@@ -1,20 +1,18 @@
 """
-run_fdca.py
-───────────
-Corre el FDCA sobre un timestamp ya descargado por pipeline.py
-y genera figuras que documentan el efecto de cada fase.
+Script to run FDCA on a timestamp downloaded by pipeline.py
+and generate figures that show effect of part I and part II.
 
-Uso:
+Usage:
   python run_fdca.py --timestamp 20250905_1500 --region uruguay
   python run_fdca.py --timestamp 20250905_1500 --region uruguay --save-outputs
 
-Lo que genera en figures/<timestamp>/:
-  00_inputs.png           → BT7, BT14 y SZA (qué entra al algoritmo)
-  01_part1_filters.png    → efecto de los filtros de la Parte I
-  02_part2_confirm.png    → reclasificación y confirmación de la Parte II
-  03_fire_map.png         → mapa georeferenciado final
+Outputs generated in figures/<timestamp>/:
+  00_inputs.png          -> BT7, BT14 and SZA (algorithm inputs)
+  01_part1_filters.png   -> Part I filter effects
+  02_part2_confirm.png   -> Part II effects
+  03_fire_map.png        -> Final map
 
-Lo que genera en data/<timestamp>/ (con --save-outputs):
+Outputs generated in data/<timestamp>/ (with --save-outputs):
   fire_mask.npy
   fail_char.npy
   summary.json
@@ -32,20 +30,22 @@ import matplotlib.patches as mpatches
 from pathlib import Path
 from datetime import datetime
 
-# ── Argumentos ───────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Correr FDCA sobre datos GOES-19")
+# ── Arguments ───────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser(description="Run FDCA on GOES-19 data")
+
 parser.add_argument("--timestamp", required=True,
-    help='Timestamp a procesar, ej. "20250905_1500"')
+    help='Timestamp to process, e.g. "20250905_1500"')
 parser.add_argument("--region", default="uruguay",
-    help="Región del config.yaml (default: uruguay)")
+    help="Region from config.yaml (default: uruguay)")
 parser.add_argument("--dataset-root", default="dataset",
-    help="Carpeta raíz del dataset (default: dataset)")
+    help="Dataset root folder (default: dataset)")
 parser.add_argument("--config", default="config.yaml",
-    help="Ruta al config.yaml (default: config.yaml)")
+    help="Path to config.yaml (default: config.yaml)")
 parser.add_argument("--save-outputs", action="store_true",
-    help="Guardar fire_mask.npy, fail_char.npy y summary.json")
+    help="Save fire_mask.npy, fail_char.npy, and summary.json")
 parser.add_argument("--output-dir", default="figures",
-    help="Carpeta base para figuras (default: figures)")
+    help="Base folder for figures (default: figures)")
+
 args = parser.parse_args()
 
 TS      = args.timestamp
@@ -53,30 +53,69 @@ REGION  = args.region
 FIG_DIR = Path(args.output_dir) / TS
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Paleta fire_mask (Tabla 3.11 ATBD) ───────────────────────────────────────
+# ── Import FDCA constants to build the palette ────────────────
+sys.path.insert(0, str(Path(args.config).parent.parent))
+from fdca.constants import FireMask
+
+# ──  fire_mask codes (Table 3.11 ATBD) ───────────────────────────────────────
 FM_PALETTE = {
-    0:  "#dde8f0",   # sin procesar / libre fuego
-    1:  "#c8dce8",   # libre de fuego (explícito)
-    2:  "#f5f5f5",   # espacio
-    3:  "#b8cfe0",   # bloqueo zenith
-    4:  "#a8bfd8",   # glint
-    5:  "#98afc8",   # fuera de rango
-    6:  "#e8d080",   # saturado ch7
-    7:  "#e8c060",   # saturado ch14
-    8:  "#d0b8a8",   # ecosistema inválido
-    9:  "#b8d0e8",   # agua
-    10: "#ff4500",   # procesado
-    11: "#ff6347",   # saturado
-    12: "#909090",   # nublado
-    13: "#e60000",   # alta probabilidad
-    14: "#ff8c00",   # media probabilidad
-    15: "#ffd700",   # baja probabilidad
-    30: "#990000",   # procesado + historial
-    31: "#aa3300",   # saturado + historial
-    32: "#505050",   # nublado + historial
-    33: "#880000",   # alta prob + historial
-    34: "#aa5500",   # media prob + historial
-    35: "#aa8800",   # baja prob + historial
+    # Parte I — no procesado / bloqueo geométrico
+    FireMask.NON_PROCESSED:        "#f5f5f5",  # 0   no debería quedar en output final
+    FireMask.SPACE:                "#dde8f0",  # 40  espacio
+    FireMask.ZENITH_BLOCK:         "#c8dce8",  # 50  SZA > 80°
+    FireMask.GLINT_BLOCK:          "#b8cfe0",  # 60  glint
+
+    # Parte I — fire-free / demasiado frío
+    FireMask.FIRE_FREE:            "#e8f0e0",  # 100 pasó todos los tests, no es fuego
+    FireMask.TOO_COLD:             "#d8e8d0",  # 201 demasiado frío
+
+    # Parte I — datos malos / faltantes
+    FireMask.MISS_CH7:             "#f0d0a8",  # 120
+    FireMask.MISS_CH14:            "#f0c898",  # 121
+    FireMask.SAT_CH7:              "#e8d080",  # 123 saturado ch7 (+buffer)
+    FireMask.SAT_CH14:             "#e8c060",  # 124 saturado ch14 (+buffer)
+    FireMask.NEG_RAD:              "#d8b088",  # 125 radiancia negativa
+    FireMask.UNUS_CH7:             "#c8a078",  # 126 ch7 < 200K
+    FireMask.UNUS_CH14:            "#b89068",  # 127 ch14 < 200K
+
+    # Parte I — ecosistema / superficie inválida
+    FireMask.BAD_ECOSYSTEM:        "#a8bfd8",  # 150 agua/desierto/vecino inválido
+    FireMask.SEA_WATER:            "#98afc8",  # 151 USGS sea water
+    FireMask.COAST_FRINGE:         "#88a0c0",  # 152 USGS coastline fringe
+    FireMask.INLAND_WATER:         "#b8d0e8",  # 153 USGS inland water
+
+    # Parte I — background / corrección fallida
+    FireMask.NO_BACKGROUND:        "#c0c0c0",  # 170 no se determinó background
+    FireMask.CONV_ERROR:           "#a8a8a8",  # 180 BT/radiancia corregida ≤ 0
+
+    # Parte I — nubes
+    FireMask.CLOUD_BT14:           "#909090",  # 200
+    FireMask.CLOUD_BT7_BT14_NEG:   "#989898",  # 205
+    FireMask.CLOUD_BT7_BT14_POS:   "#a0a0a0",  # 210
+    FireMask.CLOUD_ALBEDO:         "#a8a8a8",  # 215
+    FireMask.CLOUD_BT15:           "#b0b0b0",  # 220
+    FireMask.CLOUD_BT14_BT15_NEG:  "#b8b8b8",  # 225
+    FireMask.CLOUD_BT14_BT15_POS:  "#c0c0c0",  # 230
+
+    # Parte I — reflectividad along-scan (cerca de borde de nube)
+    FireMask.ALONG_SCAN_NIGHT:     "#d0c0e0",  # 240
+    FireMask.ALONG_SCAN_DAY:       "#d8c8e8",  # 245
+
+    # Parte II — fuego confirmado (sin historial temporal)
+    FireMask.PROCESSED:            "#ff4500",  # 10
+    FireMask.SATURATED:            "#ff6347",  # 11
+    FireMask.CLOUD_CONTAM:         "#909090",  # 12
+    FireMask.HIGH_PROB:            "#e60000",  # 13
+    FireMask.MED_PROB:             "#ff8c00",  # 14
+    FireMask.LOW_PROB:             "#ffd700",  # 15
+
+    # Parte II — fuego confirmado con historial temporal (+20)
+    FireMask.TEMP_PROCESSED:       "#990000",  # 30
+    FireMask.TEMP_SATURATED:       "#aa3300",  # 31
+    FireMask.TEMP_CLOUD:           "#505050",  # 32
+    FireMask.TEMP_HIGH:            "#880000",  # 33
+    FireMask.TEMP_MED:             "#aa5500",  # 34
+    FireMask.TEMP_LOW:             "#aa8800",  # 35
 }
 
 def mask_to_rgb(fire_mask):
@@ -88,7 +127,7 @@ def mask_to_rgb(fire_mask):
     return img
 
 
-# ── Figura 0: inputs de referencia ───────────────────────────────────────────
+# ── Figure 0: reference inputs ───────────────────────────────────────────
 
 def fig_inputs(inp, save_path):
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
@@ -106,7 +145,7 @@ def fig_inputs(inp, save_path):
     axes[1].set_title("BT Canal 14 (11.2 µm) [K]\n← referencia térmica de fondo")
     plt.colorbar(im1, ax=axes[1], label="K", shrink=0.8)
 
-    # SZA / condición día-noche
+    # SZA 
     im2 = axes[2].imshow(inp.sza, cmap="twilight", vmin=0, vmax=120, origin="upper")
     axes[2].set_title("Ángulo zenith solar [°]\n< 85° = día  |  ≥ 85° = noche")
     plt.colorbar(im2, ax=axes[2], label="°", shrink=0.8)
@@ -125,18 +164,24 @@ def fig_inputs(inp, save_path):
     print(f"  ✓ {save_path.name}")
 
 
-# ── Figura 1: efecto de la Parte I ───────────────────────────────────────────
+# ── Figure 1:  Part I effects ───────────────────────────────────────────
 
 def fig_part1(inp, fire_mask_p1, fail_char_p1, candidates, save_path):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle(f"Parte I — Filtros píxel a píxel (ATBD 3.4.2.1–3.4.2.13)\n"
                  f"{REGION} | {TS}", fontsize=11, fontweight="bold")
 
-    # Panel A: fire_mask luego de Parte I
-    # Clasificamos cada código en categoría visualizable
-    cat = np.zeros_like(fire_mask_p1)
-    cat[fire_mask_p1 <= 9]  = 1   # descartado (agua, espacio, nube, ángulo, etc.)
-    cat[fire_mask_p1 >= 10] = 2   # candidato fuego
+        # Panel A: estado al final de Parte I
+    # fire_mask_p1 NUNCA contiene 10-15/30-35 (esos códigos los asigna
+    # Parte II en 3.4.2.15). Los candidatos de Parte I se identifican por
+    # coordenada (i, j) en la lista `candidates`, no por el valor del mask.
+    cat = np.ones_like(fire_mask_p1)  # default: descartado
+
+    blocked_codes = [FireMask.SPACE, FireMask.ZENITH_BLOCK, FireMask.GLINT_BLOCK]
+    cat[np.isin(fire_mask_p1, blocked_codes)] = 0   # sin datos / bloqueado
+
+    for c in candidates:
+        cat[c.i, c.j] = 2  # candidato de Parte I (aún sin clasificar)
 
     colors_cat = ["#dde8f0", "#b0c4de", "#ff4500"]
     cmap_cat   = mcolors.ListedColormap(colors_cat)
@@ -144,9 +189,9 @@ def fig_part1(inp, fire_mask_p1, fail_char_p1, candidates, save_path):
     axes[0].set_title(f"Estado al final de Parte I\n"
                       f"{(cat==2).sum()} candidatos de {cat.size:,} píxeles totales")
     patches_cat = [
-        mpatches.Patch(color=colors_cat[0], label="Sin datos / espacio"),
-        mpatches.Patch(color=colors_cat[1], label="Descartado (nube, agua, ángulo...)"),
-        mpatches.Patch(color=colors_cat[2], label="Candidato fuego"),
+        mpatches.Patch(color=colors_cat[0], label="Sin datos / bloqueado (espacio, SZA, glint)"),
+        mpatches.Patch(color=colors_cat[1], label="Descartado (fire-free, nube, agua, ecosistema...)"),
+        mpatches.Patch(color=colors_cat[2], label="Candidato fuego (Parte I)"),
     ]
     axes[0].legend(handles=patches_cat, loc="lower left", fontsize=7, framealpha=0.85)
 
@@ -261,16 +306,17 @@ def fig_part2(inp, fire_mask_p1, fire_mask_p2, candidates, confirmed, save_path)
             axes[0,2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2,
                            str(v), ha="center", va="bottom", fontsize=9)
 
-    # [1,0]: Diferencia P1 → P2 (qué eliminó la Parte II)
-    was_fire = (fire_mask_p1 >= 10).astype(int)
-    is_fire  = (fire_mask_p2 >= 10).astype(int)
-    diff = is_fire - was_fire   # -1 = eliminado, 0 = sin cambio, +1 = añadido (raro)
+    # [1,0]: candidatos de Parte I que NO fueron confirmados en Parte II
+    diff = np.zeros_like(fire_mask_p1, dtype=int)
+    for c in candidates:
+        diff[c.i, c.j] = -1  # candidato original
+    for f in confirmed:
+        diff[f.i, f.j] = 1   # confirmado
     im_diff = axes[1,0].imshow(diff, cmap="RdYlGn", vmin=-1, vmax=1, origin="upper")
-    axes[1,0].set_title("Cambio Parte I → Parte II\nverde = confirmado, rojo = eliminado")
-    plt.colorbar(im_diff, ax=axes[1,0], shrink=0.8,
-                 ticks=[-1, 0, 1], label="-1=elim / 0=sin cambio / +1=añadido")
-    n_elim_map = int((diff == -1).sum())
-    axes[1,0].set_xlabel(f"{n_elim_map} píxeles eliminados por Parte II (falsas alarmas)")
+    axes[1,0].set_title("Candidatos Parte I → confirmados Parte II\nverde = confirmado, rojo = eliminado")
+    plt.colorbar(im_diff, ax=axes[1,0], shrink=0.8, ticks=[-1, 0, 1])
+    n_elim_map = len(candidates) - len(confirmed)
+    axes[1,0].set_xlabel(f"{n_elim_map} candidatos eliminados por Parte II (falsas alarmas)")
 
     # [1,1]: FRP de confirmados
     frps = [f.frp for f in confirmed if hasattr(f, "frp") and f.frp is not None and f.frp > 0]
@@ -351,33 +397,28 @@ def fig_fire_map(inp, fire_mask_p2, save_path):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    # ── Importar FDCA ─────────────────────────────────────────────────────────
-    sys.path.insert(0, str(Path(args.config).parent.parent))
     from fdca.part1 import run_part1
     from fdca.part2 import run_part2
-    from fdca.constants import FireMask
     from fdca.algorithm import _to_epoch
 
-    # ── Importar adaptador ────────────────────────────────────────────────────
-    sys.path.insert(0, str(Path(__file__).parent))
+    sys.path.insert(0, str(Path(__file__).parent)) # Import input adaptader
     from fdca.fdca_adapter import load_fdca_input
 
     print("=" * 60)
     print(f"FDCA  |  GOES-19  |  {REGION}  |  {TS}")
     print("=" * 60)
 
-    # ── Cargar inputs ─────────────────────────────────────────────────────────
-    inp = load_fdca_input(
+    inp = load_fdca_input(    # Load inputs
         timestamp=TS, region=REGION,
         dataset_root=args.dataset_root,
         config_path=args.config,
     )
 
-    print(f"\n[ Figura 0 ] Inputs de referencia ...")
+    print(f"\n[ Figure 0 ] Reference inputs...")
     fig_inputs(inp, FIG_DIR / "00_inputs.png")
 
-    # ── Parte I ───────────────────────────────────────────────────────────────
-    print(f"\n[ Parte I ] Corriendo filtros píxel a píxel ...")
+    # ── Part I ───────────────────────────────────────────────────────────────
+    print(f"\n[ Part I ] Running pixel to pixel filters ...")
     t0 = datetime.now()
     fire_mask_p1, fail_char_p1, candidates = run_part1(
         bt7=inp.bt7, rad7=inp.rad7,
@@ -394,13 +435,13 @@ def main():
         data_quality=inp.data_quality,
     )
     t1 = datetime.now()
-    print(f"  → {len(candidates)} candidatos  ({(t1-t0).total_seconds():.1f}s)")
+    print(f"  -> {len(candidates)} candidates  ({(t1-t0).total_seconds():.1f}s)")
 
-    print(f"\n[ Figura 1 ] Efecto de Parte I ...")
+    print(f"\n[ Figure 1 ] Part I effect ...")
     fig_part1(inp, fire_mask_p1, fail_char_p1, candidates, FIG_DIR / "01_part1_filters.png")
 
-    # ── Parte II ──────────────────────────────────────────────────────────────
-    print(f"\n[ Parte II ] Confirmación y clasificación ...")
+    # ── Part II ──────────────────────────────────────────────────────────────
+    print(f"\n[ Part II ] Confirmation and clasification ...")
     fire_mask_p2, fail_char_p2, confirmed = run_part2(
         candidates=candidates,
         fire_mask=fire_mask_p1.copy(),
@@ -409,17 +450,16 @@ def main():
         current_epoch=_to_epoch(inp.scan_time),
     )
     t2 = datetime.now()
-    print(f"  → {len(confirmed)} confirmados  ({(t2-t1).total_seconds():.1f}s)")
+    print(f"  -> {len(confirmed)} confirmed  ({(t2-t1).total_seconds():.1f}s)")
 
-    print(f"\n[ Figura 2 ] Efecto de Parte II ...")
+    print(f"\n[ Figure 2 ] Part II effect ...")
     fig_part2(inp, fire_mask_p1, fire_mask_p2, candidates, confirmed,
               FIG_DIR / "02_part2_confirm.png")
 
-    print(f"\n[ Figura 3 ] Mapa georeferenciado ...")
+    print(f"\n[ Figure 3 ] Map ...")
     fig_fire_map(inp, fire_mask_p2, FIG_DIR / "03_fire_map.png")
 
-    # ── Guardar outputs ────────────────────────────────────────────────────────
-    if args.save_outputs:
+    if args.save_outputs: #  Save outputs
         out_dir = Path("data") / TS
         out_dir.mkdir(parents=True, exist_ok=True)
         np.save(out_dir / "fire_mask.npy",  fire_mask_p2)
@@ -444,20 +484,20 @@ def main():
             json.dump(summary, f, indent=2)
         print(f"\n✓ Outputs guardados en {out_dir}/")
 
-    # ── Resumen ────────────────────────────────────────────────────────────────
+    # ── Summary ────────────────────────────────────────────────────────────────
     frps = [f.frp for f in confirmed if f.frp is not None and f.frp > 0]
     print(f"\n{'='*60}")
-    print(f"  Candidatos Parte I : {len(candidates)}")
-    print(f"  Confirmados Parte II: {len(confirmed)}")
-    print(f"  Alta prob (13/33)  : {((fire_mask_p2==13)|(fire_mask_p2==33)).sum()}")
-    print(f"  Media prob (14/34) : {((fire_mask_p2==14)|(fire_mask_p2==34)).sum()}")
-    print(f"  Baja prob  (15/35) : {((fire_mask_p2==15)|(fire_mask_p2==35)).sum()}")
-    print(f"  Con historial (+20): {(fire_mask_p2>=30).sum()}")
+    print(f"  Candidates Part I : {len(candidates)}")
+    print(f"  Confirmed Part II: {len(confirmed)}")
+    print(f"  High prob (13/33)  : {((fire_mask_p2==13)|(fire_mask_p2==33)).sum()}")
+    print(f"  Medium prob (14/34) : {((fire_mask_p2==14)|(fire_mask_p2==34)).sum()}")
+    print(f"  Low prob  (15/35) : {((fire_mask_p2==15)|(fire_mask_p2==35)).sum()}")
+    print(f"  With history (+20): {(fire_mask_p2>=30).sum()}")
     if frps:
-        print(f"  FRP mediana        : {np.median(frps):.1f} MW")
-        print(f"  FRP máximo         : {np.max(frps):.1f} MW")
-    print(f"  Tiempo total       : {(t2-t0).total_seconds():.1f}s")
-    print(f"  Figuras guardadas  : {FIG_DIR}/")
+        print(f"  FRP median        : {np.median(frps):.1f} MW")
+        print(f"  FRP maximum         : {np.max(frps):.1f} MW")
+    print(f"  Total time       : {(t2-t0).total_seconds():.1f}s")
+    print(f"  Saved figures  : {FIG_DIR}/")
     print(f"{'='*60}")
 
 

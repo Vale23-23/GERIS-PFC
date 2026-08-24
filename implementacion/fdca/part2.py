@@ -1,5 +1,5 @@
 """
-FDCA Part II – Loop over fire candidates
+FDCA Part II - Loop over fire candidates
 Implements ATBD sections 3.4.2.14 through 3.4.2.18
 """
 
@@ -16,57 +16,51 @@ def _std_reflb_part2(rad_diff_sigma: float) -> float:
     Std Dev (Reflb) Part II test:
     2.5 * sigma, floor at 2.5 (ATBD 3.4.2.14)
     """
-    return max(2.5, 2.5 * rad_diff_sigma)
+    return max(STD_REFLB_P2_FLOOR, STD_REFLB_P2_SCALE * rad_diff_sigma)
 
 def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
     """
     Threshold tests to eliminate false alarms (ATBD 3.4.2.14).
-    Si alguno de los tres tests OR da True, el candidato se descarta como fuego.
+    If one of the three OR tests is true, the fire candidate is discarded.
 
     Returns
     -------
-    (eliminated, reason) — reason ∈ {"cond1", "cond2", "cond3", ""}
+    (eliminated, reason) - reason in {"cond1", "cond2", "cond3", ""}
     """
-    bt7     = cand.bt7
-    bt7_bkg = cand.bt7_bkg
+    bt7     = cand.bt7_corr
+    bt7_bkg = cand.bt7_bkg_corr
     refl    = cand.refl_pixel
     reflb   = cand.reflb
     sza_cos = np.cos(np.radians(cand.sza))
     is_day  = cand.is_day
-    day_off = sza_cos * 20.0 if is_day else 0.0
+    day_off = sza_cos * P2_DAY_OFFSET_COEF if is_day else 0.0
 
-    # cálculo de std_reflb_p2 y refl_ok
+    # calculation of std_reflb_p2 and refl_ok
     std_reflb_p2 = _std_reflb_part2(cand.rad_diff_sigma)
     refl_ok = (refl - reflb < std_reflb_p2) or _refl_along_scan_part2(cand)
 
-    if (bt7 - bt7_bkg < 2.0) and refl_ok:
+    if (bt7 - bt7_bkg < DELTA_BT7_TB7_MIN) and refl_ok:
         return True, "cond1"
 
-    if (bt7 < 290.0 + day_off
-            and bt7 - bt7_bkg < 10.0
-            and bt7 - cand.bt14 < 25.0
-            and refl_ok):
+    if (bt7 < BT7_WARM_NIGHT + day_off and bt7 - bt7_bkg < DELTA_BT7_TB7_MAX and bt7 - cand.bt14_corr < DELTA_BT7_BT14_MAX and refl_ok):
         return True, "cond2"
 
-    if (bt7 < 290.0 + day_off
-            and bt7_bkg < 280.0 + day_off
-            and cand.n_passes >= BKG_MAX_ITER
-            and refl_ok):
+    if (bt7 < BT7_WARM_NIGHT + day_off and bt7_bkg < TB7_COLD_NIGHT + day_off and cand.n_passes >= BKG_MAX_ITER and refl_ok):
         return True, "cond3"
 
-    return False, "" # devuelve qué test disparó la eliminación 
+    return False, "" # returns the test that triggered the elimination  
 
 def _reassign_cloud_glint_edge(cand: FireCandidate, day_off: float) -> bool:
     """
-    Sun-glint / cloud-fog edge re-evaluation (ATBD 3.4.2.14, segunda mitad).
+    Sun-glint / cloud-fog edge re-evaluation (ATBD 3.4.2.14, second half).
 
-    Solo aplica a candidatos con flag F9 o F10 (glint / smoke-nube fina,
-    ver 3.4.2.8-3.4.2.9). Si el albedo indica borde de nube/glint Y la
-    BT7 corregida está por debajo del umbral, corresponde reasignar a F11.
+    It only applies to candidates with F9 or F10 flags (see 3.4.2.8-3.4.2.9). 
+    If albedo indicates cloud edge/glint and the corrected BT7 is under the threshold,
+    it is appropriate to reassign it to F11.
 
     Returns
     -------
-    bool — True si corresponde reasignar a F11 (el llamador hace la mutación)
+    bool - True if is appropriate to reassign it to F11 (the caller makes the mutation)
     """
     if cand.fail_char not in (FailChar.F9, FailChar.F10):
         return False
@@ -74,39 +68,37 @@ def _reassign_cloud_glint_edge(cand: FireCandidate, day_off: float) -> bool:
     alb  = cand.albedo     if not np.isnan(cand.albedo)     else 0.0
     albb = cand.albedo_bkg if not np.isnan(cand.albedo_bkg) else 0.0
 
-    cloud_test = (alb > 0.25 or alb - albb >= 0.10)
-    bt_test    = cand.bt7_corr < 292.5 + day_off
+    cloud_test = (alb > CLOUD_EDGE_ALBEDO_MIN or alb - albb >= CLOUD_EDGE_ALBEDO_DIFF_MIN)
+    bt_test    = cand.bt7_corr < CLOUD_EDGE_BT7_MAX_NIGHT + day_off
     return cloud_test and bt_test
 
 
 def _reassign_fog_edge(cand: FireCandidate, sza_cos: float) -> bool:
     """
-    Segundo test de reasignación a F11 (ATBD 3.4.2.15, distinto del de
-    3.4.2.14: acá la condición es sobre la diferencia BT3.9-BT11.2 del
-    background, no sobre albedo). Aplica a cualquier candidato con flag
-    >= F9 (incluye los ya reasignados a F11 en 3.4.2.14 — el test es
-    idempotente en ese caso).
+    Second test to F11 (ATBD 3.4.2.15, condition on BT3.9-BT11.2 of the background)
+    Applies to any candidate with flag >=F9.
+
     """
     if cand.fail_char < FailChar.F9:
         return False
 
     bkg_diff = cand.bt7_bkg - cand.bt14_bkg
-    fog_c1 = sza_cos * 20.0 + 5.0 - bkg_diff < 1.5
-    fog_c2 = cand.bt7_corr - cand.bt7_bkg <= 4.0
+    fog_c1 = sza_cos * P2_DAY_OFFSET_COEF + FOG_EDGE_DAY_OFFSET_ADD - bkg_diff < FOG_EDGE_DIFF_THRESH
+    fog_c2 = cand.bt7_corr - cand.bt7_bkg <= FOG_EDGE_BT7_DELTA_MAX
     return fog_c1 and fog_c2
 
 
 def _upgrade_confidence(cand: FireCandidate) -> tuple[Optional[int], int]:
     """
     High/medium confidence upgrade (ATBD 3.4.2.15).
-    Solo evalúa candidatos con flag en {F3, F4, F6, F8} y fire_temp < 0
-    (o sea, que Part I no encontró solución válida de Dozier).
+    It only evaluates candidates with flags in {F3, F4, F6, F8} and fire_temp < 0
+    (to whom part I did not find a valid Dozier solution).
 
     Returns
     -------
-    (fire_code, flag_delta) — fire_code es None si no corresponde evaluar
-    (el llamador debe usar el resultado de _assign_fire_category en ese caso).
-    flag_delta es 0, 20 o 30, para sumar a cand.fail_char.
+    (fire_code, flag_delta): fire_code is None if evaluation is not applicable
+    (caller must use _assign_fire_category result in this case).
+    flag_delta is 0, 20 or 30, to add to cand.fail_char.
     """
     if cand.fail_char not in (FailChar.F3, FailChar.F4, FailChar.F6, FailChar.F8):
         return None, 0
@@ -121,15 +113,13 @@ def _upgrade_confidence(cand: FireCandidate) -> tuple[Optional[int], int]:
     bt7c = cand.bt7_corr
     Tb7  = cand.bt7_bkg
     Tb14 = cand.bt14_bkg
-    refl_test = (cand.refl_pixel - cand.reflb >= cand.std_dev_reflb_max
-                 or _refl_along_scan_part2(cand))
+    refl_test = (cand.refl_pixel - cand.reflb >= cand.std_dev_reflb_max or _refl_along_scan_part2(cand))
 
     if bt7c - Tb7 > thr1_h and Tb7 - Tb14 > thr2_h and refl_test:
         return FireMask.HIGH_PROB, 30
     if bt7c - Tb7 > thr1_m and Tb7 - Tb14 > thr2_m and refl_test:
         return FireMask.MED_PROB, 20
     return FireMask.LOW_PROB, 0
-
 
 def _high_med_thresholds(
     cand: FireCandidate, confidence: str
@@ -142,49 +132,45 @@ def _high_med_thresholds(
       thresh2: Tb3.9 - Tb11.2 must exceed this
     """
     n_pass = cand.n_passes
-    bg_off = min(5.0, n_pass / 3.0)
+    bg_off = min(CONF_WINDOW_OFFSET_CAP, n_pass / CONF_WINDOW_OFFSET_DIVISOR)
 
-    base1 = 7.0 if confidence == "high" else 5.0
-    base2 = 7.0 if confidence == "high" else 5.0
-    add_c = 5.0 if confidence == "high" else 3.0
+    base  = CONF_BASE_THRESH_HIGH if confidence == "high" else CONF_BASE_THRESH_MEDIUM
+    add_c = CONF_ADD_HIGH         if confidence == "high" else CONF_ADD_MEDIUM
 
     # Threshold 1
     scaled1 = add_c + bg_off + 2.0 * cand.bt7_bkg_std
-    thresh1 = max(base1, scaled1)
+    thresh1 = max(base, scaled1)
 
     # Threshold 2
-    diff_std = cand.bkg.std_dev_7_14_diff if cand.bkg else 0.0
+    diff_std    = cand.bkg.std_dev_7_14_diff if cand.bkg else 0.0
     t7_t14_diff = cand.bt7_bkg - cand.bt14_bkg
     scaled2 = add_c + bg_off + t7_t14_diff + 2.0 * diff_std
-    thresh2 = max(base2, scaled2)
+    thresh2 = max(base, scaled2)
 
     return thresh1, thresh2
 
 
 def _assign_fire_category(cand: FireCandidate, fire_mask: np.ndarray) -> int:
     """
-    Determine final fire mask code (10-15) for a validated candidate.
-    ATBD 3.4.2.15
+    Determine base fire mask code (10-12, or default 15) for a validated
+    candidate, before the high/medium confidence upgrade (_upgrade_confidence)
+    is applied by the caller. ATBD 3.4.2.15.
     """
-    fc = cand.fail_char
     Tt = cand.fire_temp
 
-    # Processed fire: Tt > 400 K and solution is valid
+    # Processed fire: Tt > 400 K, valid Dozier solution
     if Tt is not None and not np.isnan(Tt) and Tt > MIN_FIRE_TEMP:
         return FireMask.PROCESSED
 
-    # Saturated fire: fire_temp was initialised to 0 (no solution attempted)
+    # Saturated fire: fire_temp == 0 
     if cand.is_saturated and (Tt == 0 or Tt is None or np.isnan(Tt)):
         return FireMask.SATURATED
 
-    # Cloudy / smoke fire
-    if fc in (FailChar.F9, FailChar.F10):
+    # Cloudy / smoke fire (flag F9 or F10)
+    if cand.fail_char in (FailChar.F9, FailChar.F10):
         return FireMask.CLOUD_CONTAM
 
-    # Possible fire categories (Tt < 0 used as flag)
-    if Tt is not None and not np.isnan(Tt) and Tt < 0:
-        return FireMask.LOW_PROB   # default, refined below
-
+    # Default: low probability (flag == F11, or < F9, with Tt < 0)
     return FireMask.LOW_PROB
 
 
@@ -208,14 +194,13 @@ def run_part2(
     fire_mask       : initialized by Part I (will be updated in-place)
     fail_char_arr   : initialized by Part I (will be updated in-place)
     prev_fire_mask  : full-disk array of seconds-since-2001 of last fire at each pixel
-                      (None if not available → temporal filtering disabled)
+                      (None if not available -> temporal filtering disabled)
     current_epoch   : seconds since 2001-01-01 00:00:00 of current scan
 
     Returns
     -------
     fire_mask, fail_char_arr (updated), confirmed_fires list
     """
-    TEMPORAL_SECS = TEMPORAL_WINDOW_H * 3600.0
     confirmed: List[FireCandidate] = []
 
     for cand in candidates:
@@ -223,26 +208,26 @@ def run_part2(
         sza_cos = np.cos(np.radians(cand.sza))
         is_day  = cand.is_day
 
-        # ── 3.4.2.14 (primera mitad): eliminación de falsas alarmas ─────────
+        # ── 3.4.2.14 (first half): elimination of false alarms ─────────
         eliminated, _reason_314 = _eliminate_false_alarm(cand)
         if eliminated:
             continue
-        day_off = sza_cos * 20.0 if is_day else 0.0
+        day_off = sza_cos * P2_DAY_OFFSET_COEF if is_day else 0.0
 
-        # ── 3.4.2.14 (segunda mitad): re-evaluación glint/borde-de-nube ─────
+        # ── 3.4.2.14 (second half): re-evaluation of glint/cloud edge ─────
         fc = cand.fail_char
         if _reassign_cloud_glint_edge(cand, day_off):
             cand.fail_char = FailChar.F11
             fail_char_arr[i, j] = FailChar.F11
             fc = FailChar.F11
 
-        # ── 3.4.2.15: segundo test de borde-de-nube/niebla ───────────────────
+        # ── 3.4.2.15: second test of cloud edge/fog ───────────────────
         if _reassign_fog_edge(cand, sza_cos):
             cand.fail_char = FailChar.F11
             fail_char_arr[i, j] = FailChar.F11
             fc = FailChar.F11
 
-        # ── 3.4.2.15: categorización + upgrade de confianza ──────────────────
+        # ── 3.4.2.15: categorization + confidence upgrade ─────────────────
         fire_code = _assign_fire_category(cand, fire_mask)
 
         upgraded_code, flag_delta = _upgrade_confidence(cand)
@@ -252,15 +237,18 @@ def run_part2(
 
         # No FRP for passes > 10
         if cand.n_passes > BKG_MAX_ITER:
-            cand.frp = -99.0
+            cand.frp = FRP_NPASSES_EXCEEDED
 
-        # Finalize fire_temp / fire_area for non-processed categories
+        # ── Finalize fire_area for non-processed categories (Table 3.10) ──
+        # fire_temp is intentionally NOT touched here: Part I (3.4.2.11)
+        # already assigned its final value (-abs(Tt) for smoldering fires in
+        # (350K, 400K], or -999.0 otherwise). Table 3.10's "-999 if < 400K"
+        # is treated as a summary of that prior step, not a second override
+
         Tt = cand.fire_temp
         if fire_code != FireMask.PROCESSED:
             if Tt is not None and not np.isnan(Tt) and Tt < MIN_FIRE_TEMP:
-                cand.fire_area = -999.0
-                if fire_code != FireMask.SATURATED:
-                    cand.fire_temp = -999.0 if Tt <= MAX_SURF_TEMP else -abs(Tt)
+                cand.fire_area = LOW_FIRE_SIZE
 
         # ── Temporal filtering (ATBD 3.4.2.16) ───────────────────────────────
         temporally_filtered = False
@@ -271,7 +259,7 @@ def run_part2(
                     ni, nj = i + di, j + dj
                     if 0 <= ni < L and 0 <= nj < W:
                         last_t = prev_fire_mask[ni, nj]
-                        if last_t > 0 and (current_epoch - last_t) <= TEMPORAL_WINDOW_H * 3600.0:
+                        if last_t > 0 and (current_epoch - last_t) <= TEMPORAL_WINDOW_S:
                             temporally_filtered = True
                             break
                 if temporally_filtered:
@@ -279,9 +267,9 @@ def run_part2(
 
         # Apply temporal offset (+20) if filtered
         if temporally_filtered:
-            fire_code += 20   # 10→30, 11→31, ... 15→35
+            fire_code += TEMPORAL_FILTER_CODE_OFFSET   # 10->30, 11->31, ... 15->35
 
-        # ── Write final mask code (3.4.2.17/18: salida) ──────────────────────
+        # ── Write final mask code (3.4.2.17/18: output) ──────────────────────
         fire_mask[i, j] = fire_code
         confirmed.append(cand)
 
