@@ -27,8 +27,8 @@ def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
     -------
     (eliminated, reason) - reason in {"cond1", "cond2", "cond3", ""}
     """
-    bt7     = cand.bt7
-    bt7_bkg = cand.bt7_bkg
+    bt7     = cand.bt7_corr
+    bt7_bkg = cand.bt7_bkg_corr
     refl    = cand.refl_pixel
     reflb   = cand.reflb
     sza_cos = np.cos(np.radians(cand.sza))
@@ -42,7 +42,7 @@ def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
     if (bt7 - bt7_bkg < DELTA_BT7_TB7_MIN) and refl_ok:
         return True, "cond1"
 
-    if (bt7 < BT7_WARM_NIGHT + day_off and bt7 - bt7_bkg < DELTA_BT7_TB7_MAX and bt7 - cand.bt14 < DELTA_BT7_BT14_MAX and refl_ok):
+    if (bt7 < BT7_WARM_NIGHT + day_off and bt7 - bt7_bkg < DELTA_BT7_TB7_MAX and bt7 - cand.bt14_corr < DELTA_BT7_BT14_MAX and refl_ok):
         return True, "cond2"
 
     if (bt7 < BT7_WARM_NIGHT + day_off and bt7_bkg < TB7_COLD_NIGHT + day_off and cand.n_passes >= BKG_MAX_ITER and refl_ok):
