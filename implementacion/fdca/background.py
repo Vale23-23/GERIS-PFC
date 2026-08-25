@@ -93,38 +93,42 @@ def _valid_background_mask(
     i_min = i0 - half;  i_max = i0 + half
     j_min = j0 - half;  j_max = j0 + half
 
-    # Window size includes out-of-bounds (per ATBD)
+    # Window size includes out-of-bounds (per ATBD).
     window_size = (2 * half + 1) ** 2
 
-    # Clipped indices for actual data access
+    # Clip only the data access.  The returned mask is local to the clipped
+    # window: allocating a full-image mask for every pixel was the dominant
+    # cost of Part I and was unnecessary because the caller immediately sliced
+    # it back to these bounds.
     i_lo = max(0, i_min);  i_hi = min(L - 1, i_max)
     j_lo = max(0, j_min);  j_hi = min(W - 1, j_max)
+    sl = np.s_[i_lo:i_hi + 1, j_lo:j_hi + 1]
 
-    valid_mask = np.zeros((L, W), dtype=bool)
+    bt7_win = bt7[sl]
+    bt14_win = bt14[sl]
+    day_win = is_day[sl]
 
-    for ii in range(i_lo, i_hi + 1):
-        for jj in range(j_lo, j_hi + 1):
-            if not land_mask[ii, jj]:
-                continue
-            warm = _is_warm(bt7[ii, jj], sza_cos[ii, jj], is_day[ii, jj])
-            cold = (bt7[ii, jj] < BKG_COLD_THRESH) or (bt14[ii, jj] < BKG_COLD_THRESH)
-            if warm or cold:
-                continue
- 
-            # Reflective-pixel (cloud) screening via Channel 2 (ATBD 3.4.2.5).
-            # Channel 2 / Albedo only exist for sunlit pixels; at night (or when
-            # Channel 2 is unavailable) this sub-test simply does not apply, and
-            # the pixel is not disqualified because of it.
-            reflective = False
-            if is_day[ii, jj] and vis is not None and albedo is not None:
-                vis_val = vis[ii, jj]
-                alb_val = albedo[ii, jj]
-                if not np.isnan(vis_val) and not np.isnan(alb_val):
-                    reflective = (vis_val < BKG_MIN_VIS) or (alb_val > BKG_MAX_ALBEDO)
- 
-            if not reflective:
-                valid_mask[ii, jj] = True
- 
+    # Vectorized equivalents of the scalar screening rules above.
+    warm_threshold = np.where(
+        day_win,
+        BKG_WARM_BT7_NIGHT + BKG_WARM_SOLAR_COEF * sza_cos[sl],
+        BKG_WARM_BT7_NIGHT,
+    )
+    warm = bt7_win > warm_threshold
+    cold = (bt7_win < BKG_COLD_THRESH) | (bt14_win < BKG_COLD_THRESH)
+    valid_mask = land_mask[sl] & ~warm & ~cold
+
+    # Channel 2/albedo screening applies only when both arrays are available,
+    # and only for finite values, matching the previous scalar implementation.
+    if day_win is not None and vis is not None and albedo is not None:
+        vis_win = vis[sl]
+        alb_win = albedo[sl]
+        finite_visible = ~np.isnan(vis_win) & ~np.isnan(alb_win)
+        reflective = day_win & finite_visible & (
+            (vis_win < BKG_MIN_VIS) | (alb_win > BKG_MAX_ALBEDO)
+        )
+        valid_mask &= ~reflective
+
     return valid_mask, window_size
 
 
@@ -200,7 +204,7 @@ def compute_background(
         i_lo = max(0, i0 - half);  i_hi = min(L - 1, i0 + half)
         j_lo = max(0, j0 - half);  j_hi = min(W - 1, j0 + half)
 
-        n_valid = int(valid_mask[i_lo:i_hi+1, j_lo:j_hi+1].sum())
+        n_valid = int(valid_mask.sum())
 
         if trace is not None:
             trace.append({
@@ -213,7 +217,7 @@ def compute_background(
             })
         if n_valid >= BKG_VALID_FRAC * window_size:
             # ── Extract valid pixel values ──────────────────────────────────
-            vm = valid_mask[i_lo:i_hi+1, j_lo:j_hi+1]
+            vm = valid_mask
             bt7_win  = bt7 [i_lo:i_hi+1, j_lo:j_hi+1]
             bt14_win = bt14[i_lo:i_hi+1, j_lo:j_hi+1]
             refl_win = refl[i_lo:i_hi+1, j_lo:j_hi+1]
