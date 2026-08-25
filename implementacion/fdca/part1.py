@@ -155,9 +155,14 @@ def _along_scan_reflectivity_test(
 
     r_m2 = _neighbor(j - 2)
     r_p2 = _neighbor(j + 2)
-    if abs(r_m2) < std_reflb and abs(r_p2) < std_reflb:
-        if bt7_ij < bt7_refl_thr:
-            return False
+
+    refl_diff_m2 = abs(refl[i, j] - r_m2)
+    refl_diff_p2 = abs(refl[i, j] - r_p2)
+
+    if refl_diff_m2 < std_reflb and refl_diff_p2 < std_reflb:
+        if abs(r_m2) < std_reflb and abs(r_p2) < std_reflb:
+            if bt7_ij < bt7_refl_thr:
+                return False
     return True
 
 
@@ -676,7 +681,7 @@ def run_part1(
                     if MAX_SURF_TEMP < Tt <= MIN_FIRE_TEMP:
                         doz.fire_temp = -abs(Tt)
                     else:
-                        doz.fire_temp = -999.0
+                        doz.fire_temp = LOW_FIRE_SIZE
                     doz.valid = True   # "last-chance" fire
                 else:
                     continue  # Not a fire
@@ -691,11 +696,18 @@ def run_part1(
 
             # ── FRP (ATBD 3.4.2.12) ────────────────────────────────────────────
             fc_now = int(fail_char_arr[i, j])
+            EXCLUDED_FRP_FLAGS = (
+                FailChar.F7,   # Saturated
+                FailChar.F9,   # Glint
+                FailChar.F10,  # Cloud / smoke
+            )
+            
             # No FRP for saturated (11), cloud (12), low prob (15) or max passes
-            if fc_now not in (FailChar.F7,) and n_pass <= BKG_MAX_ITER:
+            # since we cannot know for sure if the fire is low prob or not, we set it as -9 and then correct it in Part II if needed.
+            if fc_now not in EXCLUDED_FRP_FLAGS and n_pass <= BKG_MAX_ITER:
                 frp_val = compute_frp(pix_area, float(r7_diff), float(r7_bkg_corr))
             else:
-                frp_val = -9.0
+                frp_val = FRP_NOT_CALCULATED
 
             # ── Record candidate (ATBD 3.4.2.13) ──────────────────────────────
             fire_id_ctr += 1
