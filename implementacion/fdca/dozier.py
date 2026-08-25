@@ -233,7 +233,7 @@ def compute_dozier(
         rad7_bkg, rad14_bkg,
         Tb,
         coeffs7, coeffs14,
-    )
+    ) 
 
     if Tt <= 0 or not converged:
         # Solution failed → flag for last-chance test
@@ -257,6 +257,7 @@ def compute_dozier(
     if is_potential_glint:
         result.fail_char = FailChar.F9  # overridden to F9 → becomes 9 in Part II
         # Actually if Tt > 400 and was glint→ set to 9 cleared to no-glint processed
+    else:
         result.fail_char = FailChar.NONE
 
     result.fire_temp = Tt
