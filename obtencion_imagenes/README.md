@@ -83,26 +83,34 @@ python pipeline.py download \
   --region uruguay \
   --start "2025-09-01 00:00" \
   --end "2025-09-02 23:00" \
-  --products ABI-L1b-Rad-B07 ABI-L2-FDCF
+  --products ABI-L1b-Rad-B07 ABI-L2-FDCF-Mask
   --interval 10
+  -- workers 2
 ```
+This downloads Band 7 and the fire mask for Uruguay every ten minutes, between September 1 and 2, 2025, using 2 workers.
 
-This downloads Band 7 and the fire mask for Uruguay every ten minutes, between September 1 and 2, 2025.
+**Note:** this command also resolves the CAMEL V3 emissivity climatology needed by the
+algorithm — one file per calendar month covered by `--start`/`--end`. You no longer need
+a separate step for this; it happens automatically as part of `download`.
 
 Start of operational data: April 7, 2025
 
 While downloading, you'll see something like this:
 
-```
+\`\`\`
 🚀 Downloading 48 files with 4 workers...
 
   💾 20250901_0000  ABI-L1b-Rad-B07    downloaded
-  💾 20250901_0000  ABI-L2-FDCF        downloaded
+  💾 20250901_0000  ABI-L2-FDCF-Mask        downloaded
   ✅ 20250901_0100  ABI-L1b-Rad-B07    exists
   ...
 
 ✔ Downloaded: 40  |  Already existed: 8  |  Errors: 0
-```
+📋 Manifest updated at: dataset/uruguay/manifest.json
+
+   CAMEL V3 emissivity ready for month 09: CAM5K30EMCLIM_emis_climatology_09Month_V003.nc
+\`\`\`
+
 
 - 💾 = downloaded now
 - ✅ = already existed, not downloaded again
@@ -205,14 +213,12 @@ Files are saved in a `dataset/` folder inside `obtencion_imagenes/`, organized a
 dataset/
 └── uruguay/
     ├── ABI-L1b-Rad-B07/
-    │   ├── 20250901_0000.npy
-    │   ├── 20250901_0100.npy
-    │   └── ...
-    ├── ABI-L1b-Rad-B14/
     │   └── ...
     ├── ABI-L2-FDCF/
     │   └── ...
-    └── manifest.json   ← log of everything downloaded
+    ├── camel_emissivity/
+    │   └── CAM5K30EMCLIM_emis_climatology_09Month_V003.nc
+    └── manifest.json ← log of everything downloaded
 ```
 
 Each `.npy` file is an image cropped to the chosen region, saved as a numeric matrix.

@@ -88,8 +88,24 @@ def cmd_download(args, cfg):
     domain       = cfg["domain"]
     max_workers  = args.workers or cfg["max_workers"]
 
+    # ── CAMEL V3 emissivity climatology (one file per calendar month covered) ──
+    # Unified here so a single `download` command resolves both raw bands and
+    # the emissivity input that fdca_adapter.load_fdca_input() expects to find
+    # already on disk under camel_emissivity_dir.
+    months_needed = sorted({ts.month for ts in timestamps})
+    camel_dir = region.get(
+        "camel_emissivity_dir",
+        os.path.join(output_root, "camel_emissivity"),
+    )
+    for month in months_needed:
+        try:
+            path = downloader.download_camel_climatology(month, camel_dir)
+            print(f"  CAMEL V3 emissivity ready for month {month:02d}: {os.path.basename(path)}")
+        except Exception as e:
+            print(f" ❌ Could not download CAMEL V3 climatology for month {month:02d}: {e}")
+
     tasks = [(ts, prod) for ts in timestamps for prod in products]
-    print(f"🚀 Downloading {len(tasks)} files with {max_workers} workers...\n")
+    print(f" Downloading {len(tasks)} files with {max_workers} workers...\n")
 
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
