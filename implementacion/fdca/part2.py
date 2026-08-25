@@ -28,7 +28,7 @@ def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
     (eliminated, reason) - reason in {"cond1", "cond2", "cond3", ""}
     """
     bt7     = cand.bt7_corr
-    bt7_bkg = cand.bt7_bkg_corr
+    bt7_bkg = cand.bt_bkg_corr
     refl    = cand.refl_pixel
     reflb   = cand.reflb
     sza_cos = np.cos(np.radians(cand.sza))
