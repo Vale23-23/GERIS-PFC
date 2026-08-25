@@ -191,13 +191,13 @@ def _tpw_lut_indices(tpw_mm: float, lza_deg: float) -> tuple[int, int]:
     return col
 
 
-def _apply_tpw_correction(rad: float, ext: float, trans: float) -> float:
+def _apply_tpw_correction(rad: float, offset: float, trans: float) -> float:
+    """Apply the TPW LUT correction used by the current FDCA implementation.
+
+    The supplied LUT stores ``offset`` as the multiplicative absorption
+    coefficient used with the radiance in this implementation.
     """
-    radcorr = (rad - ext * rad) / trans
-    ATBD: radcorr = (rad - ext * rad_offset) / trans
-    ext is the absorption offset (in radiance units), not a fraction.
-    """
-    return (rad - ext * rad) / trans
+    return (rad - offset * rad) / trans
 
 # ── Solar reflectivity correction ────────────────────────────────────────────
 def _solar_correction(
@@ -538,16 +538,16 @@ def run_part1(
             col = _tpw_lut_indices(float(tpw[i, j]), float(lza[i, j]))
             trans7  = float(lut_tpw[2, col])
             trans14 = float(lut_tpw[3, col])
-            ext7    = float(lut_tpw[4, col])
-            ext14   = float(lut_tpw[5, col])
+            offset7 = float(lut_tpw[4, col])
+            offset14 = float(lut_tpw[5, col])
 
             r7  = float(rad7     [i, j])
             r14 = float(rad14_eff[i, j])
 
             # TPW correction
             try:
-                r7_corr  = (r7  - ext7  * r7 ) / trans7
-                r14_corr = (r14 - ext14 * r14) / trans14
+                r7_corr  = _apply_tpw_correction(r7,  offset7,  trans7)
+                r14_corr = _apply_tpw_correction(r14, offset14, trans14)
             except ZeroDivisionError:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
@@ -580,8 +580,8 @@ def run_part1(
             # Background radiances (must be converted from BT → rad BEFORE TPW correction)
             r7_bkg_raw  = planck_rad_from_coeffs(bkg.temp7_bkg_mean,  **coeffs7)
             r14_bkg_raw = planck_rad_from_coeffs(bkg.temp14_bkg_mean, **coeffs14)
-            r7_bkg_corr  = (r7_bkg_raw  - ext7  * r7_bkg_raw ) / trans7
-            r14_bkg_corr = (r14_bkg_raw - ext14 * r14_bkg_raw) / trans14
+            r7_bkg_corr  = _apply_tpw_correction(r7_bkg_raw,  offset7,  trans7)
+            r14_bkg_corr = _apply_tpw_correction(r14_bkg_raw, offset14, trans14)
 
             if r7_bkg_corr <= 0 or r14_bkg_corr <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
