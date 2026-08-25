@@ -81,6 +81,11 @@ class FDCAInput:
     # ── Optional data quality flags ──────────────────────────────────────────
     data_quality: Optional[np.ndarray] = None
 
+    # ── Static Part I ecosystem/status mask ──────────────────────────────────
+    # Stored as int8 on disk; Part I reinterprets it as uint8 to recover codes
+    # above 127 (150/153, etc.).
+    eco_mask: Optional[np.ndarray] = None
+
 
 # ── Output container ──────────────────────────────────────────────────────────
 @dataclass
@@ -151,8 +156,9 @@ def run_fdca(inp: FDCAInput) -> FDCAOutput:
         tpw=inp.tpw, emiss7=inp.emiss7, emiss14=inp.emiss14,
         lut_tpw=inp.lut_tpw, FPT=inp.FPT,
         coeffs7=inp.coeffs7, coeffs14=inp.coeffs14, coeffs13=inp.coeffs13,
-        land_cover=inp.land_cover, land_mask=inp.land_mask,
-        desert_mask=inp.desert_mask, usgs_eco=inp.usgs_eco,
+        land_mask=inp.land_mask,
+        eco_mask=(inp.eco_mask if inp.eco_mask is not None
+                  else np.zeros_like(inp.land_mask, dtype=np.uint8)),
         data_quality=inp.data_quality,
     )
 
