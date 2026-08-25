@@ -9,10 +9,10 @@ obtencion_imagenes/dataset/
 *.npz
 *.nc
 
-!implementacion/mask_example.npy
 !implementacion/fdca/data/eco_mask.npy
 
 implementacion/data/
+implementacion/results/
 
 # Entorno virtual
 .venv/

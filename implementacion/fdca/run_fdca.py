@@ -41,6 +41,8 @@ parser.add_argument("--dataset-root", default="dataset",
     help="Dataset root folder (default: dataset)")
 parser.add_argument("--config", default="config.yaml",
     help="Path to config.yaml (default: config.yaml)")
+parser.add_argument("--download", action="store_true",
+    help="Download the requested scene from Hugging Face when it is missing")
 parser.add_argument("--save-outputs", action="store_true",
     help="Save fire_mask.npy, fail_char.npy, and summary.json")
 parser.add_argument("--output-dir", default="figures",
@@ -402,7 +404,15 @@ def main():
     from fdca.algorithm import _to_epoch
 
     sys.path.insert(0, str(Path(__file__).parent)) # Import input adaptader
+    from fdca.dataset import ensure_timestamp_data
     from fdca.fdca_adapter import load_fdca_input
+
+    ensure_timestamp_data(
+        timestamp=TS,
+        region=REGION,
+        dataset_root=args.dataset_root,
+        download=args.download,
+    )
 
     print("=" * 60)
     print(f"FDCA  |  GOES-19  |  {REGION}  |  {TS}")
