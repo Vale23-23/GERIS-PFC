@@ -409,7 +409,30 @@ def resample_b02_to_grid(rad: np.ndarray, target_shape: tuple[int, int],
     return np.nanmean(blocks, axis=(1, 3)).astype(np.float32)
 
 
-# ── Máscaras de superficie ────────────────────────────────────────────────────
+# ── Static ecosystem/status mask ─────────────────────────────────────────────
+# Packaged data for the fixed 224×303 Uruguay grid.  It contains only the
+# Part I codes 150–153; all other pixels are stored as zero.
+STATIC_ECO_MASK_PATH = Path(__file__).resolve().parent / "data" / "eco_mask.npy"
+
+
+def load_static_eco_mask(shape: tuple[int, int], path: Path = STATIC_ECO_MASK_PATH) -> np.ndarray:
+    """Load and validate the static Part I mask for the fixed scene grid."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No se encontró la máscara estática: {path}")
+
+    mask = np.load(path, allow_pickle=False)
+    if mask.shape != shape:
+        raise ValueError(
+            f"La máscara estática tiene shape {mask.shape}; se esperaba {shape}: {path}"
+        )
+    if not np.issubdtype(mask.dtype, np.integer):
+        raise TypeError(f"La máscara estática debe ser entera, no {mask.dtype}: {path}")
+
+    # Recover 150–153 (and all other codes >127) from the int8 file bytes.
+    return mask.astype(np.uint8, copy=False)
+
+
 
 def build_surface_masks(lat: np.ndarray, lon: np.ndarray,
                          region_name: str = "uruguay") -> dict:
@@ -452,52 +475,59 @@ def build_surface_masks(lat: np.ndarray, lon: np.ndarray,
 
 # ── LUT de corrección TPW ─────────────────────────────────────────────────────
 
-def build_tpw_lut() -> np.ndarray:
+TPW_LUT_PATH = Path(__file__).resolve().parent / "data" / "tpw_lut.csv"
+
+
+def build_tpw_lut(path: Path = TPW_LUT_PATH) -> np.ndarray:
+    """Load the FDCA TPW correction LUT as a 6 × 35 array.
+
+    The CSV stores one record for each combination of TPW bin (1–5) and
+    satellite zenith-angle bin (1–7).  The returned layout is kept compatible
+    with ``part1.py``:
+
+    * row 0: TPW bin label
+    * row 1: zenith-angle bin label
+    * row 2: 4 µm transmittance
+    * row 3: 11 µm transmittance
+    * row 4: 4 µm offset/coefficient
+    * row 5: 11 µm offset/coefficient
+
+    Offsets are consumed by the existing ATBD implementation as the
+    multiplicative correction coefficients in ``part1.py``.
     """
-    LUT de corrección de vapor de agua precipitable (6 × 35).
-    5 bins TPW × 7 bins ángulo zenith local.
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No se encontró la LUT TPW: {path}")
 
-    Filas:
-      0: etiqueta bin TPW   (1–5)
-      1: etiqueta bin ángulo (1–7)
-      2: transmisión canal 7 (3.9 µm)
-      3: transmisión canal 14 (11.2 µm)
-      4: coeficiente absorción canal 7
-      5: coeficiente absorción canal 14
+    table = np.genfromtxt(path, delimiter=",", names=True, dtype=np.float64)
+    expected_columns = (
+        "TPW_bin_dm", "zenith_bin_x10deg", "trans_4um", "trans_11um",
+        "offset_4um", "offset_11um",
+    )
+    if table.dtype.names != expected_columns:
+        raise ValueError(
+            f"Columnas inesperadas en la LUT TPW: {table.dtype.names}; "
+            f"se esperaban {expected_columns}"
+        )
 
-    Valores basados en el ATBD de FDCA (valores representativos).
-    Para producción real: usar el producto ABI-L2-TPWF para obtener TPW
-    y consultar la tabla exacta del ATBD.
-    """
-    lut = np.zeros((6, 35))
+    rows = np.column_stack([table[name] for name in expected_columns])
+    if rows.shape != (35, 6):
+        raise ValueError(f"La LUT TPW debe tener 35 filas y 6 columnas, no {rows.shape}")
 
-    # Transmisión por bin: [TPW_bin 1..5] × [ang_bin 1..7]
-    trans7 = np.array([
-        [0.985, 0.983, 0.979, 0.973, 0.964, 0.950, 0.930],
-        [0.972, 0.969, 0.963, 0.954, 0.941, 0.923, 0.898],
-        [0.960, 0.956, 0.948, 0.937, 0.921, 0.899, 0.869],
-        [0.949, 0.944, 0.935, 0.921, 0.903, 0.879, 0.845],
-        [0.938, 0.932, 0.922, 0.907, 0.887, 0.861, 0.824],
-    ])
-    trans14 = np.array([
-        [0.978, 0.975, 0.969, 0.960, 0.948, 0.931, 0.908],
-        [0.957, 0.953, 0.946, 0.935, 0.920, 0.900, 0.874],
-        [0.937, 0.933, 0.924, 0.911, 0.895, 0.873, 0.845],
-        [0.918, 0.913, 0.903, 0.889, 0.872, 0.849, 0.819],
-        [0.900, 0.895, 0.884, 0.869, 0.850, 0.826, 0.794],
-    ])
-    ext7  = trans7  * 0.005
-    ext14 = trans14 * 0.008
+    expected_bins = np.array(
+        [(tpw_bin, zenith_bin) for tpw_bin in range(1, 6) for zenith_bin in range(1, 8)],
+        dtype=np.float64,
+    )
+    if not np.array_equal(rows[:, :2], expected_bins):
+        raise ValueError("Los bins de la LUT TPW no están ordenados de 1..5 × 1..7")
 
-    for tpw_bin in range(5):
-        for ang_bin in range(7):
-            col = tpw_bin * 7 + ang_bin
-            lut[0, col] = tpw_bin + 1
-            lut[1, col] = ang_bin + 1
-            lut[2, col] = trans7 [tpw_bin, ang_bin]
-            lut[3, col] = trans14[tpw_bin, ang_bin]
-            lut[4, col] = ext7   [tpw_bin, ang_bin]
-            lut[5, col] = ext14  [tpw_bin, ang_bin]
+    lut = np.zeros((6, 35), dtype=np.float64)
+    lut[0] = rows[:, 0]
+    lut[1] = rows[:, 1]
+    lut[2] = rows[:, 2]
+    lut[3] = rows[:, 3]
+    lut[4] = rows[:, 4]
+    lut[5] = rows[:, 5]
     return lut
 
 
@@ -852,6 +882,7 @@ def load_fdca_input(
     # ── FPT: Focal Plane Temperature de ABI (ATBD 3.4.2.2) ───────────────────
     FPT = load_fpt_flag(base, timestamp)
     data_quality = load_data_quality(base, timestamp)
+    eco_mask = load_static_eco_mask(shape)
 
     # ── Armar FDCAInput ───────────────────────────────────────────────────────
     inp = FDCAInput(
@@ -874,6 +905,7 @@ def load_fdca_input(
         scan_time=dt,
         prev_fire_mask=None,
         data_quality=data_quality,
+        eco_mask=eco_mask,
     )
 
     if verbose:
