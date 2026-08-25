@@ -10,6 +10,7 @@ obtencion_imagenes/dataset/
 *.nc
 
 !implementacion/mask_example.npy
+!implementacion/fdca/data/eco_mask.npy
 
 implementacion/data/
 
