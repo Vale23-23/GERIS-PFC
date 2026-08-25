@@ -430,8 +430,9 @@ def main():
         lza=inp.lza, azimuth=inp.azimuth,
         tpw=inp.tpw, emiss7=inp.emiss7, emiss14=inp.emiss14,
         lut_tpw=inp.lut_tpw, FPT=inp.FPT,
-        land_cover=inp.land_cover, land_mask=inp.land_mask,
-        desert_mask=inp.desert_mask, usgs_eco=inp.usgs_eco,
+        coeffs7=inp.coeffs7, coeffs14=inp.coeffs14, coeffs13=inp.coeffs13,
+        land_mask=inp.land_mask,
+        eco_mask=inp.eco_mask,
         data_quality=inp.data_quality,
     )
     t1 = datetime.now()
