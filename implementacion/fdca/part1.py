@@ -212,6 +212,7 @@ def _solar_correction(
     emiss7:             float,
     coeffs7:  dict,
     coeffs14: dict,
+    pixel_sza: float,
 ) -> float:
 
     """
@@ -225,12 +226,17 @@ def _solar_correction(
     # Convert to Ch7 radiance space (coefs reales Ch7, con T_bkg14)
     rad7from14_bkg = planck_rad_from_coeffs(T_bkg14, **coeffs7)
 
-    # Solar component
-    rad7_bkg_corr_emiss = rad7_bkg_corr / emiss7
-    rad_solar = rad7_bkg_corr_emiss - emiss7 * rad7from14_bkg
+    if 0 <= pixel_sza <= 85: #only during the daytime (SZA < 85°) we apply the solar correction, otherwise we skip it
+        # Solar component
+        rad7_bkg_corr_emiss = rad7_bkg_corr / emiss7
+        rad_solar = rad7_bkg_corr_emiss - emiss7 * rad7from14_bkg
 
-    # Apply solar correction
-    rad7_solar_corr = (rad7_corr_emiss - rad_solar) / emiss7
+        # Apply solar correction
+        rad7_solar_corr = (rad7_corr_emiss - rad_solar) / emiss7
+    else:
+    
+        rad7_solar_corr = rad7_corr_emiss
+
     return rad7_solar_corr, rad7from14_bkg
 
 def calculate_albedo(L: int, W: int, sza: np.ndarray, refl2: Optional[np.ndarray] = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -595,7 +601,7 @@ def run_part1(
             try:
                 r7_solar_corr, rad7from14_bkg = _solar_correction(
                     r7_corr_em, r7_bkg_corr, r14_bkg_corr, em7,
-                    coeffs7, coeffs14,
+                    coeffs7, coeffs14, sza[i, j]
                 )
             except Exception:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
@@ -605,33 +611,40 @@ def run_part1(
 
             # Diffraction correction
             r7_diff  = (r7_solar_corr - DIFFRAC_CH7_SUB  * rad7from14_bkg) / DIFFRAC_CH7_DIV
-            r14_diff = (r14_corr      - DIFFRAC_CH14_SUB * r14_bkg_corr)   / DIFFRAC_CH14_DIV
+            r14_diff = (r14_corr_em     - DIFFRAC_CH14_SUB * r14_bkg_corr)   / DIFFRAC_CH14_DIV
 
             if r7_diff <= 0 or r14_diff <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
             T7c  = float(planck_temp_from_coeffs(r7_diff,     **coeffs7))
             T14c = float(planck_temp_from_coeffs(r14_diff,    **coeffs14))
-            Tbc  = float(planck_temp_from_coeffs(r7_bkg_corr, **coeffs7))   # corrected background
 
-            if T7c <= 0 or T14c <= 0 or Tbc <= 0:
+
+            Tbc7  = float(planck_temp_from_coeffs(r7_bkg_corr, **coeffs7))   # corrected background
+            Tbc14  = float(planck_temp_from_coeffs(r14_bkg_corr, **coeffs14))   # corrected background
+
+            if T7c <= 0 or T14c <= 0 or Tbc7 <= 0 or Tbc14 <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
             # ── Post-correction tests (ATBD 3.4.2.9) ──────────────────────────
             fc = int(fail_char_arr[i, j])
             offset_day = (BT7_MIN_SOLAR_COEF * sc) if day_pixel else 0.0
 
-            if T14c < 285.0 or T7c < (285.0 + offset_day):
+            min_t14 = 285.0 if day_pixel else 265.0  
+            min_t7 = (285.0 + offset_day) if day_pixel else 265.0
+
+
+            if T14c < min_t14 or T7c < min_t7:
                 fc = FailChar.F3
 
-            elif T14c - Tbc < 0.25:
+            elif T14c - Tbc14 < 0.25:
                 if ((not np.isnan(alb_ij) and alb_ij > 0.15) or is_cloudy) \
-                        and T7c - Tbc > 10.0:
+                        and T7c - Tbc7 > 10.0:
                     fc = FailChar.F10
                 else:
                     fc = FailChar.F4
 
-            elif T7c - Tbc < 2.0:
+            elif T7c - Tbc7 < 2.0:
                 fc = FailChar.F5
 
             # Sun-glint flag (ATBD 3.4.2.9)
@@ -654,7 +667,7 @@ def run_part1(
                 doz = compute_dozier(
                     r7_diff, r14_diff,
                     r7_bkg_corr, r14_bkg_corr,
-                    Tbc,
+                    Tbc7,
                     coeffs7, coeffs14,
                     is_potential_glint=is_glint,
                 )
@@ -719,7 +732,7 @@ def run_part1(
                 bt7=float(bt7[i, j]),
                 bt14=float(bt14_eff[i, j]),
                 rad7=r7, rad14=r14,
-                bt7_corr=T7c, bt14_corr=T14c, bt_bkg_corr=Tbc,
+                bt7_corr=T7c, bt14_corr=T14c, bt_bkg_corr=Tbc7,
                 bt7_bkg=bkg.temp7_bkg_mean,
                 bt14_bkg=bkg.temp14_bkg_mean,
                 bt7_bkg_std=bkg.temp7_bkg_stddev,
