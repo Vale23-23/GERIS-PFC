@@ -35,6 +35,7 @@ obtencion_imagenes/
 ## Before you start
 
 Make sure you have the dependencies installed. Use an environment. From the project's root folder:
+Make sure you have **Python 3.10 or higher** installed.
 
 ```bash
 pip install goes2go pyproj pyyaml numpy
