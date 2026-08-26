@@ -47,6 +47,10 @@ parser.add_argument("--save-outputs", action="store_true",
     help="Save fire_mask.npy, fail_char.npy, and summary.json")
 parser.add_argument("--output-dir", default="figures",
     help="Base folder for figures (default: figures)")
+parser.add_argument("--state-path", default="data/prev_fire_mask.npy",
+    help="Path for temporal fire history (default: data/prev_fire_mask.npy)")
+parser.add_argument("--reference-mask", default=None,
+    help="Path to the final reference mask .npy; inferred from dataset-root when omitted")
 
 args = parser.parse_args()
 
@@ -58,6 +62,13 @@ FIG_DIR.mkdir(parents=True, exist_ok=True)
 # ── Import FDCA constants to build the palette ────────────────
 sys.path.insert(0, str(Path(args.config).parent.parent))
 from fdca.constants import FireMask
+from fdca.metrics import evaluate, print_metrics
+
+TEMPORAL_FIRE_CODES = (
+    FireMask.TEMP_PROCESSED, FireMask.TEMP_SATURATED,
+    FireMask.TEMP_CLOUD, FireMask.TEMP_HIGH,
+    FireMask.TEMP_MED, FireMask.TEMP_LOW,
+)
 
 # ──  fire_mask codes (Table 3.11 ATBD) ───────────────────────────────────────
 FM_PALETTE = {
@@ -354,7 +365,7 @@ def fig_part2(inp, fire_mask_p1, fire_mask_p2, candidates, confirmed, save_path)
     axes[1,2].set_title(f"Fuegos confirmados sobre BT7\n({len(confirmed)} píxeles confirmados en Parte II)")
 
     # Marcar también cuántos tienen historial temporal (+20)
-    n_temporal = int((fire_mask_p2 >= 30).sum())
+    n_temporal = int(np.isin(fire_mask_p2, TEMPORAL_FIRE_CODES).sum())
     if n_temporal > 0:
         axes[1,2].set_xlabel(f"{n_temporal} con historial temporal (código +20)")
 
@@ -402,6 +413,7 @@ def main():
     from fdca.part1 import run_part1
     from fdca.part2 import run_part2
     from fdca.algorithm import _to_epoch
+    from fdca.state import PreviousFireMaskStore
 
     sys.path.insert(0, str(Path(__file__).parent)) # Import input adaptader
     from fdca.dataset import ensure_timestamp_data
@@ -423,6 +435,11 @@ def main():
         dataset_root=args.dataset_root,
         config_path=args.config,
     )
+
+    # Temporal state is intentionally external to FDCAInput.  Load it here so
+    # Part II can produce codes 30–35, including TEMP_LOW (35).
+    state_store = PreviousFireMaskStore(inp.bt7.shape, args.state_path)
+    inp.prev_fire_mask = state_store.data
 
     print(f"\n[ Figure 0 ] Reference inputs...")
     fig_inputs(inp, FIG_DIR / "00_inputs.png")
@@ -463,6 +480,25 @@ def main():
     t2 = datetime.now()
     print(f"  -> {len(confirmed)} confirmed  ({(t2-t1).total_seconds():.1f}s)")
 
+    # Persist only after Part II has completed, so the next scene can apply
+    # the temporal filter to the final detections of this scene.
+    state_store.update(fire_mask_p2, _to_epoch(inp.scan_time))
+    state_store.save()
+
+    # ── Metrics against the final reference mask ─────────────────────────────
+    reference_path = (Path(args.reference_mask) if args.reference_mask else
+                      Path(args.dataset_root) / REGION / "ABI-L2-FDCF-Mask" / f"{TS}.npy")
+    metrics = None
+    if reference_path.exists():
+        reference_mask = np.load(reference_path).astype(np.uint8)
+        candidate_mask = np.zeros_like(fire_mask_p2, dtype=bool)
+        for candidate in candidates:
+            candidate_mask[candidate.i, candidate.j] = True
+        metrics = evaluate(reference_mask, fire_mask_p1, candidate_mask, fire_mask_p2)
+        print_metrics(metrics, str(reference_path))
+    else:
+        print(f"\nNo se encontró máscara de referencia; métricas omitidas: {reference_path}")
+
     print(f"\n[ Figure 2 ] Part II effect ...")
     fig_part2(inp, fire_mask_p1, fire_mask_p2, candidates, confirmed,
               FIG_DIR / "02_part2_confirm.png")
@@ -486,11 +522,13 @@ def main():
             "n_high":    int(((fire_mask_p2==13)|(fire_mask_p2==33)).sum()),
             "n_medium":  int(((fire_mask_p2==14)|(fire_mask_p2==34)).sum()),
             "n_low":     int(((fire_mask_p2==15)|(fire_mask_p2==35)).sum()),
-            "n_temporal":int( (fire_mask_p2>=30).sum()),
+            "n_temporal":int(np.isin(fire_mask_p2, TEMPORAL_FIRE_CODES).sum()),
             "frp_median_mw": float(np.median(frps)) if frps else None,
             "frp_max_mw":    float(np.max(frps))    if frps else None,
             "run_time_s":    (t2-t0).total_seconds(),
         }
+        if metrics is not None:
+            summary["metrics"] = metrics
         with open(out_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2)
         print(f"\n✓ Outputs guardados en {out_dir}/")
@@ -503,7 +541,7 @@ def main():
     print(f"  High prob (13/33)  : {((fire_mask_p2==13)|(fire_mask_p2==33)).sum()}")
     print(f"  Medium prob (14/34) : {((fire_mask_p2==14)|(fire_mask_p2==34)).sum()}")
     print(f"  Low prob  (15/35) : {((fire_mask_p2==15)|(fire_mask_p2==35)).sum()}")
-    print(f"  With history (+20): {(fire_mask_p2>=30).sum()}")
+    print(f"  With history (+20): {np.isin(fire_mask_p2, TEMPORAL_FIRE_CODES).sum()}")
     if frps:
         print(f"  FRP median        : {np.median(frps):.1f} MW")
         print(f"  FRP maximum         : {np.max(frps):.1f} MW")
