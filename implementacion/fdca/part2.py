@@ -259,9 +259,11 @@ def run_part2(
                     ni, nj = i + di, j + dj
                     if 0 <= ni < L and 0 <= nj < W:
                         last_t = prev_fire_mask[ni, nj]
-                        if last_t > 0 and (current_epoch - last_t) <= TEMPORAL_WINDOW_S:
-                            temporally_filtered = True
-                            break
+                        if last_t > 0:
+                            elapsed = current_epoch - last_t
+                            if 0.0 <= elapsed <= TEMPORAL_WINDOW_S:
+                                temporally_filtered = True
+                                break
                 if temporally_filtered:
                     break
 
