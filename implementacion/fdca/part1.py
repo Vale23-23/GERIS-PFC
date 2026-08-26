@@ -630,21 +630,21 @@ def run_part1(
             fc = int(fail_char_arr[i, j])
             offset_day = (BT7_MIN_SOLAR_COEF * sc) if day_pixel else 0.0
 
-            min_t14 = 285.0 if day_pixel else 265.0  
-            min_t7 = (285.0 + offset_day) if day_pixel else 265.0
+            min_t14 = 285.0  
+            min_t7 = 285.0 + offset_day
 
 
             if T14c < min_t14 or T7c < min_t7:
                 fc = FailChar.F3
 
-            elif T14c - Tbc14 < 0.25:
+            elif np.abs(T14c - Tbc14) < 0.25:
                 if ((not np.isnan(alb_ij) and alb_ij > 0.15) or is_cloudy) \
-                        and T7c - Tbc7 > 10.0:
+                        and T7c - Tbc14 > 10.0:
                     fc = FailChar.F10
                 else:
                     fc = FailChar.F4
 
-            elif T7c - Tbc7 < 2.0:
+            elif T7c - Tbc14 < 2.0:
                 fc = FailChar.F5
 
             # Sun-glint flag (ATBD 3.4.2.9)
