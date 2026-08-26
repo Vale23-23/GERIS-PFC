@@ -86,58 +86,106 @@ def _solve_newton(
     coeffs7: dict, coeffs14: dict,
 ) -> tuple[float, float, bool]:
     """
-    Newton-Raphson refinement of (p, Tt).
-    Solves f = B + C - A ≈ 0 for both channels simultaneously.
+    Newton-Raphson refinement of (p, Tt), with physical-domain checks.
 
-    f_k(p, T) = p*L_k(T) + (1-p)*L_k(Tb) - A_k   for k in {7, 14}
-
-    Jacobian:
-        J[k,0] = ∂f_k/∂p  = L_k(T) - L_k(Tb)
-        J[k,1] = ∂f_k/∂T  = p * dL_k/dT
-
-    Returns (p, Tt, converged)
+    A Newton step that leaves the valid domain is rejected with backtracking;
+    if no finite improving step exists, the solver returns ``converged=False``
+    so the caller can apply the existing F6/last-chance logic.
     """
-    p  = p0
-    Tt = Tt0
+    p = float(p0)
+    Tt = float(Tt0)
+    A7, A14 = float(rad7), float(rad14)
+    A7_bkg, A14_bkg = float(rad7_bkg), float(rad14_bkg)
+    Tb = float(Tb)
 
-    A7  = rad7
-    A14 = rad14
-    Lb7  = planck_rad_from_coeffs(Tb, **coeffs7)
-    Lb14 = planck_rad_from_coeffs(Tb, **coeffs14)
+    if (not np.all(np.isfinite([p, Tt, A7, A14, A7_bkg, A14_bkg, Tb]))
+            or p < DOZIER_P_LOWER or p > DOZIER_P_UPPER
+            or Tt <= 0.0 or Tb <= 0.0
+            or A7 <= 0.0 or A14 <= 0.0
+            or A7_bkg <= 0.0 or A14_bkg <= 0.0):
+        return p, Tt, False
+
+    with np.errstate(all="ignore"):
+        Lb7 = planck_rad_from_coeffs(Tb, **coeffs7)
+        Lb14 = planck_rad_from_coeffs(Tb, **coeffs14)
+    if not np.all(np.isfinite([Lb7, Lb14])):
+        return p, Tt, False
+
+    def residuals(p_value: float, t_value: float):
+        with np.errstate(all="ignore"):
+            L7 = planck_rad_from_coeffs(t_value, **coeffs7)
+            L14 = planck_rad_from_coeffs(t_value, **coeffs14)
+            f7 = p_value * L7 + (1.0 - p_value) * Lb7 - A7
+            f14 = p_value * L14 + (1.0 - p_value) * Lb14 - A14
+        return L7, L14, f7, f14
 
     converged = False
     for _ in range(DOZIER_NEWTON_MAX):
-        if not np.isfinite(Tt) or Tt <= 0:
+        L7, L14, f7, f14 = residuals(p, Tt)
+        if not np.all(np.isfinite([L7, L14, f7, f14])):
             break
 
-        B7  = p * planck_rad_from_coeffs(Tt, **coeffs7)
-        B14 = p * planck_rad_from_coeffs(Tt, **coeffs14)
-        C7  = (1.0 - p) * Lb7
-        C14 = (1.0 - p) * Lb14
-        f7  = B7  + C7  - A7
-        f14 = B14 + C14 - A14
-        # Antes: :
-        #if abs(f7) < DOZIER_NEWTON_TOL and abs(f14) < DOZIER_NEWTON_TOL:
-        if abs(f7) < DOZIER_NEWTON_TOL * abs(A7) and abs(f14) < DOZIER_NEWTON_TOL * abs(A14):
+        scale7 = max(abs(A7), 1.0)
+        scale14 = max(abs(A14), 1.0)
+        if (abs(f7) <= DOZIER_NEWTON_TOL * scale7
+                and abs(f14) <= DOZIER_NEWTON_TOL * scale14):
             converged = True
             break
 
-        # Jacobian
-        J00 = planck_rad_from_coeffs(Tt, **coeffs7) - Lb7
-        J01 = planck_deriv_T_from_coeffs(Tt, p, **coeffs7)
-        J10 = planck_rad_from_coeffs(Tt, **coeffs14) - Lb14
-        J11 = planck_deriv_T_from_coeffs(Tt, p, **coeffs14)
+        # Jacobian. The derivative helper returns NaN outside its domain;
+        # reject that iteration instead of allowing NaN into the determinant.
+        with np.errstate(all="ignore"):
+            J00 = L7 - Lb7
+            J01 = planck_deriv_T_from_coeffs(Tt, p, **coeffs7)
+            J10 = L14 - Lb14
+            J11 = planck_deriv_T_from_coeffs(Tt, p, **coeffs14)
 
-        det = J00 * J11 - J01 * J10
-        if abs(det) < 1e-300:
-            break  # Singular Jacobian
+        jac_values = np.array([J00, J01, J10, J11], dtype=float)
+        if not np.all(np.isfinite(jac_values)):
+            break
 
-        # Inverse of 2×2 matrix times [f7, f14]
-        dp  = ( J11 * f7  - J01 * f14) / det
-        dTt = (-J10 * f7  + J00 * f14) / det
+        # Scale the Jacobian before calculating its determinant. This avoids
+        # overflow in J00*J11/J01*J10 while preserving the Newton step.
+        jac_scale = float(np.max(np.abs(jac_values)))
+        if not np.isfinite(jac_scale) or jac_scale <= 0.0:
+            break
+        j00, j01, j10, j11 = jac_values / jac_scale
+        with np.errstate(all="ignore"):
+            det_scaled = j00 * j11 - j01 * j10
+        if not np.isfinite(det_scaled) or abs(det_scaled) < 1e-15:
+            break
 
-        p  -= dp
-        Tt -= dTt
+        rhs7, rhs14 = f7 / jac_scale, f14 / jac_scale
+        with np.errstate(all="ignore"):
+            dp = (j11 * rhs7 - j01 * rhs14) / det_scaled
+            dTt = (-j10 * rhs7 + j00 * rhs14) / det_scaled
+        if not np.all(np.isfinite([dp, dTt])):
+            break
+
+        current_norm = max(abs(f7) / scale7, abs(f14) / scale14)
+        accepted = False
+        for alpha in (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125,
+                      0.015625, 0.0078125, 0.00390625):
+            trial_p = p - alpha * dp
+            trial_Tt = Tt - alpha * dTt
+            if (not np.all(np.isfinite([trial_p, trial_Tt]))
+                    or trial_p < DOZIER_P_LOWER
+                    or trial_p > DOZIER_P_UPPER
+                    or trial_Tt <= 0.0):
+                continue
+
+            _, _, trial_f7, trial_f14 = residuals(trial_p, trial_Tt)
+            if not np.all(np.isfinite([trial_f7, trial_f14])):
+                continue
+            trial_norm = max(abs(trial_f7) / scale7,
+                             abs(trial_f14) / scale14)
+            if trial_norm < current_norm:
+                p, Tt = trial_p, trial_Tt
+                accepted = True
+                break
+
+        if not accepted:
+            break
 
     return p, Tt, converged
 

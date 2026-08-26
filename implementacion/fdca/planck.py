@@ -205,9 +205,28 @@ def planck_deriv_T_from_coeffs(T, p: float, fk1, fk2, bc1, bc2):
     -------
     float
     """
-    denom = T * bc2 + bc1
-    x = fk2 / denom
-    with np.errstate(over="ignore"):
-        ex = np.exp(x)
-    dLdT = fk1 * fk2 * bc2 * ex / (denom**2 * (ex - 1.0)**2)
-    return p * dLdT
+    with np.errstate(all="ignore"):
+        T = float(T)
+        p = float(p)
+        fk1 = float(fk1)
+        fk2 = float(fk2)
+        bc1 = float(bc1)
+        bc2 = float(bc2)
+        denom = T * bc2 + bc1
+        if (not np.isfinite(T) or T <= 0.0
+                or not np.isfinite(p) or p < 0.0 or p > 1.0
+                or not np.isfinite(fk1) or fk1 <= 0.0
+                or not np.isfinite(fk2) or fk2 <= 0.0
+                or not np.isfinite(bc2) or bc2 <= 0.0
+                or not np.isfinite(denom) or denom <= 0.0):
+            return np.nan
+        x = fk2 / denom
+        if not np.isfinite(x) or x <= 0.0:
+            return np.nan
+        # exp(x)/(exp(x)-1)^2 = exp(-x)/(1-exp(-x))^2
+        exp_minus_x = np.exp(-x)
+        one_minus_exp = -np.expm1(-x)
+        dLdT = (fk1 * fk2 * bc2 * exp_minus_x
+                 / (denom * denom * one_minus_exp * one_minus_exp))
+        value = p * dLdT
+    return float(value) if np.isfinite(value) else np.nan
