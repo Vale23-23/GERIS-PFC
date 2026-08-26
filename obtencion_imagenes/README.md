@@ -91,7 +91,8 @@ This downloads Band 7 and the fire mask for Uruguay every ten minutes, between S
 
 **Note:** this command also resolves the CAMEL V3 emissivity climatology needed by the
 algorithm — one file per calendar month covered by `--start`/`--end`. You no longer need
-a separate step for this; it happens automatically as part of `download`.
+a separate step for this; it happens automatically as part of `download`. Data taken from
+https://www.earthdata.nasa.gov/data/catalog/lpcloud-cam5k30em-003 (13 hinge-point emissivities)
 
 Start of operational data: April 7, 2025
 
@@ -190,10 +191,16 @@ Shows how many timestamps have detected fire, the percentage, and a ranking of t
   ...
 ```
 
+### 8. See fire counts by department for a timestamp
 
+```bash
 python pipeline.py spatial-report --region uruguay --timestamp 20250926_1900
+```
 
-### 8. Visualize an image and its mask
+Shows how many fire pixels were detected in each department (using the manifest's
+spatial breakdown, already computed when the mask was downloaded)
+
+### 9. Visualize an image and its mask
 
 ```bash
 python pipeline.py visualize --region uruguay --timestamp 20250901_1200
@@ -213,15 +220,54 @@ Files are saved in a `dataset/` folder inside `obtencion_imagenes/`, organized a
 dataset/
 └── uruguay/
     ├── ABI-L1b-Rad-B07/
+    │   ├── 20250901_1200.npy              ← raw radiance (product's native unit)
+    │   ├── 20250901_1200_planck.json      ← real Planck coefficients for that file (IR bands only)
+    │   └── units.json                     ← unit metadata for the product (once per folder)
+    ├── ABI-L1b-Rad-B07-DFQ/
+    │   └── 20250901_1200_dqf.npy          ← per-pixel DQF of B07 (not to be confused with the fire mask's DQF)
+    ├── ABI-L1b-Rad-B14/
     │   └── ...
     ├── ABI-L2-FDCF/
     │   └── ...
     ├── camel_emissivity/
     │   └── CAM5K30EMCLIM_emis_climatology_09Month_V003.nc
+    ├── geometry.json                      ← fixed satellite geometry (x/y grid + ellipsoid)
     └── manifest.json ← log of everything downloaded
 ```
 
 Each `.npy` file is an image cropped to the chosen region, saved as a numeric matrix.
+
+### Auxiliary files (besides the `.npy`)
+
+Besides the image itself, the pipeline generates a few "sidecar" files that
+`fdca_adapter.py` later uses to build the algorithm's input. You don't need to touch them
+by hand, but it's useful to know what each one is for:
+
+- **`geometry.json`** (one per region, at the root of `dataset/<region>/`): stores the
+  satellite's real geostationary projection — the `x`/`y` grid, sub-satellite longitude,
+  orbital height, and the ellipsoid's semi-axes (`semi_major_axis`/`semi_minor_axis`). It's
+  generated once, the first time any standard band (non-B02) is downloaded for that region,
+  and is the single source of truth for reconstructing the latitude/longitude grid and the
+  viewing angles (LZA, azimuth). If deleted, at least one band needs to be re-downloaded to
+  regenerate it.
+
+- **`units.json`** (one per product folder, e.g. `ABI-L1b-Rad-B07/units.json`): stores the
+  physical unit declared in the original `.nc` (`units`, `long_name`, `valid_range`) and
+  whether the file came with `scale_factor`/`add_offset` (i.e., whether xarray had already
+  decoded the value to physical units before it was saved as `.npy`). Since the `.npy` file
+  itself carries no attributes, this file is the only way to later know which unit each
+  product was saved in.
+
+- **`{timestamp}_planck.json`** (one per timestamp, only in IR band folders: B07, B13, B14,
+  B15): calibration coefficients specific to THAT file/scan (`planck_fk1`, `planck_fk2`,
+  `planck_bc1`, `planck_bc2`). These are needed to invert radiance → brightness temperature
+  using the official PUG-L1b formula, and **are not generic constants** — they change from
+  scan to scan. For B07 it also includes `fpt_threshold_exceeded_count`, a QC counter
+  indicating whether the focal plane temperature exceeded the 90 K threshold during that
+  scan (used to decide whether the algorithm should use the hybrid B13 band instead of B14).
+
+- **`{timestamp}_dqf.npy`** (B07 only, in the `ABI-L1b-Rad-B07-DFQ/` folder): per-pixel Data
+  Quality Flag for B07's radiance.  This DQF comes from the L1b file itself and is used to detect pixels with focal plane temperature failures or other radiometric quality issues.
 
 The `manifest.json` file is an automatic log of everything that was downloaded, with status and dimensions. There's no need to open it manually.
 
