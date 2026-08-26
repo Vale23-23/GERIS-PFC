@@ -229,7 +229,7 @@ def _solar_correction(
     if 0 <= pixel_sza <= 85: #only during the daytime (SZA < 85°) we apply the solar correction, otherwise we skip it
         # Solar component
         rad7_bkg_corr_emiss = rad7_bkg_corr / emiss7
-        rad_solar = rad7_bkg_corr_emiss - emiss7 * rad7from14_bkg
+        rad_solar = max(0.0, rad7_bkg_corr_emiss - emiss7 * rad7from14_bkg)
 
         # Apply solar correction
         rad7_solar_corr = (rad7_corr_emiss - rad_solar) / emiss7
@@ -316,7 +316,11 @@ def run_part1(
 
     # ── FPT mitigation: build hybrid longwave band (ATBD 3.4.2.2) ────────────
     use_hybrid = FPT > FPT_THRESHOLD
-    if use_hybrid and bt13 is not None and rad13 is not None:
+    # Keep the source band for each effective longwave pixel.  This mask is
+    # also needed later when converting radiances/temperatures and by Dozier.
+    use_ch13 = np.zeros(bt7.shape, dtype=bool)
+    if (use_hybrid and bt13 is not None and rad13 is not None
+            and coeffs13 is not None):
         rad13_in_ch7 = planck_rad_from_coeffs(bt13, **coeffs7)   # ch13 BT → ch7 radiance space
         rad14_in_ch7 = planck_rad_from_coeffs(bt14, **coeffs7)   # ch14 BT → ch7 radiance space
         refl_7_14 = rad7 - rad14_in_ch7
@@ -554,6 +558,9 @@ def run_part1(
 
             r7  = float(rad7     [i, j])
             r14 = float(rad14_eff[i, j])
+            # The effective longwave radiance may come from B13 or B14.
+            # Use the source band's Planck curve for every conversion below.
+            coeffs_long = coeffs13 if use_ch13[i, j] else coeffs14
 
             # TPW correction
             try:
@@ -566,7 +573,7 @@ def run_part1(
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
             T7_corr  = float(planck_temp_from_coeffs(r7_corr,  **coeffs7))
-            T14_corr = float(planck_temp_from_coeffs(r14_corr, **coeffs14))
+            T14_corr = float(planck_temp_from_coeffs(r14_corr, **coeffs_long))
             if T7_corr <= 0 or T14_corr <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
@@ -590,7 +597,7 @@ def run_part1(
 
             # Background radiances (must be converted from BT → rad BEFORE TPW correction)
             r7_bkg_raw  = planck_rad_from_coeffs(bkg.temp7_bkg_mean,  **coeffs7)
-            r14_bkg_raw = planck_rad_from_coeffs(bkg.temp14_bkg_mean, **coeffs14)
+            r14_bkg_raw = planck_rad_from_coeffs(bkg.temp14_bkg_mean, **coeffs_long)
             r7_bkg_corr  = _apply_tpw_correction(r7_bkg_raw,  offset7,  trans7)
             r14_bkg_corr = _apply_tpw_correction(r14_bkg_raw, offset14, trans14)
 
@@ -601,7 +608,7 @@ def run_part1(
             try:
                 r7_solar_corr, rad7from14_bkg = _solar_correction(
                     r7_corr_em, r7_bkg_corr, r14_bkg_corr, em7,
-                    coeffs7, coeffs14, sza[i, j]
+                    coeffs7, coeffs_long, sza[i, j]
                 )
             except Exception:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
@@ -617,11 +624,11 @@ def run_part1(
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
 
             T7c  = float(planck_temp_from_coeffs(r7_diff,     **coeffs7))
-            T14c = float(planck_temp_from_coeffs(r14_diff,    **coeffs14))
+            T14c = float(planck_temp_from_coeffs(r14_diff,    **coeffs_long))
 
 
             Tbc7  = float(planck_temp_from_coeffs(r7_bkg_corr, **coeffs7))   # corrected background
-            Tbc14  = float(planck_temp_from_coeffs(r14_bkg_corr, **coeffs14))   # corrected background
+            Tbc14  = float(planck_temp_from_coeffs(r14_bkg_corr, **coeffs_long))   # corrected background
 
             if T7c <= 0 or T14c <= 0 or Tbc7 <= 0 or Tbc14 <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
@@ -668,7 +675,7 @@ def run_part1(
                     r7_diff, r14_diff,
                     r7_bkg_corr, r14_bkg_corr,
                     Tbc7,
-                    coeffs7, coeffs14,
+                    coeffs7, coeffs_long,
                     is_potential_glint=is_glint,
                 )
                 # Update fail_char from Dozier result
