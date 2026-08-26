@@ -118,6 +118,11 @@ def _valid_background_mask(
     cold = (bt7_win < BKG_COLD_THRESH) | (bt14_win < BKG_COLD_THRESH)
     valid_mask = land_mask[sl] & ~warm & ~cold
 
+    # Exclude central pixel 
+    center_local_i = i0 - i_lo
+    center_local_j = j0 - j_lo
+    valid_mask[center_local_i, center_local_j] = False
+
     # Channel 2/albedo screening applies only when both arrays are available,
     # and only for finite values, matching the previous scalar implementation.
     if day_win is not None and vis is not None and albedo is not None:
