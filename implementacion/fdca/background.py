@@ -116,7 +116,8 @@ def _valid_background_mask(
     )
     warm = bt7_win > warm_threshold
     cold = (bt7_win < BKG_COLD_THRESH) | (bt14_win < BKG_COLD_THRESH)
-    valid_mask = land_mask[sl] & ~warm & ~cold
+    finite_thermal = np.isfinite(bt7_win) & np.isfinite(bt14_win)
+    valid_mask = land_mask[sl] & finite_thermal & ~warm & ~cold
 
     # Exclude central pixel 
     center_local_i = i0 - i_lo

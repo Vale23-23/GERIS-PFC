@@ -340,7 +340,10 @@ def run_part1(
     # Where any input radiance < 0 → set Refl = -9999
     bad_rad = (rad7 < 0) | (rad14_eff < 0)
     if rad13 is not None:
-        bad_rad = bad_rad | (rad13 < 0)
+        # An invalid B13 must matter only where B13 was actually selected.
+        # Otherwise a bad optional B13 pixel incorrectly invalidates a valid
+        # B14 fallback pixel.
+        bad_rad = bad_rad | (use_ch13 & (rad13 < 0))
     refl = np.where(bad_rad, -9999.0, refl)
 
     # ── Codes 150/151/152/153 from precomputed mask (ATBD 3.4.2.3) ────
