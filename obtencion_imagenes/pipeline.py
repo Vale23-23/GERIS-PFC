@@ -15,7 +15,6 @@ import json
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-#import downloader
 import manifest
 
 from dotenv import load_dotenv
@@ -54,6 +53,7 @@ def _patched_create_default_context(purpose=ssl.Purpose.SERVER_AUTH, *, cafile=N
 ssl.create_default_context = _patched_create_default_context
 
 import downloader
+import tpw_downloader
 
 def get_timestamps(start_str, end_str, interval_minutes=60):
     start = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
@@ -146,7 +146,11 @@ def cmd_download(args, cfg):
     errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
     print(f"\n✔ Downloaded: {downloaded}  |  Already existed: {skipped}  |  Errors: {errors}")
     print(f"📋 Manifest updated at: {output_root}/manifest.json")
-
+    
+    # ── GFS TPW (ATBD Table 3.2) — opt-in, runs after IR bands exist on disk ──
+    tpw_enabled = args.with_tpw or os.environ.get("GERIS_ENABLE_TPW") == "1"
+    if tpw_enabled:
+        cmd_download_tpw_gfs(timestamps, region, output_root, max_workers)
 
 def cmd_status(args, cfg):
     output_root = os.path.join(cfg["output_root"], args.region)
@@ -411,6 +415,65 @@ def cmd_download_camel(args, cfg):
     except Exception as e:
         print(f"❌ Error descargando climatología CAMEL: {e}")
 
+def cmd_download_tpw_gfs(timestamps, region_cfg, output_root, max_workers):
+    """
+    Download GFS TPW (ATBD Table 3.2: NCEP TPW, not ABI-derived) for each
+    timestamp, regridded to the ABI grid.
+
+    Must run AFTER the main product download loop: tpw_downloader infers the
+    target grid shape from an already-downloaded IR band (B07/B13/B14) for
+    this region/timestamp, so it needs those .npy files on disk already.
+
+    No-ops with a single warning (instead of failing) if the optional deps
+    (cfgrib/eccodes/scipy) are not installed on this machine.
+    """
+    try:
+        import cfgrib  # noqa: F401  (dependency check only)
+    except ImportError:
+        print("⚠️  Skipping GFS TPW download: 'cfgrib' is not installed "
+              "(pip install cfgrib scipy --break-system-packages; "
+              "eccodes may also need a system package, e.g. "
+              "'sudo apt install libeccodes-dev' on Linux).")
+        return []
+
+    print(f"\n🌧️  Downloading GFS TPW for {len(timestamps)} timestamps...\n")
+    icon_map = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(tpw_downloader.download_and_save, ts, region_cfg, output_root): ts
+            for ts in timestamps
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            icon = icon_map.get(result["status"], "?")
+            if result["status"] == "error":
+                print(f"  ❌ {result['timestamp']}  TPW-GFS  {result.get('substatus', result['status'])}")
+                print(f"     👉 {result.get('error')}")
+            else:
+                print(f"  {icon} {result['timestamp']}  TPW-GFS  {result['status']}")
+
+    downloaded = sum(1 for r in results if r["status"] == "downloaded")
+    skipped    = sum(1 for r in results if r["status"] == "exists")
+    errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
+    print(f"  ✔ TPW-GFS: downloaded={downloaded}  existing={skipped}  errors={errors}")
+    return results
+
+
+def cmd_download_tpw(args, cfg):
+    """Standalone TPW-only download, mirrors cmd_download_camel's pattern."""
+    region = cfg["regions"].get(args.region)
+    if not region:
+        print(f"❌ Region '{args.region}' not found in config.yaml")
+        return
+
+    timestamps  = get_timestamps(args.start, args.end, args.interval)
+    output_root = os.path.join(cfg["output_root"], args.region)
+    max_workers = args.workers or cfg["max_workers"]
+
+    cmd_download_tpw_gfs(timestamps, region, output_root, max_workers)
+
 def main():
     parser = argparse.ArgumentParser(description="GOES dataset pipeline")
     sub    = parser.add_subparsers(dest="command")
@@ -423,7 +486,8 @@ def main():
     dl.add_argument("--products", required=True,  nargs="+", help="Product IDs from config.yaml")
     dl.add_argument("--interval", type=int, default=60, help="Interval in minutes (default: 60)")
     dl.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
-
+    dl.add_argument("--with-tpw", action="store_true",
+        help="Also download GFS TPW for each timestamp (needs cfgrib/eccodes/scipy)")
     # status
     st = sub.add_parser("status", help="Show manifest status for a region")
     st.add_argument("--region",   required=True, help="Region key from config.yaml")
@@ -452,6 +516,13 @@ def main():
     dc = sub.add_parser("download-camel", help="Descarga climatología de emisividad CAMEL V3 (LP DAAC)")
     dc.add_argument("--region", required=True, help="Region key from config.yaml")
     dc.add_argument("--month",  required=True, type=int, choices=range(1, 13), help="Mes calendario (1-12)")
+
+    tp = sub.add_parser("download-tpw", help="Download GFS TPW only (ATBD Table 3.2)")
+    tp.add_argument("--region",   required=True, help="Region key from config.yaml")
+    tp.add_argument("--start",    required=True, help='Start datetime "YYYY-MM-DD HH:MM"')
+    tp.add_argument("--end",      required=True, help='End datetime "YYYY-MM-DD HH:MM"')
+    tp.add_argument("--interval", type=int, default=60, help="Interval in minutes (default: 60)")
+    tp.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
 
     sp = sub.add_parser("spatial-report", help="Muestra el fuego por departamento para un timestamp")
     sp.add_argument("--region", required=True, help="Región (ej: uruguay)")
@@ -486,6 +557,8 @@ def main():
         cmd_spatial_report(args, cfg)
     elif args.command == "visualize":     
         cmd_visualize(args, cfg)
+    elif args.command == "download-tpw":
+        cmd_download_tpw(args, cfg)
     else:
         parser.print_help()
 
@@ -505,8 +578,6 @@ def cmd_spatial_report(args, cfg):
     mask = np.load(mask_path)
     region_cfg = cfg["regions"][args.region]
     
-    # Esta función ahora está integrada en tu manifest.py
-    # Simplemente consultamos el manifest ya actualizado
     data = manifest.load(output_root)
     ts_data = data.get(ts, {})
     report = ts_data.get("fire", {}).get("spatial_report", {})
