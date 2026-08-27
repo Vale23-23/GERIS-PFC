@@ -407,6 +407,45 @@ def fig_fire_map(inp, fire_mask_p2, save_path):
     print(f"  ✓ {save_path.name}")
 
 
+
+def build_temporal_state(
+    timestamp: str,
+    region: str,
+    data_root: str,
+    shape: tuple,
+    download: bool = False,
+) -> np.ndarray:
+    """
+    Build temporal state mask from previous 12 hours of fire detections.
+    
+    This function downloads previous scenes if needed and builds a temporal
+    history mask for Part II.
+    """
+    from fdca.temporal_filter import TemporalFilter
+    from fdca.dataset import ensure_timestamp_data
+    
+    # Define download callback that downloads missing scenes
+    def download_callback(ts: str):
+        if download:
+            ensure_timestamp_data(
+                timestamp=ts,
+                region=region,
+                dataset_root=data_root,
+                download=True,
+            )
+    
+    tf = TemporalFilter(
+        data_root=data_root,
+        region=region,
+        timestamp=timestamp,
+        shape=shape,
+        lookback_hours=12,
+        download_callback=download_callback if download else None,
+    )
+    
+    return tf.load_previous_fires()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -436,10 +475,23 @@ def main():
         config_path=args.config,
     )
 
-    # Temporal state is intentionally external to FDCAInput.  Load it here so
-    # Part II can produce codes 30–35, including TEMP_LOW (35).
+    print(f"\n[ Temporal ] Building temporal state from previous 12 hours...")
+    
+    # Build temporal state from previous detections
+    temporal_state = build_temporal_state(
+        timestamp=TS,
+        region=REGION,
+        data_root=args.dataset_root,
+        shape=inp.bt7.shape,
+        download=args.download,
+    )
+    
+    # Use the temporal state in Part II
+    inp.prev_fire_mask = temporal_state
+    
+    # Also save it to the state path for persistence
     state_store = PreviousFireMaskStore(inp.bt7.shape, args.state_path)
-    inp.prev_fire_mask = state_store.data
+    state_store.data = temporal_state
 
     print(f"\n[ Figure 0 ] Reference inputs...")
     fig_inputs(inp, FIG_DIR / "00_inputs.png")
