@@ -168,9 +168,16 @@ def compute_latlon_grid(base_path: str) -> tuple[np.ndarray, np.ndarray]:
     transformer = pyproj.Transformer.from_crs(crs_goes, crs_latlon, always_xy=True)
 
     # 5. Proyectar la malla 2D
-    # En pyproj, las coordenadas geostacionarias deben multiplicarse por la altura orbital (h)
-    h = geom["h"]
-    x_mesh, y_mesh = np.meshgrid(x_vals * h, y_vals * h)
+    # ``x``/``y`` del producto ABI están en radianes. PROJ ``geos`` recibe
+    # coordenadas lineales, por lo que hay que multiplicarlas por la distancia
+    # del centro de la Tierra al punto de perspectiva:
+    #   H = perspective_point_height + semi_major_axis.
+    # El downloader usa exactamente esta convención al construir geometry.json.
+    perspective_distance = geom["h"] + geom["a"]
+    x_mesh, y_mesh = np.meshgrid(
+        x_vals * perspective_distance,
+        y_vals * perspective_distance,
+    )
 
     # Transformación de coordenadas de matriz completa
     lon2d, lat2d = transformer.transform(x_mesh, y_mesh)
@@ -406,7 +413,16 @@ def resample_b02_to_grid(rad: np.ndarray, target_shape: tuple[int, int],
 
     valid_rad = np.where(rad >= 0, rad, np.nan)
     blocks = valid_rad.reshape(target_h, factor, target_w, factor)
-    return np.nanmean(blocks, axis=(1, 3)).astype(np.float32)
+
+    # ``np.nanmean`` emits a RuntimeWarning for blocks where every B02 sample
+    # is invalid (typically outside the valid swath).  Compute the mean with an
+    # explicit count instead: valid blocks keep exactly the same average, while
+    # empty blocks remain NaN without treating the warning as a pipeline error.
+    valid_count = np.sum(np.isfinite(blocks), axis=(1, 3))
+    valid_sum = np.nansum(blocks, axis=(1, 3))
+    result = np.full((target_h, target_w), np.nan, dtype=np.float64)
+    np.divide(valid_sum, valid_count, out=result, where=valid_count > 0)
+    return result.astype(np.float32)
 
 
 # ── Static ecosystem/status mask ─────────────────────────────────────────────
@@ -489,11 +505,11 @@ def build_tpw_lut(path: Path = TPW_LUT_PATH) -> np.ndarray:
     * row 1: zenith-angle bin label
     * row 2: 4 µm transmittance
     * row 3: 11 µm transmittance
-    * row 4: 4 µm offset/coefficient
-    * row 5: 11 µm offset/coefficient
+    * row 4: 4 µm additive extinction/absorption offset
+    * row 5: 11 µm additive extinction/absorption offset
 
-    Offsets are consumed by the existing ATBD implementation as the
-    multiplicative correction coefficients in ``part1.py``.
+    The offsets are consumed according to ATBD 3.4.2.8 as additive radiance
+    terms: ``(radiance - offset) / transmittance``.
     """
     path = Path(path)
     if not path.exists():
@@ -727,11 +743,22 @@ def load_fdca_input(
 
 
     def load_data_quality(base: str, timestamp: str) -> np.ndarray | None:
-        """DQF crudo de B07 (códigos 0-4, ver ATBD / GOES-R doc). None si no se descargó."""
-        path = os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_dqf.npy")
-        if not os.path.exists(path):
-            return None
-        return np.load(path)
+        """Load raw B07 L1b DQF, supporting both dataset folder layouts.
+
+        The downloader branch writes this sidecar under
+        ``ABI-L1b-Rad-B07-DFQ/``. Older datasets may have it next to the B07
+        radiance under ``ABI-L1b-Rad-B07/``. Loading is intentionally kept
+        separate from the Part I decisions until the code meanings and their
+        distribution have been audited against TP/FP/FN pixels.
+        """
+        candidates = (
+            os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_dqf.npy"),
+            os.path.join(base, "ABI-L1b-Rad-B07-DFQ", f"{timestamp}_dqf.npy"),
+        )
+        for path in candidates:
+            if os.path.exists(path):
+                return np.load(path)
+        return None
 
 
     from fdca.planck import planck_temp_from_coeffs, planck_rad

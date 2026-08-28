@@ -33,8 +33,10 @@ def _eliminate_false_alarm(cand: FireCandidate, detail: Optional[dict] = None) -
     -------
     (eliminated, reason) - reason in {"cond1", "cond2", "cond3", ""}
     """
-    bt7     = cand.bt7_corr
-    bt7_bkg = cand.bt_bkg_corr
+    # ATBD 3.4.2.14 uses observed T3.9/Tb3.9 in these Part II tests,
+    # not the fully corrected T3.9c/Tbc values used by characterization.
+    bt7     = cand.bt7
+    bt7_bkg = cand.bt7_bkg
     refl    = cand.refl_pixel
     reflb   = cand.reflb
     sza_cos = np.cos(np.radians(cand.sza))
@@ -47,7 +49,7 @@ def _eliminate_false_alarm(cand: FireCandidate, detail: Optional[dict] = None) -
 
     cond1 = (bt7 - bt7_bkg < DELTA_BT7_TB7_MIN) and refl_ok
     cond2 = (bt7 < BT7_WARM_NIGHT + day_off and bt7 - bt7_bkg < DELTA_BT7_TB7_MAX
-             and bt7 - cand.bt14_corr < DELTA_BT7_BT14_MAX and refl_ok)
+             and bt7 - cand.bt14 < DELTA_BT7_BT14_MAX and refl_ok)
     cond3 = (bt7 < BT7_WARM_NIGHT + day_off and bt7_bkg < TB7_COLD_NIGHT + day_off
              and cand.n_passes >= BKG_MAX_ITER and refl_ok)
 
@@ -57,8 +59,8 @@ def _eliminate_false_alarm(cand: FireCandidate, detail: Optional[dict] = None) -
             "p2_std_reflb":      float(std_reflb_p2),
             "p2_refl_minus_reflb": float(refl - reflb),
             "p2_refl_ok":        bool(refl_ok),
-            "p2_bt7c_minus_bkg": float(bt7 - bt7_bkg),
-            "p2_bt7c_minus_bt14c": float(bt7 - cand.bt14_corr),
+            "p2_bt7_minus_bkg": float(bt7 - bt7_bkg),
+            "p2_bt7_minus_bt14": float(bt7 - cand.bt14),
             "p2_bt7_warm_thr":   float(BT7_WARM_NIGHT + day_off),
             "p2_bkg_cold_thr":   float(TB7_COLD_NIGHT + day_off),
             "p2_cond1":          bool(cond1),
@@ -94,7 +96,7 @@ def _reassign_cloud_glint_edge(cand: FireCandidate, day_off: float) -> bool:
     albb = cand.albedo_bkg if not np.isnan(cand.albedo_bkg) else 0.0
 
     cloud_test = (alb > CLOUD_EDGE_ALBEDO_MIN or alb - albb >= CLOUD_EDGE_ALBEDO_DIFF_MIN)
-    bt_test    = cand.bt7_corr < CLOUD_EDGE_BT7_MAX_NIGHT + day_off
+    bt_test    = cand.bt7 < CLOUD_EDGE_BT7_MAX_NIGHT + day_off
     return cloud_test and bt_test
 
 
@@ -109,7 +111,7 @@ def _reassign_fog_edge(cand: FireCandidate, sza_cos: float) -> bool:
 
     bkg_diff = cand.bt7_bkg - cand.bt14_bkg
     fog_c1 = sza_cos * P2_DAY_OFFSET_COEF + FOG_EDGE_DAY_OFFSET_ADD - bkg_diff < FOG_EDGE_DIFF_THRESH
-    fog_c2 = cand.bt7_corr - cand.bt7_bkg <= FOG_EDGE_BT7_DELTA_MAX
+    fog_c2 = cand.bt7 - cand.bt7_bkg <= FOG_EDGE_BT7_DELTA_MAX
     return fog_c1 and fog_c2
 
 
@@ -135,7 +137,7 @@ def _upgrade_confidence(cand: FireCandidate) -> tuple[Optional[int], int]:
     thr1_h, thr2_h = _high_med_thresholds(cand, "high")
     thr1_m, thr2_m = _high_med_thresholds(cand, "medium")
 
-    bt7c = cand.bt7_corr
+    bt7c = cand.bt7
     Tb7  = cand.bt7_bkg
     Tb14 = cand.bt14_bkg
     refl_test = (cand.refl_pixel - cand.reflb >= cand.std_dev_reflb_max or _refl_along_scan_part2(cand))
@@ -210,6 +212,7 @@ def run_part2(
     prev_fire_mask: Optional[np.ndarray],   # seconds-since-epoch when last fire
     current_epoch:  float,                  # seconds since 2001-01-01 for current scan
     trace_out:      Optional[list] = None,  # audit only: one dict per candidate
+    detection_policy: str = "atbd",
 ) -> tuple[np.ndarray, np.ndarray, List[FireCandidate]]:
     """
     Part II: further refine the fire product.
@@ -225,6 +228,12 @@ def run_part2(
     trace_out       : optional list; if given, one dict per candidate is appended
                       with every intermediate decision of Part II (audit only,
                       does not change the result)
+    detection_policy : ``"atbd"`` preserves the ATBD categories.  The explicit
+                       ``"conservative"`` policy is an empirical benchmark
+                       calibration: it does not emit cloud-contaminated code 12
+                       and requires at least 6 K observed T3.9 - background T3.9
+                       for low-probability code 15.  This intentionally trades
+                       recall for precision and is reported separately.
 
     Returns
     -------
@@ -292,6 +301,33 @@ def run_part2(
         if upgraded_code is not None:
             fire_code = upgraded_code
             cand.fail_char += flag_delta
+
+        # ── Optional empirical precision-oriented policy ────────────────────
+        # This is deliberately outside the ATBD path.  It is useful when the
+        # NOAA mask is the benchmark and false alarms are more costly than
+        # weak low-probability detections, but must not be confused with the
+        # normative categories above.
+        policy_rejected = ""
+        if detection_policy == "conservative":
+            if fire_code == FireMask.CLOUD_CONTAM:
+                policy_rejected = "cloud_contaminated"
+            elif (fire_code == FireMask.LOW_PROB
+                  and cand.bt7 - cand.bt7_bkg < 6.0):
+                policy_rejected = "low_prob_delta_bt7_lt_6K"
+        elif detection_policy != "atbd":
+            raise ValueError(
+                f"detection_policy desconocida: {detection_policy!r}; "
+                "usar 'atbd' o 'conservative'"
+            )
+
+        if trace is not None:
+            trace["detection_policy"] = detection_policy
+            trace["policy_rejected"] = policy_rejected
+            trace["policy_bt7_minus_bkg7"] = float(cand.bt7 - cand.bt7_bkg)
+        if policy_rejected:
+            # Keep the Part I code in the output and do not append to confirmed:
+            # this is a final Part II rejection, not a new fire category.
+            continue
 
         # No FRP for passes > 10
         if cand.n_passes > BKG_MAX_ITER:

@@ -52,6 +52,8 @@ parser.add_argument("--state-path", default="data/prev_fire_mask.npy",
     help="Path for temporal fire history (default: data/prev_fire_mask.npy)")
 parser.add_argument("--reference-mask", default=None,
     help="Path to the final reference mask .npy; inferred from dataset-root when omitted")
+parser.add_argument("--detection-policy", choices=("atbd", "conservative"), default="atbd",
+    help="Part II policy: atbd (normative) or conservative (empirical precision-oriented)")
 
 args = parser.parse_args()
 
@@ -476,23 +478,15 @@ def main():
         config_path=args.config,
     )
 
-    print(f"\n[ Temporal ] Building temporal state from previous 12 hours...")
-    
-    # Build temporal state from previous detections
-    temporal_state = build_temporal_state(
-        timestamp=TS,
-        region=REGION,
-        data_root=args.dataset_root,
-        shape=inp.bt7.shape,
-        download=args.download,
-    )
-    
-    # Use the temporal state in Part II
-    inp.prev_fire_mask = temporal_state
-    
-    # Also save it to the state path for persistence
+    print(f"\n[ Temporal ] Loading persisted own state from {args.state_path}...")
+
+    # The ATBD temporal file is the previous output of this same algorithm.
+    # Do not replace it with the NOAA reference mask: that would leak the
+    # benchmark into the detector and would not model operational processing.
     state_store = PreviousFireMaskStore(inp.bt7.shape, args.state_path)
-    state_store.data = temporal_state
+    temporal_state = state_store.data
+    print(f"  -> {int(np.count_nonzero(temporal_state > 0))} previous fire pixels")
+    inp.prev_fire_mask = temporal_state
 
     print(f"\n[ Figure 0 ] Reference inputs...")
     fig_inputs(inp, FIG_DIR / "00_inputs.png")
@@ -529,6 +523,7 @@ def main():
         fail_char_arr=fail_char_p1.copy(),
         prev_fire_mask=inp.prev_fire_mask,
         current_epoch=_to_epoch(inp.scan_time),
+        detection_policy=args.detection_policy,
     )
     t2 = datetime.now()
     print(f"  -> {len(confirmed)} confirmed  ({(t2-t1).total_seconds():.1f}s)")

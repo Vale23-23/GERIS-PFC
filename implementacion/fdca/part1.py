@@ -197,12 +197,17 @@ def _tpw_lut_indices(tpw_mm: float, lza_deg: float) -> tuple[int, int]:
 
 
 def _apply_tpw_correction(rad: float, offset: float, trans: float) -> float:
-    """Apply the TPW LUT correction used by the current FDCA implementation.
+    """Apply the ATBD 3.4.2.8 TPW radiance correction.
 
-    The supplied LUT stores ``offset`` as the multiplicative absorption
-    coefficient used with the radiance in this implementation.
+    The LUT ``offset`` is an additive radiance quantity (``ext_lambda``),
+    not a coefficient multiplying the observed radiance:
+
+        radcorr = (rad - ext_lambda * offset_lambda) / trans_lambda
+
+    In this implementation the LUT's offset column is already the required
+    additive extinction/absorption term, so it is subtracted once.
     """
-    return (rad - offset * rad) / trans
+    return (rad - offset) / trans
 
 # ── Solar reflectivity correction ────────────────────────────────────────────
 def _solar_correction(

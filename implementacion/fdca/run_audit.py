@@ -276,6 +276,7 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
         prev_fire_mask=prev_fire_mask,
         current_epoch=_to_epoch(inp.scan_time),
         trace_out=part2_trace,
+        detection_policy=args.detection_policy,
     )
     part2_seconds = (datetime.now() - started).total_seconds()
 
@@ -425,10 +426,12 @@ def part2_path_counts(part2_trace: list[dict]) -> dict:
     """Cuántos candidatos elimina cada condición de 3.4.2.14 y cómo se reetiquetan."""
     eliminated = [r for r in part2_trace if r.get("eliminated")]
     survived = [r for r in part2_trace if not r.get("eliminated")]
+    confirmed = [r for r in survived if not r.get("policy_rejected")]
     return {
         "n_candidates": len(part2_trace),
         "n_eliminated": len(eliminated),
-        "n_confirmed": len(survived),
+        "n_confirmed": len(confirmed),
+        "policy_rejected": len(survived) - len(confirmed),
         "eliminated_by_reason": {
             k: v for k, v in
             sorted(Counter(r.get("elim_reason", "?") for r in eliminated).items())},
@@ -665,7 +668,7 @@ def aggregate(scenes: list[dict]) -> dict:
         fp_ref.update({k: v for k, v in scene["fp_breakdown"]["reference_codes_at_fp"].items()})
         for key in ("n_candidates", "n_eliminated", "n_confirmed",
                     "reassign_glint_edge", "reassign_fog_edge",
-                    "temporally_filtered"):
+                    "temporally_filtered", "policy_rejected"):
             paths[key] += scene["part2_paths"][key]
         elim_reasons.update(scene["part2_paths"]["eliminated_by_reason"])
         final_codes.update(scene["part2_paths"]["final_codes"])
@@ -746,7 +749,11 @@ def build_report(args, timestamps: list[str], scenes: list[dict],
     add(f"- Semilla de muestreo: `{args.seed}`"
         + ("" if not args.timestamps else " (timestamps explícitos, sin muestreo)"))
     add(f"- Fuente del filtro temporal: `{args.temporal_source}`")
-    if args.temporal_source == "reference":
+    add(f"- Política de detección: `{args.detection_policy}`")
+    if args.detection_policy == "conservative":
+        add("  - Perfil empírico fuera de la especificación ATBD: suprime código 12 "
+            "y exige ΔBT7 observado ≥ 6 K para código 15; se usa sólo para "
+            "cuantificar el trade-off precisión/recall contra NOAA.")
         add("  - Ojo: el historial de 12 h sale de las máscaras de NOAA, así que"
             " el offset +20 (códigos 30-35) no es una predicción independiente."
             " Mirá las tablas por *etiqueta base* para una comparación limpia.")
@@ -827,6 +834,7 @@ def build_report(args, timestamps: list[str], scenes: list[dict],
     for reason, count in totals["part2_eliminated_by_reason"].items():
         add(f"  - `{reason}`: {count}")
     add(f"- Confirmados: {paths['n_confirmed']}")
+    add(f"- Rechazados por política empírica: {paths['policy_rejected']}")
     add(f"- Reasignados a F11 por borde de nube/glint: {paths['reassign_glint_edge']}")
     add(f"- Reasignados a F11 por borde de niebla: {paths['reassign_fog_edge']}")
     add(f"- Con historial temporal (+20): {paths['temporally_filtered']}")
@@ -905,9 +913,13 @@ def build_parser() -> argparse.ArgumentParser:
                         default=str(Path(__file__).resolve().parent / "config.yaml"))
     parser.add_argument("--download", action="store_true",
                         help="descargar de Hugging Face las escenas que falten")
-    parser.add_argument("--temporal-source", default="reference",
+    parser.add_argument("--temporal-source", default="none",
                         choices=("reference", "own", "none"),
                         help="de dónde sale el historial de 12 h del filtro temporal")
+    parser.add_argument("--detection-policy", default="atbd",
+                        choices=("atbd", "conservative"),
+                        help="atbd = categorías normativas; conservative = "
+                             "perfil empírico para subir precisión contra NOAA")
     parser.add_argument("--output-dir", default="results/audit")
     parser.add_argument("--run-id", default=None,
                         help="nombre de la subcarpeta de salida")
@@ -979,6 +991,7 @@ def main() -> None:
             "seed": args.seed,
             "only_with_fire": args.only_with_fire,
             "temporal_source": args.temporal_source,
+            "detection_policy": args.detection_policy,
         },
         "totals": totals,
         "fn_margins": fn_margin_table(pixel_rows),
