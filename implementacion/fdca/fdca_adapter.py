@@ -575,6 +575,52 @@ def get_tpw_estimate(lat: np.ndarray, lon: np.ndarray,
 
     return tpw.astype(np.float32)
 
+def get_tpw_real(
+    timestamp_dt: datetime,
+    region_cfg:   dict,
+    base:         str,
+    shape:        tuple[int, int],
+    lat:          np.ndarray,
+    lon:          np.ndarray,
+    verbose:      bool = True,
+) -> np.ndarray:
+    """
+    Real TPW [mm] from NCEP GFS (ATBD 3.4.2.x source), via
+    tpw_downloader.download_and_save(). Falls back to the monthly
+    climatology (get_tpw_estimate) on any failure -- network outage,
+    missing region bbox in config.yaml, GFS cycle not yet published, etc.
+    -- so a single bad scene never blocks a full pipeline run.
+    """
+    from fdca import tpw_downloader
+
+    try:
+        result = tpw_downloader.download_and_save(
+            timestamp=timestamp_dt,
+            region_cfg=region_cfg,
+            output_root=base,
+            goes_shape=shape,
+        )
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠ TPW GFS fetch raised {e!r}; falling back to climatology")
+        return get_tpw_estimate(lat, lon, timestamp_dt)
+
+    if result["status"] in ("downloaded", "exists"):
+        tpw = np.load(result["path"]).astype(np.float32)
+        if tpw.shape == shape and np.isfinite(tpw).any():
+            if verbose:
+                print(f"  {'TPW source':<22}: NCEP GFS "
+                      f"({result['status']}, cycle={result.get('gfs_cycle', 'cached')})")
+            return tpw
+        if verbose:
+            print(f"  ⚠ TPW GFS returned shape {tpw.shape} or all-NaN; "
+                  f"falling back to climatology")
+    elif verbose:
+        print(f"  ⚠ TPW GFS download failed "
+              f"({result.get('error', result['status'])}); falling back to climatology")
+
+    return get_tpw_estimate(lat, lon, timestamp_dt)
+
 def load_emissivity_camel(
     camel_nc_path: str,
     lat_grid: np.ndarray,
@@ -896,10 +942,11 @@ def load_fdca_input(
 
 
 
-    # ── TPW ───────────────────────────────────────────────────────────────────
-    tpw = get_tpw_estimate(lat2d, lon2d, dt)
+       # ── TPW ───────────────────────────────────────────────────────────────────
+    tpw = get_tpw_real(dt, region_cfg, base, shape, lat2d, lon2d, verbose=verbose)
     if verbose:
-        print(f"  {'TPW range [mm]':<22}: {tpw.min():.1f} – {tpw.max():.1f}  (estimación climatológica)")
+        print(f"  {'TPW range [mm]':<22}: {tpw.min():.1f} – {tpw.max():.1f}")
+    
 
     # ── Máscaras de superficie ────────────────────────────────────────────────
     masks = build_surface_masks(lat2d, lon2d, region_name=region)
