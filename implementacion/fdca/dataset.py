@@ -9,6 +9,18 @@ from dotenv import load_dotenv
 
 DEFAULT_HF_REPO_ID = "valentina2323/GERIS-Goes19-uruguay-fires"
 
+def default_dataset_root() -> str:
+    """
+    Resolve the dataset root independent of which branch checkout the user
+    is standing in (e.g. .../obtencion_imagenes/ vs .../testing-fdca-real/).
+
+    Follows the same per-machine .env pattern as GERIS_OUTPUT_ROOT /
+    GERIS_GOES2GO_CACHE: if GERIS_DATASET_ROOT is set, both branches can
+    point at one shared physical folder; otherwise falls back to the
+    relative "dataset" folder for simple single-checkout setups.
+    """
+    load_dotenv()
+    return os.getenv("GERIS_DATASET_ROOT", "dataset")
 
 def missing_required_files(timestamp: str, region: str, dataset_root: str | Path) -> list[Path]:
     """Return the files required to construct an FDCA input."""
