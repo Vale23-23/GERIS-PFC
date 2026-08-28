@@ -39,8 +39,9 @@ parser.add_argument("--region", default="uruguay",
     help="Region from config.yaml (default: uruguay)")
 parser.add_argument("--dataset-root", default=default_dataset_root(),
     help="Dataset root folder (default: $GERIS_DATASET_ROOT env var if set, else './dataset')")
-parser.add_argument("--config", default="config.yaml",
-    help="Path to config.yaml (default: config.yaml)")
+parser.add_argument("--config",
+    default=str(Path(__file__).resolve().parent / "config.yaml"),
+    help="Path to config.yaml (default: config.yaml bundled inside fdca/)")
 parser.add_argument("--download", action="store_true",
     help="Download the requested scene from Hugging Face when it is missing")
 parser.add_argument("--save-outputs", action="store_true",
