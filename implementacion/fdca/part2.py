@@ -18,10 +18,16 @@ def _std_reflb_part2(rad_diff_sigma: float) -> float:
     """
     return max(STD_REFLB_P2_FLOOR, STD_REFLB_P2_SCALE * rad_diff_sigma)
 
-def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
+def _eliminate_false_alarm(cand: FireCandidate, detail: Optional[dict] = None) -> tuple[bool, str]:
     """
     Threshold tests to eliminate false alarms (ATBD 3.4.2.14).
     If one of the three OR tests is true, the fire candidate is discarded.
+
+    Parameters
+    ----------
+    detail : dict, optional
+        Si se pasa, se llena con los valores intermedios de las tres
+        condiciones (auditoría; no cambia la decisión).
 
     Returns
     -------
@@ -39,13 +45,32 @@ def _eliminate_false_alarm(cand: FireCandidate) -> tuple[bool, str]:
     std_reflb_p2 = _std_reflb_part2(cand.rad_diff_sigma)
     refl_ok = (refl - reflb < std_reflb_p2) or _refl_along_scan_part2(cand)
 
-    if (bt7 - bt7_bkg < DELTA_BT7_TB7_MIN) and refl_ok:
+    cond1 = (bt7 - bt7_bkg < DELTA_BT7_TB7_MIN) and refl_ok
+    cond2 = (bt7 < BT7_WARM_NIGHT + day_off and bt7 - bt7_bkg < DELTA_BT7_TB7_MAX
+             and bt7 - cand.bt14_corr < DELTA_BT7_BT14_MAX and refl_ok)
+    cond3 = (bt7 < BT7_WARM_NIGHT + day_off and bt7_bkg < TB7_COLD_NIGHT + day_off
+             and cand.n_passes >= BKG_MAX_ITER and refl_ok)
+
+    if detail is not None:
+        detail.update({
+            "p2_day_off":        float(day_off),
+            "p2_std_reflb":      float(std_reflb_p2),
+            "p2_refl_minus_reflb": float(refl - reflb),
+            "p2_refl_ok":        bool(refl_ok),
+            "p2_bt7c_minus_bkg": float(bt7 - bt7_bkg),
+            "p2_bt7c_minus_bt14c": float(bt7 - cand.bt14_corr),
+            "p2_bt7_warm_thr":   float(BT7_WARM_NIGHT + day_off),
+            "p2_bkg_cold_thr":   float(TB7_COLD_NIGHT + day_off),
+            "p2_cond1":          bool(cond1),
+            "p2_cond2":          bool(cond2),
+            "p2_cond3":          bool(cond3),
+        })
+
+    if cond1:
         return True, "cond1"
-
-    if (bt7 < BT7_WARM_NIGHT + day_off and bt7 - bt7_bkg < DELTA_BT7_TB7_MAX and bt7 - cand.bt14_corr < DELTA_BT7_BT14_MAX and refl_ok):
+    if cond2:
         return True, "cond2"
-
-    if (bt7 < BT7_WARM_NIGHT + day_off and bt7_bkg < TB7_COLD_NIGHT + day_off and cand.n_passes >= BKG_MAX_ITER and refl_ok):
+    if cond3:
         return True, "cond3"
 
     return False, "" # returns the test that triggered the elimination  
@@ -184,6 +209,7 @@ def run_part2(
     fail_char_arr: np.ndarray,
     prev_fire_mask: Optional[np.ndarray],   # seconds-since-epoch when last fire
     current_epoch:  float,                  # seconds since 2001-01-01 for current scan
+    trace_out:      Optional[list] = None,  # audit only: one dict per candidate
 ) -> tuple[np.ndarray, np.ndarray, List[FireCandidate]]:
     """
     Part II: further refine the fire product.
@@ -196,6 +222,9 @@ def run_part2(
     prev_fire_mask  : full-disk array of seconds-since-2001 of last fire at each pixel
                       (None if not available -> temporal filtering disabled)
     current_epoch   : seconds since 2001-01-01 00:00:00 of current scan
+    trace_out       : optional list; if given, one dict per candidate is appended
+                      with every intermediate decision of Part II (audit only,
+                      does not change the result)
 
     Returns
     -------
@@ -208,29 +237,58 @@ def run_part2(
         sza_cos = np.cos(np.radians(cand.sza))
         is_day  = cand.is_day
 
+        trace: Optional[dict] = None
+        if trace_out is not None:
+            trace = {"i": i, "j": j, "fail_char_in": int(cand.fail_char)}
+            trace_out.append(trace)
+
         # ── 3.4.2.14 (first half): elimination of false alarms ─────────
-        eliminated, _reason_314 = _eliminate_false_alarm(cand)
+        eliminated, _reason_314 = _eliminate_false_alarm(cand, detail=trace)
+        if trace is not None:
+            trace["eliminated"] = bool(eliminated)
+            trace["elim_reason"] = _reason_314
         if eliminated:
             continue
         day_off = sza_cos * P2_DAY_OFFSET_COEF if is_day else 0.0
 
         # ── 3.4.2.14 (second half): re-evaluation of glint/cloud edge ─────
         fc = cand.fail_char
-        if _reassign_cloud_glint_edge(cand, day_off):
+        reassign_glint = _reassign_cloud_glint_edge(cand, day_off)
+        if reassign_glint:
             cand.fail_char = FailChar.F11
             fail_char_arr[i, j] = FailChar.F11
             fc = FailChar.F11
 
         # ── 3.4.2.15: second test of cloud edge/fog ───────────────────
-        if _reassign_fog_edge(cand, sza_cos):
+        reassign_fog = _reassign_fog_edge(cand, sza_cos)
+        if reassign_fog:
             cand.fail_char = FailChar.F11
             fail_char_arr[i, j] = FailChar.F11
             fc = FailChar.F11
+
+        if trace is not None:
+            trace["reassign_glint_edge"] = bool(reassign_glint)
+            trace["reassign_fog_edge"] = bool(reassign_fog)
 
         # ── 3.4.2.15: categorization + confidence upgrade ─────────────────
         fire_code = _assign_fire_category(cand, fire_mask)
 
         upgraded_code, flag_delta = _upgrade_confidence(cand)
+        if trace is not None:
+            thr1_h, thr2_h = _high_med_thresholds(cand, "high")
+            thr1_m, thr2_m = _high_med_thresholds(cand, "medium")
+            trace.update({
+                "fail_char_after_reassign": int(fc),
+                "base_code":     int(fire_code),
+                "upgraded_code": None if upgraded_code is None else int(upgraded_code),
+                "flag_delta":    int(flag_delta),
+                "conf_thr1_high":   float(thr1_h),
+                "conf_thr2_high":   float(thr2_h),
+                "conf_thr1_medium": float(thr1_m),
+                "conf_thr2_medium": float(thr2_m),
+                "conf_bt7c_minus_bkg7": float(cand.bt7_corr - cand.bt7_bkg),
+                "conf_bkg7_minus_bkg14": float(cand.bt7_bkg - cand.bt14_bkg),
+            })
         if upgraded_code is not None:
             fire_code = upgraded_code
             cand.fail_char += flag_delta
@@ -274,5 +332,10 @@ def run_part2(
         # ── Write final mask code (3.4.2.17/18: output) ──────────────────────
         fire_mask[i, j] = fire_code
         confirmed.append(cand)
+
+        if trace is not None:
+            trace["temporally_filtered"] = bool(temporally_filtered)
+            trace["final_code"] = int(fire_code)
+            trace["fail_char_out"] = int(cand.fail_char)
 
     return fire_mask, fail_char_arr, confirmed

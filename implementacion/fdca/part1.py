@@ -257,6 +257,73 @@ def calculate_albedo(L: int, W: int, sza: np.ndarray, refl2: Optional[np.ndarray
         return albedo, vis_brightness, is_day, sza_cos
     
 
+# ── Audit instrumentation ────────────────────────────────────────────────────
+class Stage:
+    """
+    Último "portón" (gate) que un píxel logró pasar dentro del loop de Parte I.
+
+    Es puramente instrumentación: no cambia ninguna decisión del algoritmo.
+    Si un píxel murió en el gate N, su stage queda en N-1, así que el gate
+    que lo mató es `stage + 1`.  Sirve para auditar recall (¿qué test mata a
+    los fuegos que la NOAA sí detecta?) y precisión (¿hasta dónde llegan los
+    falsos positivos?).
+    """
+    ENTER          = 0
+    SPACE_OK       = 1    # no es píxel de espacio (BT7 no es NaN)
+    LZA_OK         = 2    # LZA <= MAX_LOCAL_ZENITH
+    GLINT_OK       = 3    # no está en el block-out de glint/sub-solar
+    QUALITY_OK     = 4    # sin missing / saturación dura / BT inusable
+    ECO_OK         = 5    # ecosistema válido (no 150/151/152/153)
+    RAD_OK         = 6    # radiancias >= 0  → fire_mask = 100
+    BTDIFF_OK      = 7    # pasó el test de diferencia mínima BT7-BT14 (100/201)
+    CLOUD_DONE     = 8    # tests de nube evaluados (no descartan, sólo marcan)
+    ALONGSCAN_OK   = 9    # pasó along-scan reflectivity 3.4.2.4 (240/245)
+    BKG_OK         = 10   # background determinado (no 170)
+    QUICKPATH_OK   = 11   # pasó el atajo saturado / n_passes > max
+    NONFIRE_OK     = 12   # pasó el test de no-fuego sin flag
+    F1_OK          = 13   # pasó FailChar 1
+    F2_OK          = 14   # pasó FailChar 2
+    TPW_OK         = 15   # corrección TPW + Planck sin CONV_ERROR
+    BKGRAD_OK      = 16   # radiancias de background corregidas > 0
+    SOLARDIFF_OK   = 17   # correcciones solar + difracción OK
+    POSTCORR       = 18   # tests post-corrección 3.4.2.9 evaluados
+    DOZIER         = 19   # Dozier ejecutado (o salteado a propósito)
+    LASTCHANCE_OK  = 20   # Dozier válido o last-chance fire 3.4.2.11
+    AREA_OK        = 21   # área de píxel válida
+    CANDIDATE      = 22   # candidato registrado para Parte II
+
+    NAMES = {
+        0:  "espacio (BT7 NaN)",
+        1:  "LZA > 80",
+        2:  "glint/sub-solar block-out",
+        3:  "missing / saturado / BT inusable",
+        4:  "ecosistema inválido (150-153)",
+        5:  "radiancia negativa",
+        6:  "diff BT7-BT14 < 2K (100/201)",
+        7:  "-- (tests de nube no descartan)",
+        8:  "along-scan reflectivity (240/245)",
+        9:  "sin background (170)",
+        10: "atajo saturado / n_passes > 10",
+        11: "test no-fuego sin flag",
+        12: "FailChar 1 (BT7-BT14 < std_7b14b)",
+        13: "FailChar 2 (BT7-bkg7 < std_7b)",
+        14: "CONV_ERROR en corrección TPW",
+        15: "CONV_ERROR en background corregido",
+        16: "CONV_ERROR en solar/difracción",
+        17: "-- (post-corrección no descarta)",
+        18: "-- (Dozier no descarta)",
+        19: "last-chance fire falló",
+        20: "área de píxel inválida (188)",
+        21: "-- (candidato registrado)",
+        22: "candidato Parte I",
+    }
+
+    @classmethod
+    def killed_by(cls, stage_value: int) -> str:
+        """Nombre legible del gate que rechazó a un píxel con este stage."""
+        return cls.NAMES.get(int(stage_value), f"stage {stage_value}")
+
+
 # ── Main Part I function ──────────────────────────────────────────────────────
 def run_part1(
     # ── ABI band data ────────────────────────────────────────────────────────
@@ -294,9 +361,19 @@ def run_part1(
                                         # saved as int8: values > 127 suffer overflow
                                         # and are recovered by reinterpreting as uint8.
     data_quality: Optional[np.ndarray],
+    # ── Audit (optional, does not change any decision) ───────────────────────
+    diag_out: Optional[dict] = None,
 ) -> tuple[np.ndarray, np.ndarray, List[FireCandidate]]:
     """
     Part I: loop over all pixels, identify fire candidates, apply corrections.
+
+    Parameters
+    ----------
+    diag_out : dict, optional
+        Si se pasa un dict, se llena con los arrays intermedios de la corrida
+        (stage por píxel, thresholds contextuales, BTs corregidos, Dozier...).
+        Es sólo instrumentación para auditar el algoritmo: no altera el
+        resultado.  Ver `Stage` y `fdca.audit` para su uso.
 
     Returns
     -------
@@ -311,6 +388,37 @@ def run_part1(
     fail_char_arr = np.full((L, W), FailChar.NONE,      dtype=np.int32)
     candidates:  List[FireCandidate] = []
     fire_id_ctr  = 0
+
+    # ── Audit buffers (always filled, only exported when diag_out is given) ──
+    stage = np.zeros((L, W), dtype=np.int16)
+
+    def _nan_grid() -> np.ndarray:
+        return np.full((L, W), np.nan, dtype=np.float32)
+
+    d_n_passes      = np.full((L, W), -1, dtype=np.int16)
+    d_bt7_bkg       = _nan_grid()
+    d_bt14_bkg      = _nan_grid()
+    d_bt7_bkg_std   = _nan_grid()
+    d_bt14_bkg_std  = _nan_grid()
+    d_reflb         = _nan_grid()
+    d_rad_diff_sig  = _nan_grid()
+    d_std_7b14b     = _nan_grid()
+    d_std_7b        = _nan_grid()
+    d_std_reflb     = _nan_grid()
+    d_std_reflb_max = _nan_grid()
+    d_alb_bkg       = _nan_grid()
+    d_pass_along    = np.zeros((L, W), dtype=np.int8)
+    d_is_cloudy     = np.zeros((L, W), dtype=np.int8)
+    d_sat_flag      = np.zeros((L, W), dtype=np.int8)
+    d_t7_corr       = _nan_grid()
+    d_t14_corr      = _nan_grid()
+    d_tbkg7_corr    = _nan_grid()
+    d_tbkg14_corr   = _nan_grid()
+    d_fire_temp     = _nan_grid()
+    d_fire_frac     = _nan_grid()
+    d_frp           = _nan_grid()
+    d_dozier_valid  = np.zeros((L, W), dtype=np.int8)
+    d_skip_dozier   = np.zeros((L, W), dtype=np.int8)
 
     albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, sza, refl2)
 
@@ -365,16 +473,19 @@ def run_part1(
             if np.isnan(bt7[i, j]):
                 fire_mask[i, j] = FireMask.SPACE
                 continue
+            stage[i, j] = Stage.SPACE_OK
 
             # Satellite zenith angle test
             if lza[i, j] > MAX_LOCAL_ZENITH:
                 fire_mask[i, j] = FireMask.ZENITH_BLOCK
                 continue
+            stage[i, j] = Stage.LZA_OK
 
             # Sun-glint / sub-solar block-out (ATBD 3.4.2.3: code 60, advance to next pixel)
             if lza[i, j] < GLINT_THRESHOLD or glint_angle[i, j] < GLINT_THRESHOLD:
                 fire_mask[i, j] = FireMask.GLINT_BLOCK
                 continue
+            stage[i, j] = Stage.GLINT_OK
 
             # Bad/unusable pixels
             MISS_VAL = np.nan
@@ -390,6 +501,7 @@ def run_part1(
                 fire_mask[i, j] = FireMask.UNUS_CH7;   continue
             if bt14_eff[i, j] < MIN_BT:
                 fire_mask[i, j] = FireMask.UNUS_CH14;  continue
+            stage[i, j] = Stage.QUALITY_OK
 
             # ── Ecosystem / surface mask tests (ATBD 3.4.2.3) ────
             # Codes 150/151/152/153 taken directly from eco_mask_fixed.
@@ -402,10 +514,12 @@ def run_part1(
                 fire_mask[i, j] = FireMask.COAST_FRINGE;   continue
             if eco_code == FireMask.INLAND_WATER:
                 fire_mask[i, j] = FireMask.INLAND_WATER;   continue
+            stage[i, j] = Stage.ECO_OK
 
             # ── Radiance quality check ────────────────────────────────────────
             if rad7[i, j] < 0 or rad14_eff[i, j] < 0:
                 fire_mask[i, j] = FireMask.NEG_RAD;        continue
+            stage[i, j] = Stage.RAD_OK
 
             # ── Per ATBD 3.4.2.3: initialize valid pixels to FIRE_FREE (100) ─
             fire_mask[i, j] = FireMask.FIRE_FREE
@@ -419,6 +533,7 @@ def run_part1(
                 continue
             if abs(diff_bt) < 2.0 and (bt7[i, j] <= 273 or bt14_eff[i, j] <= 273):
                 fire_mask[i, j] = FireMask.TOO_COLD;       continue
+            stage[i, j] = Stage.BTDIFF_OK
 
             # ── Day-dependent thresholds ──────────────────────────────────────
             sc = sza_cos[i, j]
@@ -462,7 +577,9 @@ def run_part1(
                         elif bt14_eff[i, j] - bt15[i, j] > CLOUD_BT14_BT15_POS:
                             fire_mask[i, j] = FireMask.CLOUD_BT14_BT15_POS; is_cloudy = True
 
-                       
+            stage[i, j]      = Stage.CLOUD_DONE
+            d_is_cloudy[i, j] = 1 if is_cloudy else 0
+
             # ── Along-scan reflectivity test (ATBD 3.4.2.4) ──────────────────
             alb_ij  = albedo[i, j] if refl2 is not None else np.nan
             refl_ij = refl[i, j]
@@ -483,10 +600,13 @@ def run_part1(
                         if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
                             fire_mask[i, j] = FireMask.ALONG_SCAN_NIGHT; continue
 
+            stage[i, j] = Stage.ALONGSCAN_OK
+
             # ── Saturation flag ───────────────────────────────────────────────
             sat_flag = (bt7[i, j] >= SAT_FLAG_CH7 or bt14_eff[i, j] >= SAT_FLAG_CH14)
             if sat_flag:
                 fail_char_arr[i, j] = FailChar.F7
+            d_sat_flag[i, j] = 1 if sat_flag else 0
 
             # ── Background statistics (ATBD 3.4.2.5) ─────────────────────────
             # Reuse previous background if same scan element
@@ -518,12 +638,28 @@ def run_part1(
             # Background albedo (daylight only)
             alb_bkg = _background_albedo(bkg.vis_mean_bkg, sc, day_pixel)    
 
+            stage[i, j]          = Stage.BKG_OK
+            d_n_passes[i, j]     = n_pass
+            d_bt7_bkg[i, j]      = bkg.temp7_bkg_mean
+            d_bt14_bkg[i, j]     = bkg.temp14_bkg_mean
+            d_bt7_bkg_std[i, j]  = bkg.temp7_bkg_stddev
+            d_bt14_bkg_std[i, j] = bkg.temp14_bkg_stddev
+            d_reflb[i, j]        = bkg.reflb
+            d_rad_diff_sig[i, j] = bkg.rad_diff_sigma
+            d_std_7b14b[i, j]     = std_7b14b
+            d_std_7b[i, j]        = std_7b
+            d_std_reflb[i, j]     = std_reflb
+            d_std_reflb_max[i, j] = std_reflb_max
+            d_pass_along[i, j]    = 1 if pass_along else 0
+            d_alb_bkg[i, j]       = alb_bkg
+
             # ── Apply thresholds to identify fire pixels (ATBD 3.4.2.7) ──────
             # Saturated / max-iterations quick path
             if sat_flag or n_pass > BKG_MAX_ITER:
                 if ((bt7[i, j] - bt14_eff[i, j] < std_7b14b)
                         and (bt7[i, j] - bkg.temp7_bkg_mean < std_7b)):
                     continue   # Not a fire
+            stage[i, j] = Stage.QUICKPATH_OK
 
             fire_size_init = 0.0
             fire_temp_init = 0.0 if sat_flag else -9.05
@@ -533,6 +669,7 @@ def run_part1(
                     and (bt7[i, j] - bt14_eff[i, j] < 0
                          or bt7[i, j] - bkg.temp7_bkg_mean < 0)):
                 continue
+            stage[i, j] = Stage.NONFIRE_OK
 
             # FailChar = 1: pixel is NOT a fire (ATBD 3.4.2.7)
             # "the algorithm concludes that the pixel is a non-fire pixel"
@@ -542,6 +679,7 @@ def run_part1(
                 fc = FailChar.F1
                 fail_char_arr[i, j] = fc
                 continue   # Not a fire
+            stage[i, j] = Stage.F1_OK
 
             # FailChar = 2: pixel is NOT a fire (ATBD 3.4.2.7)
             if ((bt7[i, j] - bkg.temp7_bkg_mean < std_7b)
@@ -549,6 +687,7 @@ def run_part1(
                 fc = FailChar.F2
                 fail_char_arr[i, j] = fc
                 continue   # Not a fire
+            stage[i, j] = Stage.F2_OK
 
             fail_char_arr[i, j] = fc
 
@@ -579,6 +718,7 @@ def run_part1(
             T14_corr = float(planck_temp_from_coeffs(r14_corr, **coeffs_long))
             if T7_corr <= 0 or T14_corr <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
+            stage[i, j] = Stage.TPW_OK
 
             # Smoke/thin cloud correction (daylight, albedo diff in (0.025, 0.07))
             if day_pixel and refl2 is not None and not np.isnan(alb_ij) and not np.isnan(alb_bkg):
@@ -606,6 +746,7 @@ def run_part1(
 
             if r7_bkg_corr <= 0 or r14_bkg_corr <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
+            stage[i, j] = Stage.BKGRAD_OK
 
             # Solar reflectivity correction
             try:
@@ -635,6 +776,12 @@ def run_part1(
 
             if T7c <= 0 or T14c <= 0 or Tbc7 <= 0 or Tbc14 <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
+
+            stage[i, j]         = Stage.SOLARDIFF_OK
+            d_t7_corr[i, j]     = T7c
+            d_t14_corr[i, j]    = T14c
+            d_tbkg7_corr[i, j]  = Tbc7
+            d_tbkg14_corr[i, j] = Tbc14
 
             # ── Post-correction tests (ATBD 3.4.2.9) ──────────────────────────
             fc = int(fail_char_arr[i, j])
@@ -666,9 +813,11 @@ def run_part1(
                         fc = FailChar.F8
 
             fail_char_arr[i, j] = fc
+            stage[i, j] = Stage.POSTCORR
 
             # Pixels with fc ∈ {3,4,5,10} skip Dozier, go to last-chance
             skip_dozier = fc in (FailChar.F3, FailChar.F4, FailChar.F5, FailChar.F10)
+            d_skip_dozier[i, j] = 1 if skip_dozier else 0
 
             # ── Dozier sub-pixel characterization (ATBD 3.4.2.10) ─────────────
             doz = DozierResult()
@@ -687,6 +836,9 @@ def run_part1(
                     fc = doz.fail_char
                 elif doz.valid:
                     fail_char_arr[i, j] = FailChar.NONE
+
+            stage[i, j]          = Stage.DOZIER
+            d_dozier_valid[i, j] = 1 if doz.valid else 0
 
             # ── Pixel area (ATBD 3.4.2.10) ────────────────────────────────────
             pix_area = compute_pixel_area(i, j, latitudes, longitudes)
@@ -709,11 +861,14 @@ def run_part1(
                 else:
                     continue  # Not a fire
 
+            stage[i, j] = Stage.LASTCHANCE_OK
+
             # Recalculate pixel area if needed
             if pix_area < MIN_PIXEL_AREA or pix_area < 0:
                 pix_area = compute_pixel_area(i, j, latitudes, longitudes)
             if pix_area < 0:
                 fire_mask[i, j] = 188;  continue
+            stage[i, j] = Stage.AREA_OK
 
             doz.fire_area = float(doz.fire_frac or 0.0) * pix_area
 
@@ -777,5 +932,48 @@ def run_part1(
                 bkg=bkg,
             )
             candidates.append(cand)
+
+            stage[i, j]       = Stage.CANDIDATE
+            d_fire_temp[i, j] = doz.fire_temp
+            d_fire_frac[i, j] = doz.fire_frac
+            d_frp[i, j]       = frp_val
+
+    if diag_out is not None:
+        diag_out.update({
+            "stage":          stage,
+            "bt14_eff":       bt14_eff,
+            "rad14_eff":      rad14_eff,
+            "use_ch13":       use_ch13,
+            "refl":           refl,
+            "albedo":         albedo,
+            "vis_brightness": vis_brightness,
+            "is_day":         is_day,
+            "sza_cos":        sza_cos,
+            "eco_mask_fixed": eco_mask_fixed,
+            "n_passes":       d_n_passes,
+            "bt7_bkg":        d_bt7_bkg,
+            "bt14_bkg":       d_bt14_bkg,
+            "bt7_bkg_std":    d_bt7_bkg_std,
+            "bt14_bkg_std":   d_bt14_bkg_std,
+            "reflb":          d_reflb,
+            "rad_diff_sigma": d_rad_diff_sig,
+            "std_7b14b":      d_std_7b14b,
+            "std_7b":         d_std_7b,
+            "std_reflb":      d_std_reflb,
+            "std_reflb_max":  d_std_reflb_max,
+            "alb_bkg":        d_alb_bkg,
+            "pass_along":     d_pass_along,
+            "is_cloudy":      d_is_cloudy,
+            "sat_flag":       d_sat_flag,
+            "bt7_corr":       d_t7_corr,
+            "bt14_corr":      d_t14_corr,
+            "bt7_bkg_corr":   d_tbkg7_corr,
+            "bt14_bkg_corr":  d_tbkg14_corr,
+            "skip_dozier":    d_skip_dozier,
+            "dozier_valid":   d_dozier_valid,
+            "fire_temp":      d_fire_temp,
+            "fire_frac":      d_fire_frac,
+            "frp":            d_frp,
+        })
 
     return fire_mask, fail_char_arr, candidates
