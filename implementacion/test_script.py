@@ -10,12 +10,13 @@ Para cada escena:
 
 import os
 from pathlib import Path
+import glob
+from datetime import datetime
 import numpy as np
 import pandas as pd
 from collections import defaultdict
 
-from fdca.constants import FireMask, FailChar
-from fdca.constants import * 
+from fdca.constants import *
 from fdca.part1 import (
     run_part1, calculate_albedo,
     _tpw_lut_indices, _contextual_thresholds, _along_scan_reflectivity_test,
@@ -27,7 +28,7 @@ from fdca.fdca_adapter import load_fdca_input, build_tpw_lut
 
 
 def _looks_like_repo_root(p: Path) -> bool:
-    return (p / "implementacion").is_dir() and (p / "obtencion_imagenes").is_dir()
+    return (p / "implementacion" / "fdca").is_dir()
 
 def _default_repo_root() -> Path:
     try:
@@ -44,16 +45,28 @@ def _default_repo_root() -> Path:
 
 REPO_ROOT = Path(os.environ.get("GERIS_REPO_ROOT", _default_repo_root()))
 IMPLEMENTATION_ROOT = REPO_ROOT / "implementacion"
-DATASET_ROOT = REPO_ROOT / "obtencion_imagenes" / "dataset"
+DATASET_ROOT = Path(os.environ.get(
+    "GERIS_DATASET_ROOT", str(REPO_ROOT / "implementacion" / "data")
+))
 CONFIG_PATH = IMPLEMENTATION_ROOT / "fdca" / "config.yaml"
-MASK_DIR = DATASET_ROOT / "uruguay" / "ABI-L2-FDCF-Mask"
+MASK_DIR = Path(os.environ.get(
+    "GERIS_MASK_DIR", str(DATASET_ROOT / "uruguay" / "ABI-L2-FDCF-Mask")
+))
 eco_mask_path = IMPLEMENTATION_ROOT / "fdca" / "data" / "eco_mask.npy"
 eco_mask = np.load(eco_mask_path).astype(np.uint8)
 
 REGION = "uruguay"
-DEBUG_TIMESTAMPS = ["20251207_0550"]
-TARGET_CODES = {15: "LOW_PROB", 35: "TEMP_LOW"}
-MAX_PIXELS_PER_SCENE = 5
+DEBUG_TIMESTAMPS = ["20251117_1820"]
+TARGET_CODES = {
+    10: "PROCESSED", 11: "SATURATED", 12: "CLOUD_CONTAM",
+    13: "HIGH_PROB", 14: "MED_PROB", 15: "LOW_PROB",
+    30: "TEMP_PROCESSED", 31: "TEMP_SATURATED", 32: "TEMP_CLOUD",
+    33: "TEMP_HIGH_PROB", 34: "TEMP_MED_PROB", 35: "TEMP_LOW",
+}
+REFERENCE_FIRE_CODES = tuple(TARGET_CODES)
+# Limita el detalle mostrado por escena; se puede ampliar sin modificar el
+# diagnóstico con GERIS_MAX_PIXELS_PER_SCENE=100 python test_script.py.
+MAX_PIXELS_PER_SCENE = int(os.environ.get("GERIS_MAX_PIXELS_PER_SCENE", "5"))
 
 
 def _apply_tpw_correction_current(rad, offset, trans):
@@ -63,16 +76,16 @@ def _apply_tpw_correction_current(rad, offset, trans):
 def _classify_post_correction(T7c, T14c, Tbc7, Tbc14, day_pixel, sc, alb_ij, is_cloudy):
     offset_day = (BT7_MIN_SOLAR_COEF * sc) if day_pixel else 0.0
 
-    min_t14 = 285.0 if day_pixel else 265.0  
-    min_t7 = (285.0 + offset_day) if day_pixel else 265.0
+    min_t14 = 285.0
+    min_t7 = 285.0 + offset_day
     
     if T14c < min_t14 or T7c < min_t7:
         return FailChar.F3
-    if T14c - Tbc14 < 0.25:
-        if ((not np.isnan(alb_ij) and alb_ij > 0.15) or is_cloudy) and T7c - Tbc7 > 10.0:
+    if np.abs(T14c - Tbc14) < 0.25:
+        if ((not np.isnan(alb_ij) and alb_ij > 0.15) or is_cloudy) and T7c - Tbc14 > 10.0:
             return FailChar.F10
         return FailChar.F4
-    if T7c - Tbc7 < 2.0:
+    if T7c - Tbc14  < 2.0:
         return FailChar.F5
     return FailChar.NONE
 
@@ -90,18 +103,14 @@ def _evaluate_stage(stage_name, r7, r14, r7b, r14b, coeffs7, coeffs14, day_pixel
     if t7 <= 0 or t14 <= 0 or tb7 <= 0 or tb14 <= 0:
         return None, None, None, None, "CONV_ERROR"
         
-    # En etapas intermedias solo evaluamos límite absoluto (F3). Los contrastes van al final.
+    # Part I solo comprueba positividad en etapas intermedias. Los códigos
+    # F3/F4/F5/F10 se evalúan juntos después de la difracción.
     if stage_name != "difraccion":
-        offset_day = (BT7_MIN_SOLAR_COEF * sc) if day_pixel else 0.0
-        min_t14 = 285.0 if day_pixel else 265.0  
-        min_t7 = (285.0 + offset_day) if day_pixel else 265.0
-        
-        if t14 < min_t14 or t7 < min_t7:
-            fc = FailChar.F3
-        else:
-            fc = FailChar.NONE
+        fc = FailChar.NONE
     else:
-        fc = _classify_post_correction(t7, t14, tb7, tb14, day_pixel, sc, alb_ij, is_cloudy=False)
+        fc = _classify_post_correction(
+            t7, t14, tb7, tb14, day_pixel, sc, alb_ij, is_cloudy=False
+        )
         
     return t7, t14, tb7, tb14, fc
 
@@ -167,6 +176,74 @@ def _diagnose_pixel_chain(r7, r14, r7_bkg_raw, r14_bkg_raw, offset7, trans7,
     return stages_trace, first_fail_stage, final_fc
 
 
+def _check_emissivity_source(inp, ts, dataset_root, region, config_path):
+    """
+    Chequeo de si emiss7/emiss14 vienen del NetCDF de CAMEL o del placeholder,
+    replicando EXACTAMENTE la lógica real de fdca_adapter.load_fdca_input
+    (líneas ~837-857): busca camel_dir vía config.yaml -> region_cfg (con el
+    mismo fallback a "<dataset_root>/<region>/camel_emissivity" si el config
+    no lo especifica), y usa el mismo patrón de glob "*<mes 2 dígitos>Month*.nc".
+
+    Los valores de fallback en producción son 0.95 (emiss7) y 0.97 (emiss14)
+    — NO 1.0. Importante: incluso cuando SÍ se encuentra el .nc de CAMEL,
+    los píxeles con NaN en los datos reales (agua, huecos de grilla) se
+    rellenan con esos MISMOS valores. Por eso "valor == placeholder" en un
+    píxel puntual no prueba nada por sí solo — lo que sí es concluyente es
+    si el .nc se encontró o no para ese mes/región.
+    """
+    import yaml
+
+    dt = datetime.strptime(ts, "%Y%m%d_%H%M")
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    region_cfg = cfg["regions"][region]
+    base = os.path.join(str(dataset_root), region)
+    camel_dir = region_cfg.get("camel_emissivity_dir", os.path.join(base, "camel_emissivity"))
+    matches = sorted(glob.glob(os.path.join(camel_dir, f"*{dt.month:02d}Month*.nc")))
+    camel_encontrado = len(matches) > 0
+
+    report = {"month": f"{dt.month:02d}", "camel_dir": camel_dir, "nc_files_found": matches}
+
+    PLACEHOLDER = {"emiss7": 0.95, "emiss14": 0.97}
+    for name, arr in [("emiss7", inp.emiss7), ("emiss14", inp.emiss14)]:
+        arr = np.asarray(arr, dtype=float)
+        finite = arr[np.isfinite(arr)]
+        frac_placeholder = float(np.mean(np.isclose(finite, PLACEHOLDER[name]))) if finite.size else float("nan")
+        report[name] = {
+            "min": float(finite.min()) if finite.size else float("nan"),
+            "max": float(finite.max()) if finite.size else float("nan"),
+            "mean": float(finite.mean()) if finite.size else float("nan"),
+            "std": float(finite.std()) if finite.size else float("nan"),
+            f"frac_=={PLACEHOLDER[name]}": frac_placeholder,
+        }
+
+    if not camel_encontrado:
+        veredicto = (f"PLACEHOLDER TOTAL: no se encontró .nc de CAMEL para mes={dt.month:02d} "
+                     f"en {camel_dir} -> toda la escena usa emiss7=0.95 / emiss14=0.97 fijo")
+    elif report["emiss7"]["std"] < 1e-6 and report["emiss14"]["std"] < 1e-6:
+        # .nc encontrado pero el array salió igual constante -> algo falló en load_emissivity_camel
+        veredicto = ("⚠ .nc de CAMEL encontrado, pero el array resultante es constante "
+                     "(std≈0) — revisar load_emissivity_camel, puede haber fallado silenciosamente")
+    else:
+        veredicto = (f"CAMEL real ({os.path.basename(matches[0])}), con NaNs rellenados "
+                     f"puntualmente por 0.95/0.97 donde corresponda")
+    report["veredicto"] = veredicto
+
+    print(f"\n{'─'*90}")
+    print(f"Chequeo de fuente de emisividad — {ts} (mes={dt.month:02d}, region={region})")
+    print(f"  camel_dir (según config.yaml): {camel_dir}")
+    print(f"  .nc encontrados: {matches or '(ninguno)'}")
+    for name in ("emiss7", "emiss14"):
+        r = report[name]
+        frac_key = f"frac_=={PLACEHOLDER[name]}"
+        print(f"  {name}: min={r['min']:.4f} max={r['max']:.4f} mean={r['mean']:.4f} "
+              f"std={r['std']:.6f} frac_en_valor_fallback={r[frac_key]:.2%}")
+    print(f"  Veredicto: {veredicto}")
+    print(f"{'─'*90}")
+
+    return report
+
+
 def diagnose_scene(ts, stats):
     ref_mask_path = MASK_DIR / f"{ts}.npy"
     if not ref_mask_path.exists():
@@ -175,6 +252,8 @@ def diagnose_scene(ts, stats):
 
     inp = load_fdca_input(timestamp=ts, region=REGION, dataset_root=str(DATASET_ROOT), config_path=str(CONFIG_PATH), verbose=False)
     FPT = getattr(inp, "FPT", 0.0) or 0.0
+
+    emiss_report = _check_emissivity_source(inp, ts, DATASET_ROOT, REGION, CONFIG_PATH)
     lut_tpw = build_tpw_lut()
 
     fire_mask_p1, fail_char_p1, candidates = run_part1(
@@ -188,13 +267,27 @@ def diagnose_scene(ts, stats):
     )
 
     candidate_mask = np.zeros_like(ref_mask, dtype=bool)
-    for c in candidates: candidate_mask[c.i, c.j] = True
+    for c in candidates:
+        candidate_mask[c.i, c.j] = True
+
+    # Main metric: every final fire code in the reference must survive Part I
+    # and appear in the candidate list, regardless of confidence/temporal code.
+    reference_fire = np.isin(ref_mask, REFERENCE_FIRE_CODES)
+    p1_fn_coords = np.argwhere(reference_fire & ~candidate_mask)
+    n_reference_fire = int(reference_fire.sum())
+    n_p1_fn = len(p1_fn_coords)
+    p1_recall = 1.0 - n_p1_fn / max(n_reference_fire, 1)
+    print(f"\nRECALL PARTE I (todos los códigos de fuego): "
+          f"referencia={n_reference_fire} | candidatos={int(candidate_mask.sum())} | "
+          f"FN={n_p1_fn} | recall={p1_recall:.2%}")
 
     L, W = inp.bt7.shape
     albedo, vis_brightness, is_day, sza_cos = calculate_albedo(L, W, inp.sza, inp.refl2)
 
     use_hybrid = FPT > FPT_THRESHOLD
-    if use_hybrid and inp.bt13 is not None and inp.rad13 is not None:
+    use_ch13 = np.zeros(inp.bt7.shape, dtype=bool)
+    if (use_hybrid and inp.bt13 is not None and inp.rad13 is not None
+            and inp.coeffs13 is not None):
         rad13_in_ch7 = planck_rad_from_coeffs(inp.bt13, **inp.coeffs7)
         rad14_in_ch7 = planck_rad_from_coeffs(inp.bt14, **inp.coeffs7)
         use_ch13 = np.abs(inp.rad7 - rad13_in_ch7) < np.abs(inp.rad7 - rad14_in_ch7)
@@ -207,13 +300,23 @@ def diagnose_scene(ts, stats):
     rad14_in_7 = planck_rad_from_coeffs(bt14_eff, **inp.coeffs7)
     refl = inp.rad7 - rad14_in_7
     bad_rad = (inp.rad7 < 0) | (rad14_eff < 0)
+    if inp.rad13 is not None:
+        bad_rad |= use_ch13 & (inp.rad13 < 0)
     refl = np.where(bad_rad, -9999.0, refl)
 
     for code, code_name in TARGET_CODES.items():
-        fn_coords = np.argwhere((ref_mask == code) & ~candidate_mask)
+        ref_pixels = ref_mask == code
+        p1_fn_coords = np.argwhere(ref_pixels & ~candidate_mask)
+        print(f"\nDesglose {code_name}: referencia={int(ref_pixels.sum())} | "
+              f"FN Parte I={len(p1_fn_coords)} | "
+              f"recall={1 - len(p1_fn_coords) / max(int(ref_pixels.sum()), 1):.2%}")
+        stats[code_name]["reference"] += int(ref_pixels.sum())
+        stats[code_name]["p1_fn"] += len(p1_fn_coords)
+
+        # Detailed attribution below is only for Part-I false negatives.
+        fn_coords = p1_fn_coords
         if len(fn_coords) == 0: continue
         
-        stats[code_name]["total"] += len(fn_coords)
 
         for idx, (i, j) in enumerate(fn_coords):
             i, j = int(i), int(j)
@@ -227,6 +330,42 @@ def diagnose_scene(ts, stats):
             p1_mask_str = p1_mask.name if hasattr(p1_mask, 'name') else str(p1_mask)
             p1_fc_str = p1_fc.name if hasattr(p1_fc, 'name') else str(p1_fc)
 
+            # F1/F2 leave the mask at 100 (or preserve a cloud flag such as
+            # 215) but set fail_char before continuing. The fail_char is the
+            # authoritative rejection reason in that situation.
+            if int(p1_fc) != FailChar.NONE:
+                first_fail = f"part1_fail_char_{int(p1_fc)}"
+                stats[code_name]["fail_stage"][first_fail] += 1
+                stats[code_name]["final_fc"][int(p1_fc)] += 1
+                if idx < MAX_PIXELS_PER_SCENE:
+                    print(f"\n({i},{j}) {code_name} - SZA: {inp.sza[i,j]:.1f}° | "
+                          f"p1_mask: {p1_mask_str} | p1_fc: {p1_fc_str} | "
+                          f"pérdida: {first_fail}")
+                continue
+
+            # Cloud flags (200–230), including CLOUD_ALBEDO=215, are not an
+            # immediate rejection: Part I continues and may still create a
+            # candidate. Only hard-stop mask codes are attributed here.
+            hard_stop_masks = {
+                FireMask.SPACE, FireMask.ZENITH_BLOCK, FireMask.GLINT_BLOCK,
+                FireMask.MISS_CH7, FireMask.MISS_CH14,
+                FireMask.SAT_CH7, FireMask.SAT_CH14, FireMask.NEG_RAD,
+                FireMask.UNUS_CH7, FireMask.UNUS_CH14,
+                FireMask.BAD_ECOSYSTEM, FireMask.SEA_WATER,
+                FireMask.COAST_FRINGE, FireMask.INLAND_WATER,
+                FireMask.TOO_COLD, FireMask.ALONG_SCAN_NIGHT,
+                FireMask.ALONG_SCAN_DAY,
+            }
+            if int(p1_mask) in hard_stop_masks:
+                first_fail = f"part1_mask_{int(p1_mask)}"
+                stats[code_name]["fail_stage"][first_fail] += 1
+                stats[code_name]["final_fc"][int(p1_fc)] += 1
+                if idx < MAX_PIXELS_PER_SCENE:
+                    print(f"\n({i},{j}) {code_name} - SZA: {inp.sza[i,j]:.1f}° | "
+                          f"p1_mask: {p1_mask_str} | p1_fc: {p1_fc_str} | "
+                          f"pérdida: {first_fail}")
+                continue
+
             bkg = compute_background(i, j, inp.bt7, bt14_eff, refl, vis_brightness, albedo if inp.refl2 is not None else None, inp.land_mask, sza_cos, is_day)
             if bkg is None:
                 stats[code_name]["fail_stage"]["NO_BACKGROUND"] += 1
@@ -236,13 +375,14 @@ def diagnose_scene(ts, stats):
             trans7, trans14 = float(lut_tpw[2, col]), float(lut_tpw[3, col])
             offset7, offset14 = float(lut_tpw[4, col]), float(lut_tpw[5, col])
 
+            coeffs_long = inp.coeffs13 if use_ch13[i, j] else inp.coeffs14
             r7, r14 = float(inp.rad7[i, j]), float(rad14_eff[i, j])
             r7_bkg_raw = planck_rad_from_coeffs(bkg.temp7_bkg_mean, **inp.coeffs7)
-            r14_bkg_raw = planck_rad_from_coeffs(bkg.temp14_bkg_mean, **inp.coeffs14)
+            r14_bkg_raw = planck_rad_from_coeffs(bkg.temp14_bkg_mean, **coeffs_long)
             
             trace, first_fail, final_fc = _diagnose_pixel_chain(
                 r7, r14, r7_bkg_raw, r14_bkg_raw, offset7, trans7, offset14, trans14, 
-                float(inp.emiss7[i, j]), float(inp.emiss14[i, j]), inp.coeffs7, inp.coeffs14,
+                float(inp.emiss7[i, j]), float(inp.emiss14[i, j]), inp.coeffs7, coeffs_long,
                 float(inp.sza[i, j]), day_pixel, sc, alb_ij
             )
             
@@ -255,7 +395,12 @@ def diagnose_scene(ts, stats):
                 stats[code_name]["final_fc"][fc_val] += 1
 
             if idx < MAX_PIXELS_PER_SCENE:
+                em7_ij, em14_ij = float(inp.emiss7[i, j]), float(inp.emiss14[i, j])
+                em_flag = (" (== valor de fallback 0.95/0.97 — no implica que TODA la escena sea "
+                           "placeholder, ver veredicto de arriba)"
+                           if (np.isclose(em7_ij, 0.95) and np.isclose(em14_ij, 0.97)) else "")
                 print(f"\n({i},{j}) {code_name} - SZA: {inp.sza[i,j]:.1f}° | p1_mask: {p1_mask_str} | p1_fc: {p1_fc_str}")
+                print(f"  emiss7={em7_ij:.4f} emiss14={em14_ij:.4f}{em_flag}")
                 print(f"{'Etapa':<12} {'T7':>8} {'T14':>8} {'Tb7':>8} {'Tb14':>8} {'ΔT14':>8} {'fail_char'}")
                 for stage, data in trace.items():
                     if data['fc'] is None: continue
@@ -265,8 +410,13 @@ def diagnose_scene(ts, stats):
 
 
 stats = {
-    "LOW_PROB": {"total": 0, "fail_stage": defaultdict(int), "final_fc": defaultdict(int)},
-    "TEMP_LOW": {"total": 0, "fail_stage": defaultdict(int), "final_fc": defaultdict(int)}
+    code_name: {
+        "reference": 0,
+        "p1_fn": 0,
+        "fail_stage": defaultdict(int),
+        "final_fc": defaultdict(int),
+    }
+    for code_name in TARGET_CODES.values()
 }
 
 for ts in DEBUG_TIMESTAMPS:
@@ -277,9 +427,11 @@ print("RESUMEN DE RECALL BAJO")
 print("="*50)
 
 for cat, data in stats.items():
-    if data["total"] == 0: continue
-    print(f"\n{cat} — {data['total']} FN")
-    print("\nPerdidos por primera vez en:")
+    if data["reference"] == 0: continue
+    recall = 1.0 - data["p1_fn"] / data["reference"]
+    print(f"\n{cat} — referencia={data['reference']} | "
+          f"FN Parte I={data['p1_fn']} | recall Parte I={recall:.2%}")
+    print("\nPerdidos por primera vez en Parte I:")
     for stage, count in data["fail_stage"].items():
         print(f"  {stage:<45} {count}")
     
