@@ -29,7 +29,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from pathlib import Path
 from datetime import datetime
-
+from fdca.dataset import default_dataset_root
 # ── Arguments ───────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Run FDCA on GOES-19 data")
 
@@ -37,8 +37,8 @@ parser.add_argument("--timestamp", required=True,
     help='Timestamp to process, e.g. "20250905_1500"')
 parser.add_argument("--region", default="uruguay",
     help="Region from config.yaml (default: uruguay)")
-parser.add_argument("--dataset-root", default="dataset",
-    help="Dataset root folder (default: dataset)")
+parser.add_argument("--dataset-root", default=default_dataset_root(),
+    help="Dataset root folder (default: $GERIS_DATASET_ROOT env var if set, else './dataset')")
 parser.add_argument("--config", default="config.yaml",
     help="Path to config.yaml (default: config.yaml)")
 parser.add_argument("--download", action="store_true",
