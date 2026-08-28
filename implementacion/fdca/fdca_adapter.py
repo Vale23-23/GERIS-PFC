@@ -632,14 +632,14 @@ def load_emissivity_camel(
 
 
 # ── Función principal ─────────────────────────────────────────────────────────
-
 def load_fdca_input(
     timestamp: str,
     region:    str   = "uruguay",
-    dataset_root: str = "dataset",
+    dataset_root: str | None = None,
     config_path: str  = "config.yaml",
     verbose: bool = True,
 ) -> "FDCAInput":
+
     """
     Carga los .npy del pipeline para un timestamp dado y construye FDCAInput.
 
@@ -659,6 +659,9 @@ def load_fdca_input(
     ------
     FileNotFoundError  si faltan B07 o B14 (inputs mínimos obligatorios)
     """
+    if dataset_root is None:
+        from .dataset import default_dataset_root
+        dataset_root = default_dataset_root()
     import yaml
     #sys.path.insert(0, str(Path(config_path).parent.parent))
     from .algorithm import FDCAInput
