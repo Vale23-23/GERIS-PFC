@@ -630,13 +630,17 @@ def load_emissivity_camel(
         emiss14_flat.reshape(lat_grid.shape),
     )
 
+# config.yaml ships inside the fdca package itself — resolve it relative to
+# this file, not the caller's cwd, so `load_fdca_input` works the same way
+# whether invoked from implementacion/, from inside fdca/, or from a Colab notebook
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 # ── Función principal ─────────────────────────────────────────────────────────
 def load_fdca_input(
     timestamp: str,
     region:    str   = "uruguay",
     dataset_root: str | None = None,
-    config_path: str  = "config.yaml",
+    config_path: str | None  = None,
     verbose: bool = True,
 ) -> "FDCAInput":
 
@@ -647,8 +651,8 @@ def load_fdca_input(
     ----------
     timestamp    : str   formato "YYYYMMDD_HHMM", ej. "20250905_1500"
     region       : str   nombre de región del config.yaml
-    dataset_root : str   raíz del dataset (donde están las carpetas por banda)
-    config_path  : str   ruta al config.yaml
+    dataset_root : str | None  raíz del dataset (donde están las carpetas por banda)
+    config_path  : str | None   ruta al config.yaml; si es None, usa el config.yaml empaquetado junto a fdca_adapter.py
     verbose      : bool  mostrar resumen de los arrays cargados
 
     Returns
@@ -659,9 +663,13 @@ def load_fdca_input(
     ------
     FileNotFoundError  si faltan B07 o B14 (inputs mínimos obligatorios)
     """
+    
     if dataset_root is None:
         from .dataset import default_dataset_root
         dataset_root = default_dataset_root()
+        
+    if config_path is None:
+        config_path = str(DEFAULT_CONFIG_PATH)
     import yaml
     #sys.path.insert(0, str(Path(config_path).parent.parent))
     from .algorithm import FDCAInput
