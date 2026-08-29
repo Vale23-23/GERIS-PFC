@@ -23,17 +23,47 @@ def default_dataset_root() -> str:
     return os.getenv("GERIS_DATASET_ROOT", "dataset")
 
 def missing_required_files(timestamp: str, region: str, dataset_root: str | Path) -> list[Path]:
-    """Return the files required to construct an FDCA input."""
+    """Return the files required to construct an FDCA input.
+
+    B02, B13 and B15 are intentionally excluded: fdca_adapter.py treats them
+    as optional (refl2, the hybrid-longwave band, and the BT15 cloud test all
+    degrade gracefully when they're absent).
+
+    TPW-GFS and CAMEL V3 emissivity ARE required here even though
+    fdca_adapter.py currently falls back to climatology/placeholder values
+    when they're missing -- that fallback exists for algorithm development,
+    not something this reproducible-dataset check should mask.
+    """
     base = Path(dataset_root) / region
+    month = timestamp[4:6]
+
     required = [
         base / "ABI-L1b-Rad-B07" / f"{timestamp}.npy",
         base / "ABI-L1b-Rad-B14" / f"{timestamp}.npy",
         base / "ABI-L1b-Rad-B07" / f"{timestamp}_planck.json",
         base / "ABI-L1b-Rad-B14" / f"{timestamp}_planck.json",
         base / "geometry.json",
+        base / "TPW-GFS" / f"{timestamp}.npy",
     ]
-    return [path for path in required if not path.exists()]
+    missing = [path for path in required if not path.exists()]
 
+    # CAMEL V3 climatology filenames are month-dependent, not a fixed name
+    # (e.g. CAM5K30EMCLIM_emis_climatology_07Month_V003.nc), so they need a
+    # glob check instead of a plain Path.exists().
+    camel_dir = base / "camel_emissivity"
+    if not camel_dir.exists() or not list(camel_dir.glob(f"*{month}Month*.nc")):
+        missing.append(camel_dir / f"*{month}Month*.nc")
+
+    # The TPW LUT ships with the package (fdca/data/tpw_lut.csv), not with
+    # the per-timestamp HF dataset. build_tpw_lut() has no fallback if it's
+    # missing, so it's checked here too -- but note download_timestamp()
+    # cannot fetch it (see ensure_timestamp_data below).
+    tpw_lut_path = Path(__file__).resolve().parent / "data" / "tpw_lut.csv"
+    if not tpw_lut_path.exists():
+        missing.append(tpw_lut_path)
+
+    return missing
+#tarea: cambiar para que saque de HF eco_mask y tpw_lut
 
 def download_timestamp(
     timestamp: str,
@@ -60,6 +90,7 @@ def download_timestamp(
             f"{region}/*/{timestamp}_dqf.npy",
             f"{region}/geometry.json",
             f"{region}/camel_emissivity/*{month}Month*.nc",
+            f"{region}/TPW-GFS/*{timestamp}*.npy",
         ],
         local_dir=str(dataset_root),
     )
@@ -80,15 +111,22 @@ def ensure_timestamp_data(
         missing = missing_required_files(timestamp, region, dataset_root)
 
     if missing:
+        tpw_lut_path = Path(__file__).resolve().parent / "data" / "tpw_lut.csv"
         missing_text = "\n".join(f"  - {path}" for path in missing)
         command = (
             "python -m fdca.run_part1 "
             f"--timestamp {timestamp} --region {region} "
             f"--dataset-root {dataset_root} --download"
         )
+        extra_note = (
+            f"\n\nNota: {tpw_lut_path} no se descarga de Hugging Face (viene con "
+            "el paquete); si falta, revisá el checkout del repo en vez de usar --download."
+            if tpw_lut_path in missing else ""
+        )
         raise FileNotFoundError(
             "Faltan archivos obligatorios para esta escena:\n"
             f"{missing_text}\n\n"
             "Ejecutá nuevamente con --download para obtenerlos desde Hugging Face:\n"
             f"  {command}"
+            f"{extra_note}"
         )
