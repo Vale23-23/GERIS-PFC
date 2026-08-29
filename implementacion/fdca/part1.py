@@ -671,7 +671,7 @@ def run_part1(
 
             # Non-fire tests (no flag recorded)
             if (refl_ij < std_reflb and bt7[i, j] < 320.0
-                    and (bt7[i, j] - bt14_eff[i, j] < 0
+                    or (bt7[i, j] - bt14_eff[i, j] < 0
                          or bt7[i, j] - bkg.temp7_bkg_mean < 0)):
                 continue
             stage[i, j] = Stage.NONFIRE_OK
