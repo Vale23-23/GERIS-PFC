@@ -3,8 +3,8 @@ Script to run FDCA on a timestamp downloaded by pipeline.py
 and generate figures that show effect of part I and part II.
 
 Usage:
-  python run_fdca.py --timestamp 20250905_1500 --region uruguay
-  python run_fdca.py --timestamp 20250905_1500 --region uruguay --save-outputs
+  python -m fdca.run_fdca --timestamp 20250905_1500 --region uruguay
+  python -m fdca.run_fdca --timestamp 20250905_1500 --region uruguay --save-outputs
 
 Outputs generated in figures/<timestamp>/:
   00_inputs.png          -> BT7, BT14 and SZA (algorithm inputs)
