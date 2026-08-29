@@ -952,7 +952,11 @@ def load_fdca_input(
     masks = build_surface_masks(lat2d, lon2d, region_name=region)
 
     # ── LUT TPW ───────────────────────────────────────────────────────────────
-    lut_tpw = build_tpw_lut()
+    # Universal ATBD table, shared across all regions -> lives at the dataset
+    # root, not under base = dataset_root/region, and no longer at the
+    # package-bundled path (fdca/data/tpw_lut.csv is now unused fallback only).
+    tpw_lut_path = os.path.join(dataset_root, "tpw_lut.csv")
+    lut_tpw = build_tpw_lut(tpw_lut_path)
 
     # ── FPT: Focal Plane Temperature de ABI ──────────────────────────────────
     # ABI en GOES-19 opera a ~85-87 K (criogénico) → por debajo del umbral 90 K
@@ -967,7 +971,10 @@ def load_fdca_input(
     # ── FPT: Focal Plane Temperature de ABI (ATBD 3.4.2.2) ───────────────────
     FPT = load_fpt_flag(base, timestamp)
     data_quality = load_data_quality(base, timestamp)
-    eco_mask = load_static_eco_mask(shape)
+    # Per-region fixed grid mask, now sourced from the dataset (HF), not
+    # the package-bundled path (fdca/data/eco_mask.npy is unused fallback only).
+    eco_mask_path = os.path.join(base, "eco_mask.npy")
+    eco_mask = load_static_eco_mask(shape, eco_mask_path)
 
     # ── Armar FDCAInput ───────────────────────────────────────────────────────
     inp = FDCAInput(
