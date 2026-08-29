@@ -58,12 +58,17 @@ def missing_required_files(timestamp: str, region: str, dataset_root: str | Path
     # the per-timestamp HF dataset. build_tpw_lut() has no fallback if it's
     # missing, so it's checked here too -- but note download_timestamp()
     # cannot fetch it (see ensure_timestamp_data below).
-    tpw_lut_path = Path(__file__).resolve().parent / "data" / "tpw_lut.csv"
+    # Both now live in the dataset itself (HF), not the package.
+    tpw_lut_path = Path(dataset_root) / "tpw_lut.csv"
     if not tpw_lut_path.exists():
         missing.append(tpw_lut_path)
 
+    eco_mask_path = base / "eco_mask.npy"
+    if not eco_mask_path.exists():
+        missing.append(eco_mask_path)
+
     return missing
-#tarea: cambiar para que saque de HF eco_mask y tpw_lut
+
 
 def download_timestamp(
     timestamp: str,
@@ -91,6 +96,8 @@ def download_timestamp(
             f"{region}/geometry.json",
             f"{region}/camel_emissivity/*{month}Month*.nc",
             f"{region}/TPW-GFS/*{timestamp}*.npy",
+            f"{region}/eco_mask.npy",
+            "tpw_lut.csv",
         ],
         local_dir=str(dataset_root),
     )
@@ -118,11 +125,7 @@ def ensure_timestamp_data(
             f"--timestamp {timestamp} --region {region} "
             f"--dataset-root {dataset_root} --download"
         )
-        extra_note = (
-            f"\n\nNota: {tpw_lut_path} no se descarga de Hugging Face (viene con "
-            "el paquete); si falta, revisá el checkout del repo en vez de usar --download."
-            if tpw_lut_path in missing else ""
-        )
+
         raise FileNotFoundError(
             "Faltan archivos obligatorios para esta escena:\n"
             f"{missing_text}\n\n"
