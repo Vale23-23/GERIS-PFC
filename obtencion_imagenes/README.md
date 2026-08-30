@@ -24,10 +24,10 @@ The DQF (Data Quality Flag) field of the FDCF product indicates:
 
 ```
 obtencion_imagenes/
-├── config.yaml      ← Configuration: what to download and from which region
-├── pipeline.py      ← The main script you'll use
-├── downloader.py    ← Internal download logic (do not touch)
-├── manifest.py      ← Log of what was downloaded (do not touch)
+├── config.yaml      <- Configuration: what to download and from which region
+├── pipeline.py      <- The main script you'll use
+├── downloader.py    <- Internal download logic (do not touch)
+├── manifest.py      <- Log of what was downloaded (do not touch)
 ```
 
 ---
@@ -219,20 +219,22 @@ Files are saved in a `dataset/` folder inside `obtencion_imagenes/`, organized a
 
 ```
 dataset/
-└── uruguay/
+└── uruguay/ 
     ├── ABI-L1b-Rad-B07/
-    │   ├── 20250901_1200.npy              ← raw radiance (product's native unit)
-    │   ├── 20250901_1200_planck.json      ← real Planck coefficients for that file (IR bands only)
-    │   └── units.json                     ← unit metadata for the product (once per folder)
+    │   ├── 20250901_1200.npy              <- raw radiance (product's native unit)
+    │   ├── 20250901_1200_planck.json      <- real Planck coefficients for that file (IR bands only)
+    │   └── units.json                     <- unit metadata for the product (once per folder)
     ├── ABI-L1b-Rad-B07-DFQ/
-    │   └── 20250901_1200_dqf.npy          ← per-pixel DQF of B07 (not to be confused with the fire mask's DQF)
+    │   └── 20250901_1200_dqf.npy          <- per-pixel DQF of B07 (not to be confused with the fire mask's DQF)
     ├── ABI-L1b-Rad-B14/
     │   └── ...
     ├── ABI-L2-FDCF/
     │   └── ...
+    ├── TPW-GFS/
+    │   └── 20250901_1200.npy              <- GFS Total Precipitable Water, regridded to the ABI pixel grid
     ├── camel_emissivity/
     │   └── CAM5K30EMCLIM_emis_climatology_09Month_V003.nc
-    ├── geometry.json                      ← fixed satellite geometry (x/y grid + ellipsoid)
+    ├── geometry.json                      <- fixed satellite geometry (x/y grid + ellipsoid)
     └── manifest.json ← log of everything downloaded
 ```
 
@@ -269,6 +271,16 @@ by hand, but it's useful to know what each one is for:
 
 - **`{timestamp}_dqf.npy`** (B07 only, in the `ABI-L1b-Rad-B07-DFQ/` folder): per-pixel Data
   Quality Flag for B07's radiance.  This DQF comes from the L1b file itself and is used to detect pixels with focal plane temperature failures or other radiometric quality issues.
+
+- **`TPW-GFS/*.npy`**: unlike every other product, these files are **not** named by ABI
+  scene timestamp. GFS only publishes an analysis every 6 hours (00/06/12/18 UTC), so this
+  file is named after the nearest GFS cycle a scene falls into, not the scene's own
+  timestamp — e.g. a scene at `20250901_1830` reads TPW from `TPW-GFS/20250901_1800.npy`.
+  This means every scene within the same 6-hour window shares one file: the pipeline
+  downloads and regrids it once per cycle instead of once per scene. If you're looking for
+  the TPW file for a specific scene and don't find a file matching its exact timestamp,
+  that's expected — look for the file at or before that time, rounded down to the nearest
+  multiple of 6 hours.
 
 The `manifest.json` file is an automatic log of everything that was downloaded, with status and dimensions. There's no need to open it manually.
 
