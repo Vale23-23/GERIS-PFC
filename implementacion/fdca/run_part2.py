@@ -1,4 +1,4 @@
-"""Command-line runner for FDCA Part I."""
+"""Command-line runner for FDCA Part I + Part II."""
 
 from __future__ import annotations
 
@@ -11,11 +11,15 @@ import numpy as np
 from .dataset import DEFAULT_HF_REPO_ID, default_dataset_root, ensure_timestamp_data
 from .fdca_adapter import load_fdca_input
 from .part1 import run_part1
+from .part2 import run_part2
+from .algorithm import _to_epoch
+
+FIRE_CODES = (10, 11, 12, 13, 14, 15, 30, 31, 32, 33, 34, 35)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run FDCA Part I on one GOES-19 scene"
+        description="Run FDCA Part I + Part II on one GOES-19 scene"
     )
     parser.add_argument("--timestamp", required=True, help="Scene, e.g. 20251117_1820")
     parser.add_argument("--region", default="uruguay")
@@ -28,7 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Download the requested scene from Hugging Face when it is missing",
     )
     parser.add_argument("--repo-id", default=DEFAULT_HF_REPO_ID, help=argparse.SUPPRESS)
-    parser.add_argument("--output-dir", default="results/part1")
+    parser.add_argument("--output-dir", default="results/part2")
+    parser.add_argument(
+        "--prev-fire-mask",
+        default=None,
+        help="Path to a .npy file with seconds-since-2001 of last fire per pixel, "
+             "for temporal filtering (ATBD 3.4.2.16). Disabled by default: reusing "
+             "a file generated FROM THIS SAME timestamp will self-contaminate "
+             "(elapsed=0 trivially satisfies the temporal window).",
+    )
     return parser
 
 
@@ -42,7 +54,7 @@ def main() -> None:
         repo_id=args.repo_id,
     )
 
-    print(f"FDCA Part I | region={args.region} | timestamp={args.timestamp}")
+    print(f"FDCA Part I + II | region={args.region} | timestamp={args.timestamp}")
     inp = load_fdca_input(
         timestamp=args.timestamp,
         region=args.region,
@@ -78,26 +90,47 @@ def main() -> None:
         eco_mask=inp.eco_mask,
         data_quality=inp.data_quality,
     )
+    print(f"Part I complete: {len(candidates):,} candidates")
+
+    prev_fire_mask = None
+    if args.prev_fire_mask:
+        prev_fire_mask = np.load(args.prev_fire_mask)
+        if prev_fire_mask.shape != fire_mask.shape:
+            raise ValueError(
+                f"--prev-fire-mask shape {prev_fire_mask.shape} does not match "
+                f"scene shape {fire_mask.shape}"
+            )
+
+    fire_mask, fail_char, confirmed = run_part2(
+        candidates=candidates,
+        fire_mask=fire_mask,
+        fail_char_arr=fail_char,
+        prev_fire_mask=prev_fire_mask,
+        current_epoch=_to_epoch(inp.scan_time),
+    )
 
     output_dir = (Path(args.output_dir) / args.timestamp).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    np.save(output_dir / "fire_mask_part1.npy", fire_mask)
-    np.save(output_dir / "fail_char_part1.npy", fail_char)
+    np.save(output_dir / "fire_mask_part2.npy", fire_mask)
+    np.save(output_dir / "fail_char_part2.npy", fail_char)
     np.save(
-        output_dir / "candidates_part1.npy",
-        np.array([(candidate.i, candidate.j) for candidate in candidates], dtype=np.int32),
+        output_dir / "confirmed_part2.npy",
+        np.array([(c.i, c.j) for c in confirmed], dtype=np.int32),
     )
+
     summary = {
         "timestamp": args.timestamp,
         "region": args.region,
         "shape": list(fire_mask.shape),
         "n_candidates": len(candidates),
-        "n_fire_pixels": int(np.count_nonzero(fire_mask)),
+        "n_confirmed": len(confirmed),
+        "n_fire_pixels": int(np.count_nonzero(np.isin(fire_mask, FIRE_CODES))),
+        "temporal_filter_enabled": prev_fire_mask is not None,
     }
     with open(output_dir / "summary.json", "w", encoding="utf-8") as file:
         json.dump(summary, file, indent=2)
 
-    print(f"Part I complete: {len(candidates):,} candidates")
+    print(f"Part II complete: {len(confirmed):,} confirmed")
     print(f"Results saved in: {output_dir}")
 
 
