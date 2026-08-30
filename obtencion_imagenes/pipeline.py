@@ -20,6 +20,8 @@ import manifest
 from dotenv import load_dotenv
 load_dotenv()   # Reads .env from repo root if it exists; doesn't fail if missing
 
+from tpw_downloader import dedupe_by_cycle, download_and_save
+
 
 def load_config(path="config.yaml"):
     with open(path) as f:
@@ -424,6 +426,14 @@ def cmd_download_tpw_gfs(timestamps, region_cfg, output_root, max_workers):
     target grid shape from an already-downloaded IR band (B07/B13/B14) for
     this region/timestamp, so it needs those .npy files on disk already.
 
+    GFS only publishes an analysis every 6h (00/06/12/18 UTC), so many ABI
+    scene timestamps collapse onto the same GFS cycle and the same output
+    file (see tpw_downloader.cycle_path_for_timestamp). Dedup to one job per
+    cycle BEFORE dispatching to the thread pool -- otherwise concurrent
+    workers for timestamps sharing a cycle race on the same file: each sees
+    "does not exist yet" and re-downloads/overwrites it (harmless but wasteful,
+    and can show spurious "downloaded" counts higher than the true cycle count).
+
     No-ops with a single warning (instead of failing) if the optional deps
     (cfgrib/eccodes/scipy) are not installed on this machine.
     """
@@ -436,13 +446,16 @@ def cmd_download_tpw_gfs(timestamps, region_cfg, output_root, max_workers):
               "'sudo apt install libeccodes-dev' on Linux).")
         return []
 
-    print(f"\n🌧️  Downloading GFS TPW for {len(timestamps)} timestamps...\n")
+    unique_cycles = tpw_downloader.dedupe_by_cycle(timestamps)
+    print(f"\n🌧️  Downloading GFS TPW for {len(unique_cycles)} cycles "
+          f"({len(timestamps)} scenes)...\n")
+
     icon_map = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(tpw_downloader.download_and_save, ts, region_cfg, output_root): ts
-            for ts in timestamps
+            executor.submit(tpw_downloader.download_and_save, cycle_dt, region_cfg, output_root): cycle_dt
+            for cycle_dt in unique_cycles
         }
         for future in as_completed(futures):
             result = future.result()
@@ -457,9 +470,9 @@ def cmd_download_tpw_gfs(timestamps, region_cfg, output_root, max_workers):
     downloaded = sum(1 for r in results if r["status"] == "downloaded")
     skipped    = sum(1 for r in results if r["status"] == "exists")
     errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
-    print(f"  ✔ TPW-GFS: downloaded={downloaded}  existing={skipped}  errors={errors}")
+    print(f"  ✔ TPW-GFS: downloaded={downloaded}  existing={skipped}  errors={errors}  "
+          f"(covering {len(timestamps)} scenes)")
     return results
-
 
 def cmd_download_tpw(args, cfg):
     """Standalone TPW-only download, mirrors cmd_download_camel's pattern."""
