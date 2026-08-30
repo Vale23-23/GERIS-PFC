@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-
+from .tpw_downloader import cycle_path_for_timestamp
 DEFAULT_HF_REPO_ID = "valentina2323/GERIS-Goes19-uruguay-fires"
 
 def default_dataset_root() -> str:
@@ -43,7 +43,9 @@ def missing_required_files(timestamp: str, region: str, dataset_root: str | Path
         base / "ABI-L1b-Rad-B07" / f"{timestamp}_planck.json",
         base / "ABI-L1b-Rad-B14" / f"{timestamp}_planck.json",
         base / "geometry.json",
-        base / "TPW-GFS" / f"{timestamp}.npy",
+        Path(cycle_path_for_timestamp(
+            datetime.strptime(timestamp, "%Y%m%d_%H%M"), str(base)
+        )),
     ]
     missing = [path for path in required if not path.exists()]
 
@@ -101,7 +103,7 @@ def download_timestamp(
             f"{region}/*/{timestamp}_dqf.npy",
             f"{region}/geometry.json",
             f"{region}/camel_emissivity/*{month}Month*.nc",
-            f"{region}/TPW-GFS/{_cycle_str}.npy",,
+            f"{region}/TPW-GFS/{_cycle_str}.npy",
             f"{region}/eco_mask.npy",
             "tpw_lut.csv",
         ],
