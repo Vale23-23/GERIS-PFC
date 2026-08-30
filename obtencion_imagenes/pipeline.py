@@ -445,6 +445,17 @@ def cmd_download_tpw_gfs(timestamps, region_cfg, output_root, max_workers):
               "eccodes may also need a system package, e.g. "
               "'sudo apt install libeccodes-dev' on Linux).")
         return []
+    # Target grid is fixed per region regardless of which scene/cycle we're
+    # downloading TPW for. Infer it once, explicitly, from any already
+    # downloaded IR band -- never let download_and_save() infer it from the
+    # cycle timestamp itself, since GFS cycles (00/06/12/18 UTC) rarely
+    # coincide with an actual downloaded ABI scene timestamp, and a failed
+    # inference silently falls back to un-regridded native GFS resolution.
+    goes_shape = tpw_downloader._infer_goes_shape(output_root, timestamps[0])
+    if goes_shape is None:
+        print("⚠️  Could not determine ABI grid shape from downloaded bands; "
+              "TPW will not be regridded correctly. Run the main download "
+              "step first.")
 
     unique_cycles = tpw_downloader.dedupe_by_cycle(timestamps)
     print(f"\n🌧️  Downloading GFS TPW for {len(unique_cycles)} cycles "
@@ -454,8 +465,7 @@ def cmd_download_tpw_gfs(timestamps, region_cfg, output_root, max_workers):
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(tpw_downloader.download_and_save, cycle_dt, region_cfg, output_root): cycle_dt
-            for cycle_dt in unique_cycles
+            executor.submit(tpw_downloader.download_and_save, cycle_dt, region_cfg, output_root, goes_shape): cycle_dt            for cycle_dt in unique_cycles
         }
         for future in as_completed(futures):
             result = future.result()
