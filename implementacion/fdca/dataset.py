@@ -1,7 +1,7 @@
 """Dataset helpers for reproducible FDCA scene downloads."""
 
 from __future__ import annotations
-
+from datetime import datetime
 import os
 from pathlib import Path
 
@@ -84,7 +84,13 @@ def download_timestamp(
     dataset_root.mkdir(parents=True, exist_ok=True)
     month = timestamp[4:6]
     token = os.getenv("HF_TOKEN") or None
-
+    # TPW-GFS files are now keyed by GFS cycle (00/06/12/18 UTC), not by ABI
+    # timestamp — resolve the cycle this scene falls into before building the pattern.
+    _scene_dt = datetime.strptime(timestamp, "%Y%m%d_%H%M")
+    _cycle_hour = (_scene_dt.hour // 6) * 6
+    _cycle_str = _scene_dt.replace(
+        hour=_cycle_hour, minute=0, second=0, microsecond=0
+    ).strftime("%Y%m%d_%H%M")
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
@@ -95,7 +101,7 @@ def download_timestamp(
             f"{region}/*/{timestamp}_dqf.npy",
             f"{region}/geometry.json",
             f"{region}/camel_emissivity/*{month}Month*.nc",
-            f"{region}/TPW-GFS/*{timestamp}*.npy",
+            f"{region}/TPW-GFS/{_cycle_str}.npy",,
             f"{region}/eco_mask.npy",
             "tpw_lut.csv",
         ],
@@ -131,5 +137,4 @@ def ensure_timestamp_data(
             f"{missing_text}\n\n"
             "Ejecutá nuevamente con --download para obtenerlos desde Hugging Face:\n"
             f"  {command}"
-            f"{extra_note}"
         )

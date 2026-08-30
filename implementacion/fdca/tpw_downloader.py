@@ -33,17 +33,6 @@ Dependencies (add to requirements.txt):
   scipy           # RegularGridInterpolator
   requests        # HTTP download
 """
-"""" Esto a agregar al pipeline de descarga:
-import tpw_downloader
-result = tpw_downloader.download_and_save(ts, region, output_root, goes_shape=None)
-results.append(result)
-
-Dependencias nuevas que hay que agregar al requirements.txt:
-cfgrib
-eccodes
-scipy
-eccodes puede requerir instalación del sistema también: sudo apt install libeccodes-dev en Linux.
-"""
 import os
 import re
 import tempfile
@@ -278,6 +267,34 @@ def _infer_goes_shape(output_root: str, timestamp: datetime) -> tuple[int, int] 
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+def dedupe_by_cycle(timestamps: list[datetime]) -> list[datetime]:
+    """
+    Collapse a batch of ABI scene timestamps down to the distinct GFS cycles
+    they fall into.
+
+    Callers that dispatch TPW downloads for many scenes (e.g. a pipeline
+    processing a whole day) must download_and_save() once per returned
+    cycle, not once per input timestamp -- otherwise concurrent calls for
+    timestamps sharing a cycle race on the same output file, each seeing
+    "does not exist yet" and re-downloading it.
+    """
+    seen: dict[str, datetime] = {}
+    for ts in timestamps:
+        cycle_dt, _ = _nearest_gfs_cycle(ts)
+        seen.setdefault(cycle_dt.strftime("%Y%m%d_%H%M"), cycle_dt)
+    return sorted(seen.values())
+
+def cycle_path_for_timestamp(timestamp: datetime, output_root: str) -> str:
+    """
+    Path of the GFS TPW file covering a given ABI timestamp.
+
+    Readers (e.g. fdca_adapter.get_tpw_real) must resolve the same nearest-
+    6h-cycle file that download_and_save() writes to, since TPW-GFS/*.npy
+    is no longer keyed by ABI timestamp.
+    """
+    cycle_dt, _ = _nearest_gfs_cycle(timestamp)
+    cycle_str = cycle_dt.strftime("%Y%m%d_%H%M")
+    return os.path.join(output_root, PRODUCT_ID, f"{cycle_str}.npy")
 
 def download_and_save(
     timestamp:   datetime,
@@ -302,16 +319,23 @@ def download_and_save(
     -------
     dict with status / path / product / timestamp  (mirrors downloader.py schema)
     """
-    ts_str     = timestamp.strftime("%Y%m%d_%H%M")
-    folder     = os.path.join(output_root, PRODUCT_ID)
+    ts_str = timestamp.strftime("%Y%m%d_%H%M")
+    folder = os.path.join(output_root, PRODUCT_ID)
     os.makedirs(folder, exist_ok=True)
-    file_path  = os.path.join(folder, f"{ts_str}.npy")
+
+    # GFS only publishes one analysis every 6h (00/06/12/18 UTC), so every ABI
+    # scene falling in that window (up to ~36 scenes at 10-min cadence) maps to
+    # the exact same GFS field. Cache by cycle, not by ABI timestamp — otherwise
+    # every scene re-downloads and re-saves an identical file.
+    cycle_dt, cycle_hour = _nearest_gfs_cycle(timestamp)
+    cycle_str = cycle_dt.strftime("%Y%m%d_%H%M")
+    file_path = os.path.join(folder, f"{cycle_str}.npy")
 
     if os.path.exists(file_path):
         return {"status": "exists", "path": file_path,
-                "product": PRODUCT_ID, "timestamp": ts_str}
+                "product": PRODUCT_ID, "timestamp": ts_str,
+                "gfs_cycle": cycle_str}
 
-    cycle_dt, cycle_hour = _nearest_gfs_cycle(timestamp)
     grib_url = _build_grib_url(cycle_dt, cycle_hour)
 
     grib_path = None
@@ -353,7 +377,7 @@ def download_and_save(
             "product":   PRODUCT_ID,
             "timestamp": ts_str,
             "shape":     list(pwat_regridded.shape),
-            "gfs_cycle": cycle_dt.strftime("%Y%m%d_%H%M"),
+            "gfs_cycle": cycle_str,
         }
 
     except requests.HTTPError as e:
