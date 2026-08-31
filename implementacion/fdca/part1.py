@@ -517,6 +517,18 @@ def run_part1(
                 fire_mask[i, j] = FireMask.UNUS_CH14;  continue
             stage[i, j] = Stage.QUALITY_OK
 
+            # ATBD 3.4.2.8 / Table 3.11: emissivity is required ancillary
+            # data.  Do not silently replace missing or non-physical values
+            # with a climatological constant; report invalid emissivity as
+            # code 160 before applying radiometric corrections.
+            em7 = float(emiss7[i, j])
+            em14 = float(emiss14[i, j])
+            if (not np.isfinite(em7) or not np.isfinite(em14)
+                    or not (0.0 < em7 <= 1.0)
+                    or not (0.0 < em14 <= 1.0)):
+                fire_mask[i, j] = FireMask.INVALID_EMISSIVITY
+                continue
+
             # ── Ecosystem / surface mask tests (ATBD 3.4.2.3) ────
             # Codes 150/151/152/153 taken directly from eco_mask_fixed.
             eco_code = int(eco_mask_fixed[i, j])
@@ -751,9 +763,7 @@ def run_part1(
                     T14_corr += CLOUD_ADJ_BT14_FIXED
                     fail_char_arr[i, j] = FailChar.F8
 
-            # Emissivity correction
-            em7  = float(emiss7 [i, j])
-            em14 = float(emiss14[i, j])
+            # Emissivity correction (validated above against ATBD code 160)
             r7_corr_em  = r7_corr  / em7
             r14_corr_em = r14_corr / em14
 
@@ -839,7 +849,13 @@ def run_part1(
             d_skip_dozier[i, j] = 1 if skip_dozier else 0
 
             # ── Dozier sub-pixel characterization (ATBD 3.4.2.10) ─────────────
-            doz = DozierResult()
+            # Saturated pixels do not enter Dozier.  Preserve the ATBD
+            # initialization (Tt=0 K) so Part II can assign mask code 11/31.
+            doz = DozierResult(
+                fire_temp=fire_temp_init,
+                fire_frac=fire_size_init,
+                fire_area=fire_size_init,
+            )
             if not skip_dozier and not sat_flag:
                 is_glint = (fc == FailChar.F8)
                 doz = compute_dozier(
@@ -864,7 +880,7 @@ def run_part1(
 
             # ── Last-chance fire test (ATBD 3.4.2.11) ────────────────────────
             glint_low_temp = (fc == FailChar.F8 and doz.valid and doz.fire_temp < 400.0)
-            if skip_dozier or not doz.valid or glint_low_temp:
+            if (not sat_flag) and (skip_dozier or not doz.valid or glint_low_temp):
                 lct1 = ((bt7[i, j] - bkg.temp7_bkg_mean >= std_7b)
                         and (bt14_eff[i, j] - bkg.temp14_bkg_mean >= -20.0))
                 lct2 = ((refl_ij - bkg.reflb >= std_reflb_max) and pass_along)
