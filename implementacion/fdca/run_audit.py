@@ -911,8 +911,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", default=default_dataset_root())
     parser.add_argument("--config",
                         default=str(Path(__file__).resolve().parent / "config.yaml"))
-    parser.add_argument("--download", action="store_true",
-                        help="descargar de Hugging Face las escenas que falten")
+    parser.add_argument("--no-download", dest="download", action="store_false",
+                        help="disable automatic download of missing scenes from Hugging Face")
+    parser.set_defaults(download=True)
     parser.add_argument("--temporal-source", default="none",
                         choices=("reference", "own", "none"),
                         help="de dónde sale el historial de 12 h del filtro temporal")
