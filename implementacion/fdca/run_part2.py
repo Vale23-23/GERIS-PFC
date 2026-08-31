@@ -27,10 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Dataset root folder (default: $GERIS_DATASET_ROOT env var if set, else './dataset')")
     parser.add_argument("--config", default="fdca/config.yaml")
     parser.add_argument(
-        "--download",
-        action="store_true",
-        help="Download the requested scene from Hugging Face when it is missing",
+        "--no-download",
+        dest="download",
+        action="store_false",
+        help="Do not auto-download missing scenes from Hugging Face (fail instead)",
     )
+    parser.set_defaults(download=True)
     parser.add_argument("--repo-id", default=DEFAULT_HF_REPO_ID, help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", default="results/part2")
     parser.add_argument(
