@@ -42,8 +42,9 @@ parser.add_argument("--dataset-root", default=default_dataset_root(),
 parser.add_argument("--config",
     default=str(Path(__file__).resolve().parent / "config.yaml"),
     help="Path to config.yaml (default: config.yaml bundled inside fdca/)")
-parser.add_argument("--download", action="store_true",
-    help="Download the requested scene from Hugging Face when it is missing")
+parser.add_argument("--no-download", dest="download", action="store_false",
+    help="No descargar automáticamente; fallar si falta algún archivo")
+parser.set_defaults(download=True)
 parser.add_argument("--save-outputs", action="store_true",
     help="Save fire_mask.npy, fail_char.npy, and summary.json")
 parser.add_argument("--output-dir", default="figures",
