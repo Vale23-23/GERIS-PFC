@@ -181,6 +181,7 @@ class FireMask:
     SEA_WATER      = 151
     COAST_FRINGE   = 152
     INLAND_WATER   = 153
+    INVALID_EMISSIVITY = 160
     NO_BACKGROUND  = 170
     CONV_ERROR     = 180
     CLOUD_BT14     = 200
