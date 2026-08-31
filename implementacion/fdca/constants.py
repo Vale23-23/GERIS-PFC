@@ -89,10 +89,10 @@ DIFFRAC_CH14_SUB = 0.30
 DIFFRAC_CH14_DIV = 0.70
 
 # ── FRP ─────────────────────────────────────────────────────────────────────
-# Antes (calibrado para W/m²/sr/µm): FRP_MIR_A = 3.0e-9
-
-# Después (ajustado para W/m²/sr/m, que es lo que devuelve planck_rad):
-FRP_MIR_A = 3.0e-3          # MIR approximation constant [W·m⁻²·sr⁻¹·μm⁻¹·K⁻⁴]
+# compute_frp recibe radiancia MIR convertida a W·m⁻²·sr⁻¹·m⁻¹.
+# La conversión desde la radiancia ABI nativa se hace explícitamente en
+# Part I antes de llamar a compute_frp.
+FRP_MIR_A = 3.0e-3          # MIR approximation constant for radiance per metre
 MIN_PIXEL_AREA = 4.0          # Minimum pixel area to recompute [km²]
 
 # ── Dozier ───────────────────────────────────────────────────────────────────

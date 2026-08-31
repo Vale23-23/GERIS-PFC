@@ -7,6 +7,29 @@ import numpy as np
 from .constants import H_PLANCK, K_BOLTZ, C_LIGHT, LAMBDA
 
 
+def native_wavenumber_radiance_to_per_meter(
+    rad: np.ndarray | float,
+    wavelength_m: float,
+) -> np.ndarray:
+    """Convert ABI native radiance to ``W m⁻² sr⁻¹ m⁻¹``.
+
+    ABI L1b thermal radiances are stored as ``mW m⁻² sr⁻¹ (cm⁻¹)⁻¹``.
+    Using ``ν̄ = 1 / (100 λ_m)`` and converting mW to W gives:
+
+        L_λ[W m⁻² sr⁻¹ m⁻¹] = L_ν̄[native] * 1e-5 / λ_m²
+
+    Parameters
+    ----------
+    rad : array-like or float
+        Native ABI radiance.
+    wavelength_m : float
+        Effective/central wavelength of the ABI band in metres.
+    """
+    if wavelength_m <= 0:
+        raise ValueError("wavelength_m must be positive")
+    return np.asarray(rad, dtype=np.float64) * (1e-5 / wavelength_m**2)
+
+
 def planck_rad(band: int, T: np.ndarray) -> np.ndarray:
     """
     Spectral radiance from Planck's law for a given ABI band and temperature.

@@ -11,6 +11,7 @@ from fdca.constants import *
 from .planck import (
     planck_rad, planck_temp, temp_to_rad_in_band,
     planck_rad_from_coeffs, planck_temp_from_coeffs,
+    native_wavenumber_radiance_to_per_meter,
 )
 from .background import BackgroundStats, compute_background
 from .dozier import DozierResult, compute_dozier, compute_frp, compute_pixel_area
@@ -405,6 +406,14 @@ def run_part1(
     d_bt14_bkg      = _nan_grid()
     d_bt7_bkg_std   = _nan_grid()
     d_bt14_bkg_std  = _nan_grid()
+    # Trazabilidad de 3.4.2.5: qué enfoque ganó (1 = histograma, 0 = estadístico,
+    # -1 = sin background), los dos std dev que se compararon, cuántos píxeles
+    # seleccionó el histograma y el half-width final de la ventana.
+    d_bkg_hist_won  = np.full((L, W), -1, dtype=np.int8)
+    d_t7_stat_std   = _nan_grid()
+    d_t7_hist_std   = _nan_grid()
+    d_n_hist_sel    = np.full((L, W), -1, dtype=np.int32)
+    d_half_width    = np.full((L, W), -1, dtype=np.int16)
     d_reflb         = _nan_grid()
     d_rad_diff_sig  = _nan_grid()
     d_std_7b14b     = _nan_grid()
@@ -487,7 +496,7 @@ def run_part1(
             stage[i, j] = Stage.LZA_OK
 
             # Sun-glint / sub-solar block-out (ATBD 3.4.2.3: code 60, advance to next pixel)
-            if lza[i, j] < GLINT_THRESHOLD or glint_angle[i, j] < GLINT_THRESHOLD:
+            if sza[i, j] < GLINT_THRESHOLD or glint_angle[i, j] < GLINT_THRESHOLD:
                 fire_mask[i, j] = FireMask.GLINT_BLOCK
                 continue
             stage[i, j] = Stage.GLINT_OK
@@ -649,6 +658,11 @@ def run_part1(
             d_bt14_bkg[i, j]     = bkg.temp14_bkg_mean
             d_bt7_bkg_std[i, j]  = bkg.temp7_bkg_stddev
             d_bt14_bkg_std[i, j] = bkg.temp14_bkg_stddev
+            d_bkg_hist_won[i, j] = 1 if bkg.bkg_approach == "hist" else 0
+            d_t7_stat_std[i, j]  = bkg.temp7_bkg_stat_stddev
+            d_t7_hist_std[i, j]  = bkg.temp7_bkg_histogram_stddev
+            d_n_hist_sel[i, j]   = bkg.n_hist_selected
+            d_half_width[i, j]   = bkg.half_width
             d_reflb[i, j]        = bkg.reflb
             d_rad_diff_sig[i, j] = bkg.rad_diff_sigma
             d_std_7b14b[i, j]     = std_7b14b
@@ -885,10 +899,26 @@ def run_part1(
                 FailChar.F10,  # Cloud / smoke
             )
             
-            # No FRP for saturated (11), cloud (12), low prob (15) or max passes
-            # since we cannot know for sure if the fire is low prob or not, we set it as -9 and then correct it in Part II if needed.
+            # FRP is independent of the Dozier solution (Tt and p).  In
+            # particular, high/medium-probability detections may have
+            # doz.valid=False and must still receive FRP when the ATBD path
+            # allows it.
+            #
+            # r7_diff and r7_bkg_corr are ABI-native radiances in
+            # mW m^-2 sr^-1 (cm^-1)^-1.  compute_frp expects SI radiance per
+            # metre, so convert both terms before taking their difference.
+            # Preserve the existing ATBD exclusions; do not gate this on
+            # doz.valid, fire_temp, or fire_frac.
             if fc_now not in EXCLUDED_FRP_FLAGS and n_pass <= BKG_MAX_ITER:
-                frp_val = compute_frp(pix_area, float(r7_diff), float(r7_bkg_corr))
+                r7_diff_si = native_wavenumber_radiance_to_per_meter(
+                    float(r7_diff), LAMBDA[7]
+                )
+                r7_bkg_corr_si = native_wavenumber_radiance_to_per_meter(
+                    float(r7_bkg_corr), LAMBDA[7]
+                )
+                frp_val = compute_frp(
+                    pix_area, float(r7_diff_si), float(r7_bkg_corr_si)
+                )
             else:
                 frp_val = FRP_NOT_CALCULATED
 
@@ -960,6 +990,11 @@ def run_part1(
             "bt14_bkg":       d_bt14_bkg,
             "bt7_bkg_std":    d_bt7_bkg_std,
             "bt14_bkg_std":   d_bt14_bkg_std,
+            "bkg_hist_won":   d_bkg_hist_won,
+            "t7_stat_std":    d_t7_stat_std,
+            "t7_hist_std":    d_t7_hist_std,
+            "n_hist_selected": d_n_hist_sel,
+            "half_width":     d_half_width,
             "reflb":          d_reflb,
             "rad_diff_sigma": d_rad_diff_sig,
             "std_7b14b":      d_std_7b14b,

@@ -324,11 +324,16 @@ def compute_frp(
 
     FRP_MIR = (A_pixel / a) * sigma * (L_MIR - L_B,MIR)   [W] → convert to MW
 
+    FRP is based on the observed/background MIR radiance difference and does
+    not require the Dozier fire temperature or fire fraction.
+
     Parameters
     ----------
     pixel_area : float  [km²]
-    rad7_obs   : float  observed 3.9 µm radiance  [W·m⁻²·sr⁻¹·m⁻¹]
-    rad7_bkg   : float  background 3.9 µm radiance [W·m⁻²·sr⁻¹·m⁻¹]
+    rad7_obs   : float  observed 3.9 µm radiance, already converted to
+                         [W·m⁻²·sr⁻¹·m⁻¹]
+    rad7_bkg   : float  background 3.9 µm radiance, already converted to
+                         [W·m⁻²·sr⁻¹·m⁻¹]
 
     Returns
     -------
