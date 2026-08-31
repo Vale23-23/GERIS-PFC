@@ -634,9 +634,11 @@ def run_part1(
                 fail_char_arr[i, j] = FailChar.F7
             d_sat_flag[i, j] = 1 if sat_flag else 0
 
-            # ── Background statistics (ATBD 3.4.2.5) ─────────────────────────
-            # Reuse previous background if same scan element
-            if prev_j_bkg == j and prev_bkg is not None:
+            # ATBD 3.4.2.5: background statistics are updated along a scan
+            # line, and the calculation is skipped for the previous element.
+            # Reuse only the immediately previous element in this row; the
+            # row boundary naturally breaks the sequence because j resets to 0.
+            if prev_j_bkg == j - 1 and prev_bkg is not None:
                 bkg = prev_bkg
             else:
                 bkg = compute_background(
