@@ -278,6 +278,12 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
         trace_out=part2_trace,
         detection_policy=args.detection_policy,
     )
+    # Part I stores the radiometric FRP before the final Part II category is
+    # known.  Mirror the final candidate value into the audit diagnostics so
+    # pixels with final codes 11/12/15 (and temporal variants) show FRP=-9,
+    # while high/medium categories retain their Dozier-independent FRP.
+    for cand in confirmed:
+        diag["frp"][cand.i, cand.j] = cand.frp
     part2_seconds = (datetime.now() - started).total_seconds()
 
     candidate_mask = np.zeros(reference.shape, dtype=bool)
