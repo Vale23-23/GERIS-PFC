@@ -927,18 +927,24 @@ def load_fdca_input(
     camel_path = matches[0] if matches else None
 
     if camel_path is not None:
+        # Preserve NaN/fill values.  Part I maps invalid emissivity to the
+        # ATBD code 160; silently replacing it with 0.95/0.97 would turn bad
+        # ancillary data into apparently valid fire detections.
         emiss7, emiss14 = load_emissivity_camel(camel_path, lat2d, lon2d)
-        emiss7  = np.where(np.isnan(emiss7),  0.95, emiss7 ).astype(np.float32)
-        emiss14 = np.where(np.isnan(emiss14), 0.97, emiss14).astype(np.float32)
+        emiss7  = emiss7.astype(np.float32)
+        emiss14 = emiss14.astype(np.float32)
         if verbose:
-            print(f"  {'Emisividad':<22}: CAMEL V3 clim. ({os.path.basename(camel_path)})")
+            print(f"  {'Emisividad':<22}: CAMEL V3 clim. provisional "
+                  f"({os.path.basename(camel_path)}; ATBD source is UW BF)")
     else:
-        emiss7  = np.full(shape, 0.95, dtype=np.float32)
-        emiss14 = np.full(shape, 0.97, dtype=np.float32)
+        # No UW-BF product is currently available in this repository.  Keep
+        # the missing ancillary input explicit instead of using a hidden
+        # constant fallback; Part I will emit code 160 for affected pixels.
+        emiss7  = np.full(shape, np.nan, dtype=np.float32)
+        emiss14 = np.full(shape, np.nan, dtype=np.float32)
         if verbose:
-            print(f"  {'Emisividad':<22}: ⚠ placeholder — corré "
-                  f"'python pipeline.py download-camel --month {dt.month} --region {region}' "
-                  f"en la branch de descarga")
+            print(f"  {'Emisividad':<22}: ⚠ missing UW BF/CAMEL ancillary "
+                  f"— invalid pixels receive ATBD code 160")
 
 
 
