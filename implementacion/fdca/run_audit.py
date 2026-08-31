@@ -302,6 +302,7 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
         "funnel": recall_funnel(reference, fire_mask_p1, fail_char_p1, diag["stage"]),
         "fp_breakdown": fp_breakdown(reference, fire_mask_p2, part2_trace),
         "part2_paths": part2_path_counts(part2_trace),
+        "bkg_approach": bkg_approach_summary(diag, candidate_mask),
     }
     arrays = {
         "reference": reference,
@@ -312,6 +313,8 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
         "stage": diag["stage"],
         "candidate_mask": candidate_mask,
         "confirmed_mask": confirmed_mask,
+        "bkg_hist_won": diag["bkg_hist_won"],
+        "half_width": diag["half_width"],
     }
     pixel_rows = build_pixel_rows(timestamp, inp, reference, fire_mask_p1,
                                   fire_mask_p2, fail_char_p1, fail_char_p2,
@@ -422,6 +425,40 @@ def fp_breakdown(reference: np.ndarray, fire_mask_p2: np.ndarray,
     }
 
 
+def bkg_approach_summary(diag: dict, candidate_mask: np.ndarray) -> dict:
+    """
+    Resumen de la elección estadístico vs histograma (ATBD 3.4.2.5).
+
+    Se reporta sobre los píxeles que llegaron a tener background (los únicos
+    donde la comparación existe) y aparte sobre los candidatos de Parte I, que
+    son los que terminan importando para la máscara final.
+    """
+    hist_won = diag["bkg_hist_won"]
+    has_bkg = hist_won >= 0
+
+    def _block(selected: np.ndarray) -> dict:
+        n = int(np.count_nonzero(selected))
+        if not n:
+            return {"n": 0}
+        stat_std = diag["t7_stat_std"][selected]
+        hist_std = diag["t7_hist_std"][selected]
+        return {
+            "n": n,
+            "n_stat": int(np.count_nonzero(hist_won[selected] == 0)),
+            "n_hist": int(np.count_nonzero(hist_won[selected] == 1)),
+            "median_t7_stat_std": float(np.nanmedian(stat_std)),
+            "median_t7_hist_std": float(np.nanmedian(hist_std)),
+            "median_n_hist_selected": float(np.median(
+                diag["n_hist_selected"][selected])),
+            "half_width_counts": {
+                str(int(k)): int(v) for k, v in
+                sorted(Counter(diag["half_width"][selected].tolist()).items())},
+        }
+
+    return {"with_background": _block(has_bkg),
+            "candidates": _block(has_bkg & candidate_mask)}
+
+
 def part2_path_counts(part2_trace: list[dict]) -> dict:
     """Cuántos candidatos elimina cada condición de 3.4.2.14 y cómo se reetiquetan."""
     eliminated = [r for r in part2_trace if r.get("eliminated")]
@@ -455,6 +492,12 @@ def _get(array, i, j, default=float("nan")):
     if array is None:
         return default
     return float(array[i, j])
+
+
+def bkg_approach_label(flag) -> str:
+    """1 → histograma ganó, 0 → estadístico ganó, -1 → nunca hubo background."""
+    value = int(flag)
+    return "hist" if value == 1 else "stat" if value == 0 else ""
 
 
 def build_pixel_rows(timestamp: str, inp, reference: np.ndarray,
@@ -558,6 +601,14 @@ def build_pixel_rows(timestamp: str, inp, reference: np.ndarray,
             "bt14_bkg": bt14_bkg,
             "bt7_bkg_std": _get(diag["bt7_bkg_std"], i, j),
             "bt14_bkg_std": _get(diag["bt14_bkg_std"], i, j),
+            # ── elección estadístico vs histograma (3.4.2.5) ────────────────
+            "bkg_approach": bkg_approach_label(diag["bkg_hist_won"][i, j]),
+            "t7_stat_std": _get(diag["t7_stat_std"], i, j),
+            "t7_hist_std": _get(diag["t7_hist_std"], i, j),
+            "t7_std_gap_stat_minus_hist": (_get(diag["t7_stat_std"], i, j)
+                                           - _get(diag["t7_hist_std"], i, j)),
+            "n_hist_selected": int(diag["n_hist_selected"][i, j]),
+            "half_width": int(diag["half_width"][i, j]),
             "reflb": reflb,
             "rad_diff_sigma": _get(diag["rad_diff_sigma"], i, j),
             "albedo_bkg": _get(diag["alb_bkg"], i, j),
@@ -626,6 +677,8 @@ PIXEL_COLUMNS_FIRST = [
     "ref_base_code", "pred_base_code",
     "stage", "stage_killed_by", "p1_code", "fail_char_p1", "fail_char_p2",
     "reached_candidate", "confirmed_part2", "eliminated", "elim_reason",
+    "bkg_approach", "t7_stat_std", "t7_hist_std",
+    "t7_std_gap_stat_minus_hist", "n_hist_selected", "half_width",
 ]
 TRACE_COLUMNS_FIRST = [
     "timestamp", "i", "j", "fail_char_in", "eliminated", "elim_reason",
@@ -647,6 +700,8 @@ def aggregate(scenes: list[dict]) -> dict:
     paths: Counter = Counter()
     elim_reasons: Counter = Counter()
     final_codes: Counter = Counter()
+    bkg_counts: dict = {"with_background": Counter(), "candidates": Counter()}
+    half_widths: dict = {"with_background": Counter(), "candidates": Counter()}
 
     for scene in scenes:
         metrics = scene["metrics"]
@@ -673,6 +728,13 @@ def aggregate(scenes: list[dict]) -> dict:
         elim_reasons.update(scene["part2_paths"]["eliminated_by_reason"])
         final_codes.update(scene["part2_paths"]["final_codes"])
 
+        for group in ("with_background", "candidates"):
+            block = scene["bkg_approach"][group]
+            if not block["n"]:
+                continue
+            bkg_counts[group].update({k: block[k] for k in ("n", "n_stat", "n_hist")})
+            half_widths[group].update(block["half_width_counts"])
+
     return {
         "n_scenes": len(scenes),
         "n_reference_fire_pixels": n_reference_fire,
@@ -687,6 +749,14 @@ def aggregate(scenes: list[dict]) -> dict:
         "part2_paths": dict(paths),
         "part2_eliminated_by_reason": dict(sorted(elim_reasons.items())),
         "part2_final_codes": dict(sorted(final_codes.items(), key=lambda kv: str(kv[0]))),
+        "bkg_approach": {
+            group: dict(
+                bkg_counts[group],
+                half_width_counts=dict(sorted(half_widths[group].items(),
+                                              key=lambda kv: int(kv[0]))),
+            )
+            for group in ("with_background", "candidates")
+        },
     }
 
 
@@ -842,7 +912,34 @@ def build_report(args, timestamps: list[str], scenes: list[dict],
         + ", ".join(f"{k}={v}" for k, v in totals["part2_final_codes"].items()))
     add("")
 
-    add("## 7. Por escena\n")
+    add("## 7. Background: ¿ganó el enfoque estadístico o el histograma? (3.4.2.5)\n")
+    add("Gana el enfoque con menor desvío estándar de BT7; el empate va para"
+        " `stat` (`t7_stat_std <= t7_hist_std`).\n")
+    add("| grupo | píxeles con background | ganó stat | ganó hist | % hist |")
+    add("|---|---|---|---|---|")
+    labels = {"with_background": "todos los píxeles con background",
+              "candidates": "candidatos de Parte I"}
+    for group, label in labels.items():
+        block = totals["bkg_approach"][group]
+        n = block.get("n", 0)
+        if not n:
+            continue
+        add(f"| {label} | {n} | {block['n_stat']} | {block['n_hist']} | "
+            f"{_pct(block['n_hist'] / n)} |")
+    add("")
+    for group, label in labels.items():
+        counts = totals["bkg_approach"][group].get("half_width_counts") or {}
+        if counts:
+            add(f"- `half_width` final ({label}): "
+                + ", ".join(f"{k}→{v}" for k, v in counts.items()))
+    add("")
+    add("Por escena, las medianas de `t7_stat_std`, `t7_hist_std` y de la"
+        " cantidad de píxeles seleccionados por el histograma están en"
+        " `summary.json` (`scenes[].bkg_approach`). Por píxel, en `pixels.csv`:"
+        " `bkg_approach`, `t7_stat_std`, `t7_hist_std`,"
+        " `t7_std_gap_stat_minus_hist`, `n_hist_selected`, `half_width`.\n")
+
+    add("## 8. Por escena\n")
     add("| timestamp | fuego NOAA | candidatos P1 | confirmados P2 | "
         "P recall | P precision | F1 |")
     add("|---|---|---|---|---|---|---|")
@@ -854,7 +951,7 @@ def build_report(args, timestamps: list[str], scenes: list[dict],
             f"{_pct(binary['f1'])} |")
     add("")
 
-    add("## 8. Archivos generados\n")
+    add("## 9. Archivos generados\n")
     add("- `pixels.csv` — un registro por píxel de interés con inputs,"
         " background, thresholds contextuales, márgenes, BT corregidas, Dozier"
         " y la traza de Parte II. Filtrá por `verdict == 'FN'` para atacar"
@@ -862,7 +959,9 @@ def build_report(args, timestamps: list[str], scenes: list[dict],
     add("- `part2_trace.csv` — un registro por candidato con las tres"
         " condiciones de 3.4.2.14 y los umbrales de confianza de 3.4.2.15.")
     add("- `summary.json` — todas las métricas y desgloses en JSON.")
-    add("- `<timestamp>/arrays.npz` — máscaras y `stage` por escena.")
+    add("- `<timestamp>/arrays.npz` — máscaras, `stage`, `bkg_hist_won`"
+        " (1 = ganó histograma, 0 = ganó estadístico, -1 = sin background) y"
+        " `half_width` por escena.")
     return "\n".join(lines)
 
 
@@ -890,6 +989,10 @@ def print_console_summary(totals: dict) -> None:
     print("\nDónde mueren los fuegos de NOAA (funnel de Parte I):")
     for stage_value, info in totals["recall_funnel"].items():
         print(f"  stage {stage_value:>3} → {info['n']:>5}  {info['gate']}")
+    bkg = totals["bkg_approach"]["with_background"]
+    if bkg.get("n"):
+        print(f"\nBackground 3.4.2.5: ganó stat en {bkg['n_stat']} píxeles y "
+              f"hist en {bkg['n_hist']} ({_pct(bkg['n_hist'] / bkg['n'])} hist)")
     print("=" * 72)
 
 

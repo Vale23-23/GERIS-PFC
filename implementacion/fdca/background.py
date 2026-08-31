@@ -28,6 +28,18 @@ class BackgroundStats:
     vis_bkg_histogram_stddev: float = np.nan
     histogram_bin_largest_count: float = np.nan
 
+    # ── Trazabilidad de la elección estadístico vs histograma ────────────────
+    # "stat" o "hist": qué enfoque ganó la comparación de std dev de BT7
+    # (ATBD 3.4.2.5) y por lo tanto define temp7/temp14_bkg_mean y _stddev.
+    bkg_approach: str = ""
+    # std dev de BT7/BT14 por el enfoque estadístico (todos los píxeles válidos
+    # de la ventana), guardado aparte del elegido para poder comparar.
+    temp7_bkg_stat_stddev:  float = np.nan
+    temp14_bkg_stat_stddev: float = np.nan
+    # Cantidad de píxeles válidos que cayeron en las 3 bins del pico del
+    # histograma (los que se usaron para las medias/std del enfoque histograma).
+    n_hist_selected: int = 0
+
     n_passes:       int   = 0         # Number of window expansions
     n_valid:        int   = 0         # Number of valid background pixels
     bkg_count_frac: float = np.nan    # Fraction of window that was valid
@@ -304,6 +316,10 @@ def compute_background(
                 temp7_bkg_stddev         = t7_stat_std if chosen == "stat" else t7_hist_std,
                 temp14_bkg_stddev        = t14_stat_std if chosen == "stat" else t14_hist_std,
                 vis_bkg_histogram_stddev = float(vis_hist_std),
+                bkg_approach             = chosen,
+                temp7_bkg_stat_stddev    = t7_stat_std,
+                temp14_bkg_stat_stddev   = t14_stat_std,
+                n_hist_selected          = int(hist_mask.sum()),
                 # Table 3.6: same quantity as vis_diff_histogram (mean vis
                 # brightness via the histogram technique); kept as a separate
                 # legacy field for output parity with the reference code.
