@@ -169,13 +169,24 @@ def _histogram_select(diff_vals: np.ndarray) -> tuple[np.ndarray, float]:
     n = len(diff_vals)
     if n == 0:
         return np.zeros(0, dtype=bool), np.nan
- 
-    rounded = np.round(diff_vals).astype(int)
-    bins = np.bincount(rounded - rounded.min())
+
+    # diff_vals puede traer NaN (p.ej. vis_vals de noche, sin señal visible).
+    # Si no se filtran antes de castear a int, np.round(nan).astype(int) da un
+    # valor "sentinel" enorme (undefined behaviour), y la resta contra
+    # rounded.min() overflowea silenciosamente -> np.bincount explota con
+    # "must have no negative elements". Se descartan esos valores del cómputo
+    # del histograma y quedan directamente fuera de la máscara resultante.
+    finite = np.isfinite(diff_vals)
+    if not np.any(finite):
+        return np.zeros(n, dtype=bool), np.nan
+
+    rounded_finite = np.round(diff_vals[finite]).astype(int)
+    bins = np.bincount(rounded_finite - rounded_finite.min())
     peak_idx = np.argmax(bins)
-    peak_val = rounded.min() + peak_idx
- 
-    mask = (rounded >= peak_val - 1) & (rounded <= peak_val + 1)
+    peak_val = rounded_finite.min() + peak_idx
+
+    mask = np.zeros(n, dtype=bool)
+    mask[finite] = (rounded_finite >= peak_val - 1) & (rounded_finite <= peak_val + 1)
 
     return mask, float(peak_val)
 
@@ -201,12 +212,14 @@ def compute_background(
     """
     Compute background statistics for pixel (i0, j0).
 
-    Expands the window up to BKG_MAX_ITER times until at least BKG_VALID_FRAC
-    of the window is valid cloud/fire-free land pixels.
-    Out-of-bounds pixels count toward window denominator but never as valid.
+    Expands the window through 10 expansions after the initial 11×11
+    window, reaching the deliberate 111×111 maximum interpretation of the
+    ATBD.  Consequently, successful results have n_passes in [0, 10].
+    Out-of-bounds pixels count toward the window denominator but never as
+    valid background pixels.
 
-    Returns None if maximum iterations reached without satisfying the criterion
-    (caller should set FireMask.NO_BACKGROUND).
+    Returns None if maximum iterations are reached without satisfying the
+    criterion (caller should set FireMask.NO_BACKGROUND).
     """
     L, W = bt7.shape
     half   = BKG_WINDOW_INIT
@@ -255,15 +268,19 @@ def compute_background(
             t14_stat_mean  = float(np.mean(bt14_vals))
             t14_stat_std   = float(np.std (bt14_vals))
 
-            # ── Histogram approach (ATBD 3.4.2.5) ────────────────────────────
-            # ONE histogram, built on the rounded (T7 - T14) difference. The
-            # peak bin (+/- 1 neighbour) selects a subset of pixels that is
-            # then reused to compute T7, T14 and visible-brightness means/std
-    
+            # ONE histogram for the thermal difference selects the pixels
+            # used by the thermal histogram approach and Vis_Diff_Histogram.
             hist_mask, diff_peak = _histogram_select(diff_vals)
             t7_hist_mean,  t7_hist_std  = _mean_std(bt7_vals [hist_mask])
             t14_hist_mean, t14_hist_std = _mean_std(bt14_vals[hist_mask])
             vis_hist_mean, vis_hist_std = _mean_std(vis_vals [hist_mask])
+
+            # A separate visible-channel histogram supplies
+            # Histogram_Bin_Largest_Count.  It must not be conflated with
+            # Vis_Diff_Histogram, which is computed from the thermal-difference
+            # selection above.
+            vis_bin_mask, vis_peak = _histogram_select(vis_vals)
+            vis_bin_mean, vis_bin_std = _mean_std(vis_vals[vis_bin_mask])
             
             if trace is not None:
                 trace.append({
@@ -272,7 +289,10 @@ def compute_background(
                     't14_stat_mean': t14_stat_mean, 't14_stat_std': t14_stat_std,
                     't7_hist_mean': t7_hist_mean, 't7_hist_std': t7_hist_std,
                     't14_hist_mean': t14_hist_mean, 't14_hist_std': t14_hist_std,
-                    'diff_peak': diff_peak, 'n_hist_selected': int(hist_mask.sum()),
+                    'vis_diff_hist_mean': vis_hist_mean,
+                    'vis_bin_mean': vis_bin_mean, 'vis_bin_std': vis_bin_std,
+                    'diff_peak': diff_peak, 'vis_peak': vis_peak,
+                    'n_hist_selected': int(hist_mask.sum()),
                     'bt7_vals': bt7_vals, 'bt14_vals': bt14_vals,   # arrays, para graficar despues
                     'valid_bounds': (i_lo, i_hi, j_lo, j_hi),
                     'valid_mask': vm,
@@ -280,22 +300,20 @@ def compute_background(
 
             # ── Choose approach with lower BT7 std dev (ATBD 3.4.2.5) ────────
             # This single comparison governs both temp7_bkg_mean and
-            # temp14_bkg_mean. Vis brightness is a special case: "for daylit
-            # pixels, the Channel 2 approach is always based on a histogram"
-            # (ATBD), so vis_mean_bkg always comes from the histogram
-            # selection regardless of which approach won for T7/T14.
-
             if t7_stat_std <= t7_hist_std:
                 chosen = "stat"
                 temp7_mean  = t7_stat_mean
                 temp14_mean = t14_stat_mean
-        
             else:
                 chosen = "hist"
                 temp7_mean  = t7_hist_mean
                 temp14_mean = t14_hist_mean
-            
-            vis_mean_bkg = vis_hist_mean
+
+            # For daylight pixels, the visible background depends on the
+            # thermal approach selected by the ATBD: the statistical branch
+            # uses Histogram_Bin_Largest_Count, while the thermal-histogram
+            # branch uses Vis_Diff_Histogram.
+            vis_mean_bkg = vis_bin_mean if chosen == "stat" else vis_hist_mean
 
             # ── Full window (non-filtered) stats for debugging ──────────────
             bt7_full  = bt7_win.ravel()
@@ -315,15 +333,15 @@ def compute_background(
                 vis_mean_bkg             = float(vis_mean_bkg) if not np.isnan(vis_mean_bkg) else np.nan,
                 temp7_bkg_stddev         = t7_stat_std if chosen == "stat" else t7_hist_std,
                 temp14_bkg_stddev        = t14_stat_std if chosen == "stat" else t14_hist_std,
-                vis_bkg_histogram_stddev = float(vis_hist_std),
+                vis_bkg_histogram_stddev = float(vis_bin_std if chosen == "stat" else vis_hist_std),
                 bkg_approach             = chosen,
                 temp7_bkg_stat_stddev    = t7_stat_std,
                 temp14_bkg_stat_stddev   = t14_stat_std,
                 n_hist_selected          = int(hist_mask.sum()),
-                # Table 3.6: same quantity as vis_diff_histogram (mean vis
-                # brightness via the histogram technique); kept as a separate
-                # legacy field for output parity with the reference code.
-                histogram_bin_largest_count = float(vis_hist_mean),
+                # Table 3.6 keeps these visible quantities distinct:
+                # visible-channel histogram peak versus the thermal-difference
+                # histogram's visible mean.
+                histogram_bin_largest_count = float(vis_bin_mean),
                 n_passes                 = n_iter,
                 n_valid                  = n_valid,
                 bkg_count_frac           = n_valid / window_size,
@@ -333,7 +351,9 @@ def compute_background(
                 temp14_bkg_histogram     = float(t14_hist_mean),
                 temp7_bkg_histogram_stddev  = float(t7_hist_std),
                 temp14_bkg_histogram_stddev = float(t14_hist_std),
-                std_dev_7_14_diff        = float(np.std(diff_vals)),
+                std_dev_7_14_diff        = float(
+                    np.std(diff_vals[hist_mask] if chosen == "hist" else diff_vals)
+                ),
                 vis_diff_histogram       = float(vis_hist_mean),
                 vis_histogram_variance   = float(vis_hist_std**2),
                 vis_histogram_stddev     = float(vis_hist_std),

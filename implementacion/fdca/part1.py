@@ -157,13 +157,12 @@ def _along_scan_reflectivity_test(
     r_m2 = _neighbor(j - 2)
     r_p2 = _neighbor(j + 2)
 
-    refl_diff_m2 = abs(refl[i, j] - r_m2)
-    refl_diff_p2 = abs(refl[i, j] - r_p2)
+    refl_diff_m2 = refl[i, j] - r_m2
+    refl_diff_p2 = refl[i, j] - r_p2
 
     if refl_diff_m2 < std_reflb and refl_diff_p2 < std_reflb:
-        if abs(r_m2) < std_reflb and abs(r_p2) < std_reflb:
-            if bt7_ij < bt7_refl_thr:
-                return False
+        if bt7_ij < bt7_refl_thr:
+            return False
     return True
 
 
@@ -213,8 +212,8 @@ def _apply_tpw_correction(rad: float, offset: float, trans: float) -> float:
 # ── Solar reflectivity correction ────────────────────────────────────────────
 def _solar_correction(
     rad7_corr_emiss:    float,
-    rad7_bkg_corr:      float,
-    rad14_bkg_corr:     float,
+    rad7_bkg_corr_emiss: float,
+    rad14_bkg_corr_emiss: float,
     emiss7:             float,
     coeffs7:  dict,
     coeffs14: dict,
@@ -222,25 +221,25 @@ def _solar_correction(
 ) -> float:
 
     """
-    radsolar = rad7_bkg_corr/emiss7 - emiss7 * rad7from14_bkg_corr/emiss7
-             = rad7_bkg_corr_emiss - emiss7 * planck_ch7(T_from_rad14_bkg_corr)
-
-    Returns rad7_corr corrected for solar reflectivity.
+    Correct solar reflectivity using emissivity-corrected pixel and
+    background radiances at a common radiometric level.
     """
-    # Brightness temperature from background 14 µm corrected radiance
-    T_bkg14 = planck_temp_from_coeffs(rad14_bkg_corr, **coeffs14)
-    # Convert to Ch7 radiance space (coefs reales Ch7, con T_bkg14)
+    # Brightness temperature from the emissivity-corrected background 14 µm
+    # radiance, then converted to Channel 7 radiance space.
+    T_bkg14 = planck_temp_from_coeffs(
+        rad14_bkg_corr_emiss, **coeffs14
+    )
     rad7from14_bkg = planck_rad_from_coeffs(T_bkg14, **coeffs7)
 
-    if 0 <= pixel_sza <= 85: #only during the daytime (SZA < 85°) we apply the solar correction, otherwise we skip it
-        # Solar component
-        rad7_bkg_corr_emiss = rad7_bkg_corr / emiss7
-        rad_solar = max(0.0, rad7_bkg_corr_emiss - emiss7 * rad7from14_bkg)
-
-        # Apply solar correction
+    if 0 <= pixel_sza <= 85:
+        # Both terms are already emissivity-corrected; do not divide the
+        # background a second time here.
+        rad_solar = max(
+            0.0,
+            rad7_bkg_corr_emiss - emiss7 * rad7from14_bkg,
+        )
         rad7_solar_corr = (rad7_corr_emiss - rad_solar) / emiss7
     else:
-    
         rad7_solar_corr = rad7_corr_emiss
 
     return rad7_solar_corr, rad7from14_bkg
@@ -475,10 +474,9 @@ def run_part1(
     eco_mask_fixed = eco_mask.astype(np.uint8)
     
     # ── Pixel loop ────────────────────────────────────────────────────────────
-    # Cache for background (skip recompute for same scan element if prev was OK)
-    prev_j_bkg: Optional[int]    = None
-    prev_bkg:   Optional[BackgroundStats] = None
-
+    # Background statistics are computed per pixel.  Reusing a previous
+    # window is unsafe because the center pixel changes the valid set and
+    # can leak statistics between scan lines.
     for i in range(L):
         for j in range(W):
             # ATBD 3.4.2.3 ─────────────────────────────────────────────────────
@@ -555,9 +553,9 @@ def run_part1(
             # difference is 2K or less, the pixel is skipped (code 100)."
             # "If the difference is < 2K and either Ch7 or Ch14 ≤ 273K → code 201"
             diff_bt = bt7[i, j] - bt14_eff[i, j]
-            if (bt7[i, j] > 273 or bt14_eff[i, j] > 273) and abs(diff_bt) <= 2.0:
+            if (bt7[i, j] > 273 or bt14_eff[i, j] > 273) and diff_bt <= 2.0:
                 continue
-            if abs(diff_bt) < 2.0 and (bt7[i, j] <= 273 or bt14_eff[i, j] <= 273):
+            if diff_bt < 2.0 and (bt7[i, j] <= 273 or bt14_eff[i, j] <= 273):
                 fire_mask[i, j] = FireMask.TOO_COLD;       continue
             stage[i, j] = Stage.BTDIFF_OK
 
@@ -622,7 +620,7 @@ def run_part1(
                             fire_mask[i, j] = FireMask.ALONG_SCAN_DAY;   continue
             else:
                 if fire_mask[i, j] == FireMask.FIRE_FREE:
-                    if bt7[i, j] < bt7_min and bt7[i, j] >= MIN_BT:
+                    if bt7[i, j] < bt7_min and bt7[i, j] >= MIN_BT7:
                         if _refl_neighbor(j-3) < 0.2 or _refl_neighbor(j+3) < 0.2:
                             fire_mask[i, j] = FireMask.ALONG_SCAN_NIGHT; continue
 
@@ -634,22 +632,16 @@ def run_part1(
                 fail_char_arr[i, j] = FailChar.F7
             d_sat_flag[i, j] = 1 if sat_flag else 0
 
-            # ATBD 3.4.2.5: background statistics are updated along a scan
-            # line, and the calculation is skipped for the previous element.
-            # Reuse only the immediately previous element in this row; the
-            # row boundary naturally breaks the sequence because j resets to 0.
-            if prev_j_bkg == j - 1 and prev_bkg is not None:
-                bkg = prev_bkg
-            else:
-                bkg = compute_background(
-                    i, j,
-                    bt7, bt14_eff, refl,
-                    vis_brightness, albedo if refl2 is not None else None,
-                    land_mask,
-                    sza_cos, is_day,
-                )
-                prev_j_bkg = j
-                prev_bkg   = bkg
+            # ATBD 3.4.2.5: compute statistics for the current pixel's
+            # background window.  Do not reuse a neighboring window: its
+            # center and valid-pixel set are different.
+            bkg = compute_background(
+                i, j,
+                bt7, bt14_eff, refl,
+                vis_brightness, albedo if refl2 is not None else None,
+                land_mask,
+                sza_cos, is_day,
+            )
 
             if bkg is None:
                 fire_mask[i, j] = FireMask.NO_BACKGROUND
@@ -687,12 +679,82 @@ def run_part1(
             d_alb_bkg[i, j]       = alb_bkg
 
             # ── Apply thresholds to identify fire pixels (ATBD 3.4.2.7) ──────
-            # Saturated / max-iterations quick path
+            # A saturated / max-iterations pixel is diverted to pixel-area
+            # determination when either quick non-fire test is true.  The
+            # ATBD says this jump bypasses the remaining thermal processing.
+            quick_path_to_area = False
             if sat_flag or n_pass > BKG_MAX_ITER:
-                if ((bt7[i, j] - bt14_eff[i, j] < std_7b14b)
-                        and (bt7[i, j] - bkg.temp7_bkg_mean < std_7b)):
-                    continue   # Not a fire
+                quick_path_to_area = (
+                    (bt7[i, j] - bt14_eff[i, j] < std_7b14b)
+                    or (bt7[i, j] - bkg.temp7_bkg_mean < std_7b)
+                )
+
             stage[i, j] = Stage.QUICKPATH_OK
+
+            if quick_path_to_area:
+                pix_area = compute_pixel_area(i, j, latitudes, longitudes)
+                if pix_area < 0:
+                    fire_mask[i, j] = 188
+                    continue
+
+                # Saturation/max-pass candidates have no Dozier retrieval and
+                # must not receive FRP.  Keep the initial ATBD temperature
+                # convention so Part II can assign category 11 or 15.
+                quick_fire_temp = 0.0 if sat_flag else -9.05
+                quick_fail_char = int(fail_char_arr[i, j])
+                fire_id_ctr += 1
+                cand = FireCandidate(
+                    i=i, j=j,
+                    lat=float(latitudes[i, j]),
+                    lon=float(longitudes[i, j]),
+                    fire_id=fire_id_ctr,
+                    bt7=float(bt7[i, j]),
+                    bt14=float(bt14_eff[i, j]),
+                    rad7=float(rad7[i, j]),
+                    rad14=float(rad14_eff[i, j]),
+                    bt7_corr=np.nan,
+                    bt14_corr=np.nan,
+                    bt_bkg_corr=float(bkg.temp7_bkg_mean),
+                    bt7_bkg=bkg.temp7_bkg_mean,
+                    bt14_bkg=bkg.temp14_bkg_mean,
+                    bt7_bkg_std=bkg.temp7_bkg_stddev,
+                    bt14_bkg_std=bkg.temp14_bkg_stddev,
+                    reflb=bkg.reflb,
+                    rad_diff_sigma=bkg.rad_diff_sigma,
+                    n_passes=n_pass,
+                    std_dev_7b_14b=std_7b14b,
+                    std_dev_7b=std_7b,
+                    std_dev_reflb=std_reflb,
+                    std_dev_reflb_max=std_reflb_max,
+                    fire_temp=quick_fire_temp,
+                    fire_frac=0.0,
+                    fire_area=0.0,
+                    frp=FRP_NOT_CALCULATED,
+                    fail_char=quick_fail_char,
+                    is_saturated=sat_flag,
+                    is_cloudy=is_cloudy,
+                    is_day=day_pixel,
+                    sza=float(sza[i, j]),
+                    lza=float(lza[i, j]),
+                    azimuth=float(azimuth[i, j]),
+                    albedo=float(alb_ij) if not np.isnan(alb_ij) else np.nan,
+                    albedo_bkg=float(alb_bkg) if not np.isnan(alb_bkg) else np.nan,
+                    vis_count=float(vis_brightness[i, j]),
+                    vis_bkg=float(bkg.vis_mean_bkg),
+                    emiss7=em7,
+                    emiss14=em14,
+                    refl_pixel=refl_ij,
+                    refl_m2=float(_refl_neighbor(j - 2)),
+                    refl_p2=float(_refl_neighbor(j + 2)),
+                    pass_along_scan=pass_along,
+                    bkg=bkg,
+                )
+                candidates.append(cand)
+                stage[i, j] = Stage.CANDIDATE
+                d_fire_temp[i, j] = quick_fire_temp
+                d_fire_frac[i, j] = 0.0
+                d_frp[i, j] = FRP_NOT_CALCULATED
+                continue
 
             fire_size_init = 0.0
             fire_temp_init = 0.0 if sat_flag else -9.05
@@ -706,7 +768,10 @@ def run_part1(
 
             # FailChar = 1: pixel is NOT a fire (ATBD 3.4.2.7)
             # "the algorithm concludes that the pixel is a non-fire pixel"
-            fc = FailChar.NONE
+            # Preserve F7 assigned by the saturation test above.  Resetting
+            # this unconditionally to NONE loses the saturation audit flag and
+            # incorrectly allows FRP to be reported later.
+            fc = int(fail_char_arr[i, j])
             if ((bt7[i, j] - bt14_eff[i, j] < std_7b14b)
                     and (refl_ij < std_reflb_max or pass_along)):
                 fc = FailChar.F1
@@ -754,16 +819,17 @@ def run_part1(
             stage[i, j] = Stage.TPW_OK
 
             # Smoke/thin cloud correction (daylight, albedo diff in (0.025, 0.07))
+            smoke_corrected = False
             if day_pixel and refl2 is not None and not np.isnan(alb_ij) and not np.isnan(alb_bkg):
                 alb_diff = alb_ij - alb_bkg
                 if CLOUD_ADJ_ALBEDO_LOW < alb_diff < CLOUD_ADJ_ALBEDO_HIGH:
                     T7_corr  += CLOUD_ADJ_BT7_COEF  * alb_diff
                     T14_corr += CLOUD_ADJ_BT14_COEF * alb_diff
-                    fail_char_arr[i, j] = FailChar.F8
+                    smoke_corrected = True
                 elif alb_ij > CLOUD_ALBEDO_THRESH or alb_diff >= CLOUD_ADJ_ALBEDO_HIGH:
                     T7_corr  += CLOUD_ADJ_BT7_FIXED
                     T14_corr += CLOUD_ADJ_BT14_FIXED
-                    fail_char_arr[i, j] = FailChar.F8
+                    smoke_corrected = True
 
             # Emissivity correction (validated above against ATBD code 160)
             r7_corr_em  = r7_corr  / em7
@@ -772,8 +838,12 @@ def run_part1(
             # Background radiances (must be converted from BT → rad BEFORE TPW correction)
             r7_bkg_raw  = planck_rad_from_coeffs(bkg.temp7_bkg_mean,  **coeffs7)
             r14_bkg_raw = planck_rad_from_coeffs(bkg.temp14_bkg_mean, **coeffs_long)
-            r7_bkg_corr  = _apply_tpw_correction(r7_bkg_raw,  offset7,  trans7)
-            r14_bkg_corr = _apply_tpw_correction(r14_bkg_raw, offset14, trans14)
+            # Background radiances: apply TPW first, then emissivity, so
+            # pixel and background remain at the same corrected level.
+            r7_bkg_tpw  = _apply_tpw_correction(r7_bkg_raw,  offset7, trans7)
+            r14_bkg_tpw = _apply_tpw_correction(r14_bkg_raw, offset14, trans14)
+            r7_bkg_corr  = r7_bkg_tpw / em7
+            r14_bkg_corr = r14_bkg_tpw / em14
 
             if r7_bkg_corr <= 0 or r14_bkg_corr <= 0:
                 fire_mask[i, j] = FireMask.CONV_ERROR;  continue
@@ -825,7 +895,7 @@ def run_part1(
             if T14c < min_t14 or T7c < min_t7:
                 fc = FailChar.F3
 
-            elif np.abs(T14c - Tbc14) < 0.25:
+            elif T14c - Tbc14 < 0.25:
                 if ((not np.isnan(alb_ij) and alb_ij > 0.15) or is_cloudy) \
                         and T7c - Tbc14 > 10.0:
                     fc = FailChar.F10
@@ -863,7 +933,7 @@ def run_part1(
                 doz = compute_dozier(
                     r7_diff, r14_diff,
                     r7_bkg_corr, r14_bkg_corr,
-                    Tbc7,
+                    Tbc14,
                     coeffs7, coeffs_long,
                     is_potential_glint=is_glint,
                 )

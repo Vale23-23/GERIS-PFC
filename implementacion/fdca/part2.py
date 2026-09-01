@@ -110,7 +110,8 @@ def _reassign_fog_edge(cand: FireCandidate, sza_cos: float) -> bool:
         return False
 
     bkg_diff = cand.bt7_bkg - cand.bt14_bkg
-    fog_c1 = sza_cos * P2_DAY_OFFSET_COEF + FOG_EDGE_DAY_OFFSET_ADD - bkg_diff < FOG_EDGE_DIFF_THRESH
+    day_off = sza_cos * P2_DAY_OFFSET_COEF if cand.is_day else 0.0
+    fog_c1 = day_off + FOG_EDGE_DAY_OFFSET_ADD - bkg_diff < FOG_EDGE_DIFF_THRESH
     fog_c2 = cand.bt7 - cand.bt7_bkg <= FOG_EDGE_BT7_DELTA_MAX
     return fog_c1 and fog_c2
 
@@ -170,7 +171,11 @@ def _high_med_thresholds(
 
     # Threshold 2
     diff_std    = cand.bkg.std_dev_7_14_diff if cand.bkg else 0.0
-    t7_t14_diff = cand.bt7_bkg - cand.bt14_bkg
+    # The Part II pseudocode uses the observed channel difference in the
+    # threshold term; the category test itself compares the background
+    # difference (Tb7 - Tb14).  Using the background difference here too
+    # makes the latter condition impossible because of the positive offset.
+    t7_t14_diff = cand.bt7 - cand.bt14
     scaled2 = add_c + bg_off + t7_t14_diff + 2.0 * diff_std
     thresh2 = max(base, scaled2)
 
@@ -295,12 +300,17 @@ def run_part2(
                 "conf_thr2_high":   float(thr2_h),
                 "conf_thr1_medium": float(thr1_m),
                 "conf_thr2_medium": float(thr2_m),
-                "conf_bt7c_minus_bkg7": float(cand.bt7_corr - cand.bt7_bkg),
+                "conf_bt7c_minus_bkg7": float(cand.bt7 - cand.bt7_bkg),
                 "conf_bkg7_minus_bkg14": float(cand.bt7_bkg - cand.bt14_bkg),
             })
         if upgraded_code is not None:
             fire_code = upgraded_code
             cand.fail_char += flag_delta
+
+        # Keep the unfiltered base category for the final FRP rule.  The
+        # temporal offset is only an output-label transformation (10→30,
+        # ..., 15→35), not a new fire category.
+        base_fire_code = fire_code
 
         # ── Optional empirical precision-oriented policy ────────────────────
         # This is deliberately outside the ATBD path.  It is useful when the
@@ -328,10 +338,6 @@ def run_part2(
             # Keep the Part I code in the output and do not append to confirmed:
             # this is a final Part II rejection, not a new fire category.
             continue
-
-        # No FRP for passes > 10
-        if cand.n_passes > BKG_MAX_ITER:
-            cand.frp = FRP_NPASSES_EXCEEDED
 
         # ── Finalize fire_area for non-processed categories (Table 3.10) ──
         # fire_temp is intentionally NOT touched here: Part I (3.4.2.11)
@@ -364,6 +370,19 @@ def run_part2(
         # Apply temporal offset (+20) if filtered
         if temporally_filtered:
             fire_code += TEMPORAL_FILTER_CODE_OFFSET   # 10->30, 11->31, ... 15->35
+
+        # ATBD 3.4.2.12: FRP is independent of Dozier, but the output
+        # category controls whether it is reported.  Apply this only after
+        # Part II has assigned the final base category; preserve -99 for a
+        # background that exceeded the maximum number of passes.
+        if cand.n_passes > BKG_MAX_ITER:
+            cand.frp = FRP_NPASSES_EXCEEDED
+        elif base_fire_code in (
+                FireMask.SATURATED,
+                FireMask.CLOUD_CONTAM,
+                FireMask.LOW_PROB,
+        ):
+            cand.frp = FRP_NOT_CALCULATED
 
         # ── Write final mask code (3.4.2.17/18: output) ──────────────────────
         fire_mask[i, j] = fire_code

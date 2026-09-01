@@ -982,6 +982,12 @@ def load_fdca_input(
     eco_mask_path = os.path.join(base, "eco_mask.npy")
     eco_mask = load_static_eco_mask(shape, eco_mask_path)
 
+    # The static ecosystem mask is authoritative for background land pixels.
+    # Codes 150–153 represent invalid ecosystem, sea water, coast fringe,
+    # and inland water; only code 0 is included as land.
+    eco_mask_fixed = eco_mask.astype(np.uint8)
+    masks["land_mask"] = eco_mask_fixed == 0
+
     # ── Armar FDCAInput ───────────────────────────────────────────────────────
     inp = FDCAInput(
         bt7=bt7,   rad7=rad7,

@@ -36,9 +36,18 @@ def _dozier_rad_fire(rad_total: float, rad_bkg: float, p: float) -> float:
     return (rad_total - (1.0 - p) * rad_bkg) / p
 
 
+def _background_radiances(Tb: float, coeffs7: dict, coeffs14: dict) -> tuple[float, float]:
+    """Return both background radiances from the single ATBD ``Tbc`` value."""
+    with np.errstate(all="ignore"):
+        rad7_bkg = planck_rad_from_coeffs(Tb, **coeffs7)
+        rad14_bkg = planck_rad_from_coeffs(Tb, **coeffs14)
+    return float(rad7_bkg), float(rad14_bkg)
+
+
 def _solve_bisection(
     rad7: float, rad14: float,
-    rad7_bkg: float, rad14_bkg: float,
+    _rad7_bkg: float, _rad14_bkg: float,
+    Tb: float,
     coeffs7: dict, coeffs14: dict,
 ) -> tuple[float, float]:
     """
@@ -49,22 +58,38 @@ def _solve_bisection(
     """
     p_lo = DOZIER_P_LOWER
     p_hi = DOZIER_P_UPPER
+    # Use the ATBD Tbc value to construct both channel backgrounds.  The
+    # radiances passed by Part I are retained for API compatibility, but the
+    # inversion must use one consistent corrected background temperature.
+    rad7_bkg, rad14_bkg = _background_radiances(Tb, coeffs7, coeffs14)
 
-    # Sign function for temperature difference at a given p
     def temp_diff_sign(p: float) -> float:
         rf7  = _dozier_rad_fire(rad7,  rad7_bkg,  p)
         rf14 = _dozier_rad_fire(rad14, rad14_bkg, p)
         Tt7  = planck_temp_from_coeffs(rf7,  **coeffs7)
         Tt14 = planck_temp_from_coeffs(rf14, **coeffs14)
-        return float(np.sign(Tt7 - Tt14))
+        diff = float(Tt7 - Tt14)
+        if not np.isfinite(diff):
+            raise ValueError("non-finite intermediary temperature in bisection")
+        return float(np.sign(diff))
 
     sign_lo = temp_diff_sign(p_lo)
+    sign_hi = temp_diff_sign(p_hi)
+    if sign_lo == 0.0:
+        rf7 = _dozier_rad_fire(rad7, rad7_bkg, p_lo)
+        return p_lo, float(planck_temp_from_coeffs(rf7, **coeffs7))
+    if sign_hi == 0.0:
+        return p_hi, float(planck_temp_from_coeffs(rad7, **coeffs7))
+    if sign_lo == sign_hi:
+        raise ValueError("Dozier bisection interval does not bracket a root")
 
     p_mid = p_lo
     for _ in range(DOZIER_BISECT_N):
         log_mid = np.log10(p_lo) + (np.log10(p_hi) - np.log10(p_lo)) / 2.0
         p_mid   = 10.0 ** log_mid
         sign_mid = temp_diff_sign(p_mid)
+        if sign_mid == 0.0:
+            break
 
         if sign_mid == sign_lo:
             p_lo    = p_mid
@@ -75,6 +100,8 @@ def _solve_bisection(
     # Estimate Tt from final p
     rf7 = _dozier_rad_fire(rad7, rad7_bkg, p_mid)
     Tt  = float(planck_temp_from_coeffs(rf7, **coeffs7))
+    if not np.isfinite(Tt):
+        raise ValueError("non-finite final temperature in bisection")
     return p_mid, Tt
 
 
@@ -106,8 +133,7 @@ def _solve_newton(
         return p, Tt, False
 
     with np.errstate(all="ignore"):
-        Lb7 = planck_rad_from_coeffs(Tb, **coeffs7)
-        Lb14 = planck_rad_from_coeffs(Tb, **coeffs14)
+        Lb7, Lb14 = _background_radiances(Tb, coeffs7, coeffs14)
     if not np.all(np.isfinite([Lb7, Lb14])):
         return p, Tt, False
 
@@ -198,8 +224,8 @@ def compute_pixel_area(
     """
     Pixel area in km² using the 4×4 box great-circle method (ATBD 3.4.2.10).
 
-    Corners at (i±2, j±2), distances divided by 4 before area calculation.
-    Heron's formula for the parallelogram.
+    Corners at (i±2, j±2), side lengths divided by 4 before averaging
+    opposite sides into a rectangular area.
     """
     L, W = latitudes.shape
 
@@ -223,18 +249,17 @@ def compute_pixel_area(
         arg  = np.clip(arg, -1.0, 1.0)
         return 6378.137 * np.arccos(arg)
 
-    # Sides of the 4×4 box divided by 4
-    a = great_circle_km(*c[0], *c[1]) / 4.0   # top-left → bottom-left
-    b = great_circle_km(*c[1], *c[2]) / 4.0   # bottom-left → bottom-right
-    d = great_circle_km(*c[0], *c[2]) / 4.0   # diagonal (used in Heron)
+    # Compute all four sides of the 4×4 box, then average opposite sides as
+    # specified by ATBD 3.4.2.10.  This avoids bias from using only the lower
+    # and left edges of the geostationary pixel.
+    vertical_left = great_circle_km(*c[0], *c[1]) / 4.0
+    vertical_right = great_circle_km(*c[3], *c[2]) / 4.0
+    horizontal_bottom = great_circle_km(*c[1], *c[2]) / 4.0
+    horizontal_top = great_circle_km(*c[0], *c[3]) / 4.0
 
-    # Heron for one triangle × 2 → parallelogram area
-    s = (a + b + d) / 2.0
-    try:
-        area = 2.0 * np.sqrt(max(0.0, s * (s-a) * (s-b) * (s-d)))
-    except Exception:
-        area = 0.0
-    return area
+    vertical = (vertical_left + vertical_right) / 2.0
+    horizontal = (horizontal_bottom + horizontal_top) / 2.0
+    return float(max(0.0, vertical * horizontal))
 
 
 def compute_dozier(
@@ -266,7 +291,7 @@ def compute_dozier(
     # ── Bisection ─────────────────────────────────────────────────────────
     try:
         p_bis, Tt_bis = _solve_bisection(
-            rad7, rad14, rad7_bkg, rad14_bkg, coeffs7, coeffs14
+            rad7, rad14, rad7_bkg, rad14_bkg, Tb, coeffs7, coeffs14
         )
     except Exception:
         # Bisection failed entirely → last chance
@@ -301,12 +326,11 @@ def compute_dozier(
             result.fail_char = FailChar.F6   # non-glint, temp < 400 K
         return result
 
-    # Valid fire solution (Tt ≥ 400 K)
-    if is_potential_glint:
-        result.fail_char = FailChar.F9  # overridden to F9 → becomes 9 in Part II
-        # Actually if Tt > 400 and was glint→ set to 9 cleared to no-glint processed
-    else:
-        result.fail_char = FailChar.NONE
+    # Valid fire solution (Tt ≥ 400 K).  Resolve the ATBD inconsistency
+    # in favor of Table 3.5: F9 is reserved for a glint-flagged solution
+    # below 400 K.  A valid hot solution clears the temporary F8 glint flag
+    # and remains eligible for the processed-fire category and FRP.
+    result.fail_char = FailChar.NONE
 
     result.fire_temp = Tt
     result.fire_frac = p

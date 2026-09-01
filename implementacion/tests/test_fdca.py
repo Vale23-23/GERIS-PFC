@@ -11,7 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import unittest
-from fdca.planck import planck_rad, planck_temp, planck_deriv_T
+from fdca.planck import (
+    planck_rad, planck_temp, planck_deriv_T,
+    planck_rad_from_coeffs,
+)
 from fdca.background import compute_background, BackgroundStats
 from fdca.part1 import calculate_albedo
 from fdca.dozier import (
@@ -20,6 +23,12 @@ from fdca.dozier import (
 )
 from fdca.constants import FireMask, FailChar, MIN_FIRE_TEMP
 from fdca import run_fdca, FDCAInput
+
+
+# Synthetic ABI-like calibration coefficients used consistently to generate
+# and invert native radiances in the Dozier regression test.
+DOZIER_COEFFS7 = {"fk1": 6023.0, "fk2": 3678.0, "bc1": 0.43, "bc2": 0.99}
+DOZIER_COEFFS14 = {"fk1": 2026.0, "fk2": 1282.0, "bc1": 0.22, "bc2": 0.98}
 
 
 # ── Planck tests: Para verificar la física radiométrica ──────────────────────────── 
@@ -136,10 +145,10 @@ class TestDozier(unittest.TestCase):
     def _make_fire_radiances(self, p=0.01, Tt=800.0, Tb=295.0):
         """Genera radiancias sintéticas para una combinación conocida (p, Tt, Tb)."""
         from fdca.planck import planck_rad
-        L7_fire = planck_rad(7,  np.array([Tt]))[0]
-        L14_fire= planck_rad(14, np.array([Tt]))[0]
-        L7_bkg  = planck_rad(7,  np.array([Tb]))[0]
-        L14_bkg = planck_rad(14, np.array([Tb]))[0]
+        L7_fire = planck_rad_from_coeffs(Tt, **DOZIER_COEFFS7)
+        L14_fire = planck_rad_from_coeffs(Tt, **DOZIER_COEFFS14)
+        L7_bkg  = planck_rad_from_coeffs(Tb, **DOZIER_COEFFS7)
+        L14_bkg = planck_rad_from_coeffs(Tb, **DOZIER_COEFFS14)
         rad7  = p * L7_fire  + (1-p) * L7_bkg
         rad14 = p * L14_fire + (1-p) * L14_bkg
         return rad7, rad14, L7_bkg, L14_bkg
@@ -158,7 +167,10 @@ class TestDozier(unittest.TestCase):
         """Dozier debería recuperar aproximadamente (p, Tt) usado para generar radiancias."""
         p_true, Tt_true, Tb = 0.01, 800.0, 295.0
         rad7, rad14, r7_bkg, r14_bkg = self._make_fire_radiances(p_true, Tt_true, Tb)
-        result = compute_dozier(rad7, rad14, r7_bkg, r14_bkg, Tb)
+        result = compute_dozier(
+            rad7, rad14, r7_bkg, r14_bkg, Tb,
+            DOZIER_COEFFS7, DOZIER_COEFFS14,
+        )
         self.assertTrue(result.valid, "Dozier should find a valid solution")
         self.assertGreater(result.fire_temp, MIN_FIRE_TEMP,
             f"Fire temp {result.fire_temp:.1f} K < {MIN_FIRE_TEMP} K")
@@ -259,13 +271,15 @@ class TestIntegration(unittest.TestCase):
         return FDCAInput(
             bt7=bt7, rad7=rad7,
             bt14=bt14, rad14=rad14,
-            bt13=None, rad13=None, bt15=None,
+            bt13=None, rad13=None, bt15=None, rad15=None,
             refl2=refl2,
             latitudes=lat2d, longitudes=lon2d,
             sza=sza, glint_angle=glint_angle,
             lza=lza, azimuth=azimuth,
             tpw=tpw, emiss7=emiss7, emiss14=emiss14,
             lut_tpw=lut, FPT=85.0,
+            coeffs7=DOZIER_COEFFS7, coeffs14=DOZIER_COEFFS14,
+            coeffs13=None, coeffs15=None,
             land_cover=land_cover, land_mask=land_mask,
             desert_mask=desert_mask, usgs_eco=usgs_eco,
         )

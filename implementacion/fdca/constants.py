@@ -60,7 +60,11 @@ CLOUD_BT14_BT15_POS      = 60.0
 # ── Background window ───────────────────────────────────────────────────────
 BKG_WINDOW_INIT  = 5          # Initial half-width (11×11)
 BKG_WINDOW_STEP  = 5          # Expansion step each iteration
-BKG_MAX_ITER     = 10         # Maximum expansions → max 111×111
+# Deliberate interpretation of ATBD 3.4.2.5: 10 expansions after the
+# initial 11x11 window produce a maximum 111x111 window. Therefore
+# n_passes is in [0, 10]; strict n_passes > BKG_MAX_ITER branches are dead,
+# while the boundary n_passes >= BKG_MAX_ITER remains meaningful.
+BKG_MAX_ITER     = 10
 BKG_VALID_FRAC   = 0.20       # Required fraction of valid pixels
 
 BKG_WARM_BT7_NIGHT   = 310.0
@@ -77,7 +81,7 @@ BT7_REFL_THRESH_SOLAR    = 5.0
 
 # ── Corrections ─────────────────────────────────────────────────────────────
 CLOUD_ADJ_ALBEDO_LOW    = 0.025
-CLOUD_ADJ_ALBEDO_HIGH   = 0.07
+CLOUD_ADJ_ALBEDO_HIGH   = 0.07       # Deliberate deviation: ATBD line says 0.38 for albedo difference; 0.07 preserves continuity with the preceding smoke branch
 CLOUD_ADJ_BT7_COEF      = 10.0
 CLOUD_ADJ_BT14_COEF     = 30.0
 CLOUD_ADJ_BT7_FIXED     = 0.7
