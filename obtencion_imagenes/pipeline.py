@@ -1,0 +1,617 @@
+"""
+pipeline.py — CLI entry point for the GOES dataset pipeline.
+
+Usage:
+  python pipeline.py download --region uruguay --start "2025-09-01 00:00" --end "2025-09-30 23:00" --products ABI-L1b-Rad-B07 ABI-L1b-Rad-B14 ABI-L2-FDCF-Mask ABI-L2-FDCF-DQF ABI-L1b-Rad-B13 ABI-L1b-Rad-B15 ABI-L1b-Rad-B02
+  python pipeline.py status   --region uruguay --products ABI-L1b-Rad-B07 ABI-L1b-Rad-B14 ABI-L2-FDCF-Mask ABI-L2-FDCF-DQF ABI-L1b-Rad-B13 ABI-L1b-Rad-B15 ABI-L1b-Rad-B02
+  python pipeline.py list-products
+  python pipeline.py list-regions
+"""
+
+import argparse
+import yaml
+import os
+import json
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import manifest
+
+from dotenv import load_dotenv
+load_dotenv()   # Reads .env from repo root if it exists; doesn't fail if missing
+
+from tpw_downloader import dedupe_by_cycle, download_and_save
+
+
+def load_config(path="config.yaml"):
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def load_manifest(output_root):
+    path = os.path.join(output_root, "manifest.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# --- Workaround para bug de OpenSSL (ASN1_R_NOT_ENOUGH_DATA en Windows) ---
+# Ver: https://github.com/openssl/openssl/issues/31807
+# https://github.com/python/cpython/issues/151504
+# Debe ejecutarse ANTES de cualquier import que traiga aiohttp (goes2go -> s3fs -> aiobotocore -> aiohttp)
+import ssl
+import certifi
+
+_original_create_default_context = ssl.create_default_context
+
+def _patched_create_default_context(purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
+    # Si no se especificó una fuente de certificados explícita, usamos el bundle
+    # de certifi en vez de dejar que Python intente leer el almacén de Windows
+    # (ese camino es el que dispara el bug de OpenSSL).
+    if cafile is None and capath is None and cadata is None:
+        cafile = certifi.where()
+    return _original_create_default_context(purpose, cafile=cafile, capath=capath, cadata=cadata)
+
+ssl.create_default_context = _patched_create_default_context
+
+import downloader
+import tpw_downloader
+
+def get_timestamps(start_str, end_str, interval_minutes=60):
+    start = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+    end   = datetime.strptime(end_str,   "%Y-%m-%d %H:%M")
+    delta = timedelta(minutes=interval_minutes)
+    ts, t = [], start
+    while t <= end:
+        ts.append(t)
+        t += delta
+    return ts
+
+
+def cmd_download(args, cfg):
+    region = cfg["regions"].get(args.region)
+    if not region:
+        print(f"❌ Region '{args.region}' not found in config.yaml")
+        return
+
+    product_ids = args.products
+    products    = [p for p in cfg["products"] if p["id"] in product_ids]
+    if not products:
+        print("❌ No valid products found. Use 'list-products' to see options.")
+        return
+
+    unknown = set(product_ids) - {p["id"] for p in products}
+    if unknown:
+        print(f"⚠️  Unknown products ignored: {', '.join(unknown)}")
+
+    timestamps   = get_timestamps(args.start, args.end, args.interval)
+    output_root  = os.path.join(cfg["output_root"], args.region)
+    satellite    = cfg["satellite"]
+    domain       = cfg["domain"]
+    max_workers  = args.workers or cfg["max_workers"]
+
+    # ── CAMEL V3 emissivity climatology (one file per calendar month covered) ──
+    # Unified here so a single `download` command resolves both raw bands and
+    # the emissivity input that fdca_adapter.load_fdca_input() expects to find
+    # already on disk under camel_emissivity_dir.
+    months_needed = sorted({ts.month for ts in timestamps})
+    camel_dir = region.get(
+        "camel_emissivity_dir",
+        os.path.join(output_root, "camel_emissivity"),
+    )
+    for month in months_needed:
+        try:
+            path = downloader.download_camel_climatology(month, camel_dir)
+            print(f"  CAMEL V3 emissivity ready for month {month:02d}: {os.path.basename(path)}")
+        except Exception as e:
+            print(f" ❌ Could not download CAMEL V3 climatology for month {month:02d}: {e}")
+
+    tasks = [(ts, prod) for ts in timestamps for prod in products]
+    print(f" Downloading {len(tasks)} files with {max_workers} workers...\n")
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                downloader.download_and_save, ts, prod, region, satellite, domain, output_root
+            ): (ts, prod)
+            for ts, prod in tasks
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+                icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
+                
+                if result["status"] == "error":
+                    print(f"  ❌ {result['timestamp']}  {result['product']:<30}  {result.get('substatus', result['status'])}")
+                    print(f"     👉 Real detail: {result.get('error')}")
+                else:
+                    print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
+            
+            except Exception as e:
+                # This catches unexpected errors from the downloader
+                print(f"  ❌ Critical error in download: {e}")
+
+    # 1. Obtenemos los IDs de los productos configurados para verificar integridad
+    all_product_ids = [p["id"] for p in products] 
+    
+    # 2. Obtenemos la configuración geográfica de la región para calcular coordenadas
+    region_cfg = cfg["regions"][args.region] 
+    
+    # 3. Llamamos al nuevo manifest con los 4 argumentos requeridos
+    manifest.update(output_root, results, all_product_ids, region_cfg)
+
+
+    downloaded = sum(1 for r in results if r["status"] == "downloaded")
+    skipped    = sum(1 for r in results if r["status"] == "exists")
+    errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
+    print(f"\n✔ Downloaded: {downloaded}  |  Already existed: {skipped}  |  Errors: {errors}")
+    print(f"📋 Manifest updated at: {output_root}/manifest.json")
+    
+    # ── GFS TPW (ATBD Table 3.2) — opt-in, runs after IR bands exist on disk ──
+    tpw_enabled = args.with_tpw or os.environ.get("GERIS_ENABLE_TPW") == "1"
+    if tpw_enabled:
+        cmd_download_tpw_gfs(timestamps, region, output_root, max_workers)
+
+def cmd_status(args, cfg):
+    output_root = os.path.join(cfg["output_root"], args.region)
+    required    = args.products if args.products else None
+    manifest.status_report(output_root, required_products=required)
+
+
+def cmd_list_products(cfg):
+    print("\n📡 Available products in config.yaml:\n")
+    for p in cfg["products"]:
+        band = f"B{p['band']:02d}" if p.get("band") else "  -"
+        print(f"  {p['id']:<30}  {band}  {p['description']}")
+
+
+def cmd_visualize(args, cfg):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    output_root = os.path.join(cfg["output_root"], args.region)
+    ts          = args.timestamp  # e.g. "20250901_1200"
+
+    rad_path  = os.path.join(output_root, "ABI-L1b-Rad-B07", f"{ts}.npy")
+    mask_path = os.path.join(output_root, "ABI-L2-FDCF",     f"{ts}.npy")
+
+    if not os.path.exists(rad_path):
+        print(f"❌ No image found for {ts}")
+        print(f"   Looking in: {rad_path}")
+        return
+
+    rad  = np.load(rad_path)
+    mask = np.load(mask_path) if os.path.exists(mask_path) else None
+
+    # Obtener el extent geográfico de la región desde config.yaml
+    # Esto le dice a cartopy dónde está el array en el mapa del mundo
+    region_cfg = cfg["regions"][args.region]
+    lon_min = region_cfg["lon_min"]
+    lon_max = region_cfg["lon_max"]
+    lat_min = region_cfg["lat_min"]
+    lat_max = region_cfg["lat_max"]
+    extent  = [lon_min, lon_max, lat_min, lat_max]
+
+    # Proyección PlateCarree: lat/lon directo, sin distorsión — la más simple
+    proj = ccrs.PlateCarree()
+
+    n_panels = 2 if mask is not None else 1
+    fig, axes = plt.subplots(
+        1, n_panels,
+        figsize=(7 * n_panels, 6),
+        subplot_kw={"projection": proj},  # todos los ejes usan la misma proyección
+    )
+    if n_panels == 1:
+        axes = [axes]  # normalizar a lista para iterar igual en ambos casos
+
+    fig.suptitle(f"GOES-19 — {args.region} — {ts}", fontsize=14)
+
+    def add_map_features(ax):
+        """Agrega costas, fronteras y grilla de lat/lon a un eje de cartopy."""
+        # Limitar la vista al extent de la región
+        ax.set_extent(extent, crs=proj)
+
+        # Costas con resolución de 10m (la más detallada disponible en Natural Earth)
+        ax.add_feature(cfeature.COASTLINE.with_scale("10m"), linewidth=0.8, color="white")
+
+        # Fronteras nacionales
+        ax.add_feature(cfeature.BORDERS.with_scale("10m"), linewidth=0.6, color="white", linestyle="--")
+
+        # Grilla de lat/lon con etiquetas
+        gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="white", alpha=0.5, linestyle=":")
+        gl.top_labels   = False  # solo etiquetas abajo y a la izquierda
+        gl.right_labels = False
+
+    # ── Panel 1: Banda 7 (infrarrojo térmico) ───────────────────────────────
+    # imshow con transform=proj y extent le dice a cartopy que el array cubre
+    # exactamente el bounding box de la región
+    im1 = axes[0].imshow(
+        np.log1p(rad),
+        origin="upper",       # fila 0 = norte (convención de imágenes satelitales)
+        extent=extent,
+        transform=proj,
+        cmap="magma",
+    )
+    axes[0].set_title("Banda 7 — Infrarrojo (firma térmica)")
+    add_map_features(axes[0])
+    plt.colorbar(im1, ax=axes[0], label="log(1 + Rad)", shrink=0.7)
+
+    # ── Panel 2: Máscara de fuego ────────────────────────────────────────────
+    if mask is not None:
+        mask_int = mask.astype(np.int8)
+        # Fuego = DQF==0 (buena calidad), pero solo si no es un archivo todo-ceros
+        if np.all(mask_int == 0):
+            print("⚠️  This timestamp has an invalid mask (entire image is DQF=0, region not processed)")
+            fuego = np.zeros_like(mask_int, dtype=float)
+        else:
+            fuego = (mask_int == 0).astype(float)
+        im2 = axes[1].imshow(
+            fuego,
+            origin="upper",
+            extent=extent,
+            transform=proj,
+            cmap="Reds",
+            vmin=0, vmax=1,
+        )
+        axes[1].set_title(f"Fire mask — {int(fuego.sum())} pixels detected")
+        add_map_features(axes[1])
+        plt.colorbar(im2, ax=axes[1], shrink=0.7)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def cmd_fire_stats(args, cfg):
+    import numpy as np
+    output_root  = os.path.join(cfg["output_root"], args.region)
+    mask_folder  = os.path.join(output_root, "ABI-L2-FDCF")
+
+    if not os.path.exists(mask_folder):
+        print(f"❌ No image folder found for fire masks: {mask_folder}")
+        print("   Make sure you have downloaded the ABI-L2-FDCF product.")
+        return
+
+    archivos = sorted([f for f in os.listdir(mask_folder) if f.endswith(".npy")])
+    if not archivos:
+        print("⚠️  No fire masks downloaded yet.")
+        return
+
+    con_fuego, sin_fuego, invalidos, detalles = [], [], [], []
+    for f in archivos:
+        mask = np.load(os.path.join(mask_folder, f)).astype(np.int8)
+        # Detectar archivos inválidos: toda la imagen es DQF=0 (región no procesada)
+        # Esto pasa con timestamps anteriores a la operación del satélite
+        if np.all(mask == 0):
+            invalidos.append(f)
+        else:
+            # DQF=0 → fuego de buena calidad
+            fire_pixels = int(np.sum(mask == 0))
+            if fire_pixels > 0:
+                con_fuego.append(f)
+                detalles.append((f.replace(".npy", ""), fire_pixels))
+            else:
+                sin_fuego.append(f)
+
+    total_validos = len(con_fuego) + len(sin_fuego)
+    total = len(archivos)
+    print(f"\n🔥 FIRE STATISTICS — {args.region}")
+    print(f"{'='*45}")
+    print(f"  Total files              : {total}")
+    if invalidos:
+        print(f"  ⚠️  Invalid (not processed): {len(invalidos)}")
+    print(f"  Valid timestamps          : {total_validos}")
+    print(f"  With fire detected         : {len(con_fuego)}  ({100*len(con_fuego)/total_validos:.1f}%)" if total_validos else "")
+    print(f"  Without fire                : {len(sin_fuego)}  ({100*len(sin_fuego)/total_validos:.1f}%)" if total_validos else "")
+
+    if detalles:
+        detalles.sort(key=lambda x: x[1], reverse=True)
+        print(f"\n🔝 Top 10 timestamps with most fire pixels:")
+        print(f"  {'Timestamp':<20} {'Fire pixels':>15}")
+        print(f"  {'-'*35}")
+        for ts, n in detalles[:10]:
+            print(f"  {ts:<20} {n:>15,}")
+
+
+def cmd_list_regions(cfg):
+    print("\n🗺  Available regions in config.yaml:\n")
+    for name, coords in cfg["regions"].items():
+        print(f"  {name:<20}  lat [{coords['lat_min']}, {coords['lat_max']}]  "
+              f"lon [{coords['lon_min']}, {coords['lon_max']}]")
+
+
+def cmd_retry(args, cfg):
+    region = cfg["regions"].get(args.region)
+    if not region:
+        print(f"❌ Region '{args.region}' not found in config.yaml")
+        return
+
+    output_root = os.path.join(cfg["output_root"], args.region)
+    manifest_entries = load_manifest(output_root)
+    if not manifest_entries:
+        print(f"❌ No manifest.json found or it is empty in: {output_root}")
+        return
+
+    product_map = {p["id"]: p for p in cfg["products"]}
+    retry_entries = [
+        e for e in manifest_entries
+        if e["status"] in ("error", "empty")
+        and (not args.products or e["product"] in args.products)
+    ]
+
+    if not retry_entries:
+        print("✅ No failed downloads pending retry.")
+        return
+
+    if args.products:
+        unknown = set(args.products) - set(product_map)
+        if unknown:
+            print(f"⚠️  Unknown products ignored: {', '.join(unknown)}")
+
+    tasks = []
+    for entry in retry_entries:
+        prod = product_map.get(entry["product"])
+        if not prod:
+            print(f"⚠️  Product not defined in config.yaml: {entry['product']}")
+            continue
+
+        # Convertimos el string "20250901_1200" a un objeto datetime
+        ts_obj = datetime.strptime(entry["timestamp"], "%Y%m%d_%H%M")
+        tasks.append((ts_obj, prod))
+    
+    if not tasks:
+        print("❌ No valid tasks to retry.")
+        return
+
+    max_workers = args.workers or cfg["max_workers"]
+    print(f"🔁 Reintentando {len(tasks)} descargas con {max_workers} workers...\n")
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                downloader.download_and_save, ts, prod, region, cfg["satellite"], cfg["domain"], output_root
+            ): (ts, prod)
+            for ts, prod in tasks
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
+            print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
+
+    # 1. Obtenemos todos los IDs definidos en el config.yaml para esta región
+    all_ids = [p["id"] for p in cfg["products"]]
+    
+    # 2. Obtenemos la configuración de la región
+    region_cfg = cfg["regions"][args.region]
+    
+    # 3. Actualizamos el manifest
+    manifest.update(output_root, results, all_ids, region_cfg)
+
+
+    downloaded = sum(1 for r in results if r["status"] == "downloaded")
+    skipped    = sum(1 for r in results if r["status"] == "exists")
+    errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
+    print(f"\n✔ Reintentos completados: descargados={downloaded}  |  ya existían={skipped}  |  errores={errors}")
+    print(f"📋 Manifest actualizado en: {output_root}/manifest.json")
+
+def cmd_download_camel(args, cfg):
+    region_cfg = cfg["regions"].get(args.region)
+    if not region_cfg:
+        print(f"❌ Región '{args.region}' no encontrada en config.yaml")
+        return
+
+    output_root = os.path.join(cfg["output_root"], args.region)
+    camel_dir   = region_cfg.get(
+        "camel_emissivity_dir",
+        os.path.join(output_root, "camel_emissivity"),
+    )
+
+    try:
+        path = downloader.download_camel_climatology(args.month, camel_dir)
+        print(f"✅ Climatología CAMEL V3 lista para el mes {args.month:02d}: {path}")
+    except Exception as e:
+        print(f"❌ Error descargando climatología CAMEL: {e}")
+
+def cmd_download_tpw_gfs(timestamps, region_cfg, output_root, max_workers):
+    """
+    Download GFS TPW (ATBD Table 3.2: NCEP TPW, not ABI-derived) for each
+    timestamp, regridded to the ABI grid.
+
+    Must run AFTER the main product download loop: tpw_downloader infers the
+    target grid shape from an already-downloaded IR band (B07/B13/B14) for
+    this region/timestamp, so it needs those .npy files on disk already.
+
+    GFS only publishes an analysis every 6h (00/06/12/18 UTC), so many ABI
+    scene timestamps collapse onto the same GFS cycle and the same output
+    file (see tpw_downloader.cycle_path_for_timestamp). Dedup to one job per
+    cycle BEFORE dispatching to the thread pool -- otherwise concurrent
+    workers for timestamps sharing a cycle race on the same file: each sees
+    "does not exist yet" and re-downloads/overwrites it (harmless but wasteful,
+    and can show spurious "downloaded" counts higher than the true cycle count).
+
+    No-ops with a single warning (instead of failing) if the optional deps
+    (cfgrib/eccodes/scipy) are not installed on this machine.
+    """
+    try:
+        import cfgrib  # noqa: F401  (dependency check only)
+    except ImportError:
+        print("⚠️  Skipping GFS TPW download: 'cfgrib' is not installed "
+              "(pip install cfgrib scipy --break-system-packages; "
+              "eccodes may also need a system package, e.g. "
+              "'sudo apt install libeccodes-dev' on Linux).")
+        return []
+    # Target grid is fixed per region regardless of which scene/cycle we're
+    # downloading TPW for. Infer it once, explicitly, from any already
+    # downloaded IR band -- never let download_and_save() infer it from the
+    # cycle timestamp itself, since GFS cycles (00/06/12/18 UTC) rarely
+    # coincide with an actual downloaded ABI scene timestamp, and a failed
+    # inference silently falls back to un-regridded native GFS resolution.
+    goes_shape = tpw_downloader._infer_goes_shape(output_root, timestamps[0])
+    if goes_shape is None:
+        print("⚠️  Could not determine ABI grid shape from downloaded bands; "
+              "TPW will not be regridded correctly. Run the main download "
+              "step first.")
+
+    unique_cycles = tpw_downloader.dedupe_by_cycle(timestamps)
+    print(f"\n🌧️  Downloading GFS TPW for {len(unique_cycles)} cycles "
+          f"({len(timestamps)} scenes)...\n")
+
+    icon_map = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(tpw_downloader.download_and_save, cycle_dt, region_cfg, output_root, goes_shape): cycle_dt            for cycle_dt in unique_cycles
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            icon = icon_map.get(result["status"], "?")
+            if result["status"] == "error":
+                print(f"  ❌ {result['timestamp']}  TPW-GFS  {result.get('substatus', result['status'])}")
+                print(f"     👉 {result.get('error')}")
+            else:
+                print(f"  {icon} {result['timestamp']}  TPW-GFS  {result['status']}")
+
+    downloaded = sum(1 for r in results if r["status"] == "downloaded")
+    skipped    = sum(1 for r in results if r["status"] == "exists")
+    errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
+    print(f"  ✔ TPW-GFS: downloaded={downloaded}  existing={skipped}  errors={errors}  "
+          f"(covering {len(timestamps)} scenes)")
+    return results
+
+def cmd_download_tpw(args, cfg):
+    """Standalone TPW-only download, mirrors cmd_download_camel's pattern."""
+    region = cfg["regions"].get(args.region)
+    if not region:
+        print(f"❌ Region '{args.region}' not found in config.yaml")
+        return
+
+    timestamps  = get_timestamps(args.start, args.end, args.interval)
+    output_root = os.path.join(cfg["output_root"], args.region)
+    max_workers = args.workers or cfg["max_workers"]
+
+    cmd_download_tpw_gfs(timestamps, region, output_root, max_workers)
+
+def main():
+    parser = argparse.ArgumentParser(description="GOES dataset pipeline")
+    sub    = parser.add_subparsers(dest="command")
+
+    # download
+    dl = sub.add_parser("download", help="Download products for a date range")
+    dl.add_argument("--region",   required=True,  help="Region key from config.yaml")
+    dl.add_argument("--start",    required=True,  help='Start datetime "YYYY-MM-DD HH:MM"')
+    dl.add_argument("--end",      required=True,  help='End datetime "YYYY-MM-DD HH:MM"')
+    dl.add_argument("--products", required=True,  nargs="+", help="Product IDs from config.yaml")
+    dl.add_argument("--interval", type=int, default=60, help="Interval in minutes (default: 60)")
+    dl.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
+    dl.add_argument("--with-tpw", action="store_true",
+        help="Also download GFS TPW for each timestamp (needs cfgrib/eccodes/scipy)")
+    # status
+    st = sub.add_parser("status", help="Show manifest status for a region")
+    st.add_argument("--region",   required=True, help="Region key from config.yaml")
+    st.add_argument("--products", nargs="+",     help="Check completeness for these products")
+
+    # list-products / list-regions
+    sub.add_parser("list-products", help="List all products defined in config.yaml")
+    sub.add_parser("list-regions",  help="List all regions defined in config.yaml")
+
+    # visualize
+    viz = sub.add_parser("visualize", help="Show Band 7 image and fire mask for a timestamp")
+    viz.add_argument("--region",    required=True, help="Region key from config.yaml")
+    viz.add_argument("--timestamp", required=True, help='Timestamp to visualize, e.g. "20250901_1200"')
+
+    # fire-stats
+    fs = sub.add_parser("fire-stats", help="Show fire detection statistics for a region")
+    fs.add_argument("--region", required=True, help="Region key from config.yaml")
+
+    # retry
+    rt = sub.add_parser("retry", help="Retry downloads that failed previously")
+    rt.add_argument("--region",   required=True, help="Region key from config.yaml")
+    rt.add_argument("--products", nargs="+", help="Limit retry to these product IDs")
+    rt.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
+
+    # download-camel
+    dc = sub.add_parser("download-camel", help="Descarga climatología de emisividad CAMEL V3 (LP DAAC)")
+    dc.add_argument("--region", required=True, help="Region key from config.yaml")
+    dc.add_argument("--month",  required=True, type=int, choices=range(1, 13), help="Mes calendario (1-12)")
+
+    tp = sub.add_parser("download-tpw", help="Download GFS TPW only (ATBD Table 3.2)")
+    tp.add_argument("--region",   required=True, help="Region key from config.yaml")
+    tp.add_argument("--start",    required=True, help='Start datetime "YYYY-MM-DD HH:MM"')
+    tp.add_argument("--end",      required=True, help='End datetime "YYYY-MM-DD HH:MM"')
+    tp.add_argument("--interval", type=int, default=60, help="Interval in minutes (default: 60)")
+    tp.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
+
+    sp = sub.add_parser("spatial-report", help="Muestra el fuego por departamento para un timestamp")
+    sp.add_argument("--region", required=True, help="Región (ej: uruguay)")
+    sp.add_argument("--timestamp", required=True, help="Timestamp (ej: 20250926_1900)")
+
+    args = parser.parse_args()
+    cfg  = load_config(os.path.join(os.path.dirname(__file__), "config.yaml"))
+
+    print("GERIS_GOES2GO_CACHE =", os.environ.get("GERIS_GOES2GO_CACHE"))
+
+    # Allows each person to redirect downloads to their own disk (e.g. an external drive) by setting these variables
+    # in their local .env, without touching the shared config.yaml. If unset, behavior is unchanged.
+    if os.environ.get("GERIS_OUTPUT_ROOT"):
+        cfg["output_root"] = os.environ["GERIS_OUTPUT_ROOT"]
+    downloader.configure_goes2go_cache_dir()
+
+    if args.command == "download":
+        cmd_download(args, cfg)
+    elif args.command == "status":
+        cmd_status(args, cfg)
+    elif args.command == "list-products":
+        cmd_list_products(cfg)
+    elif args.command == "list-regions":
+        cmd_list_regions(cfg)
+    elif args.command == "fire-stats":
+        cmd_fire_stats(args, cfg)
+    elif args.command == "retry":
+        cmd_retry(args, cfg)
+    elif args.command == "download-camel":
+        cmd_download_camel(args, cfg)
+    elif args.command == "spatial-report":
+        cmd_spatial_report(args, cfg)
+    elif args.command == "visualize":     
+        cmd_visualize(args, cfg)
+    elif args.command == "download-tpw":
+        cmd_download_tpw(args, cfg)
+    else:
+        parser.print_help()
+
+downloader.configure_goes2go_cache_dir()
+print("goes2go cache =", downloader.get_goes2go_cache_dir())
+
+def cmd_spatial_report(args, cfg):
+    import numpy as np
+    output_root = os.path.join(cfg["output_root"], args.region)
+    ts = args.timestamp
+    mask_path = os.path.join(output_root, "ABI-L2-FDCF", f"{ts}.npy")
+
+    if not os.path.exists(mask_path):
+        print(f"❌ No se encontró la máscara para {ts}")
+        return
+
+    mask = np.load(mask_path)
+    region_cfg = cfg["regions"][args.region]
+    
+    data = manifest.load(output_root)
+    ts_data = data.get(ts, {})
+    report = ts_data.get("fire", {}).get("spatial_report", {})
+
+    print(f"\n📍 REPORTE ESPACIAL — {args.region.upper()} — {ts}")
+    print("="*45)
+    if not report:
+        print("✅ No se detectaron focos de fuego en este timestamp.")
+    else:
+        for depto, count in sorted(report.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {depto:<20} {count:>5} píxeles")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,441 @@
+"""
+downloader.py — config-driven download and spatial crop for GOES data.
+"""
+
+import os
+import numpy as np
+import pyproj
+from goes2go import GOES
+import earthaccess
+
+# High-resolution bands that cannot be loaded with full nearesttime()
+# because the full disk is too large (21696x21696 pixels)
+HIGH_RES_BANDS = {2}
+
+
+def goes_xy_slices(ds, lat_min, lat_max, lon_min, lon_max):
+    """Convert a lat/lon bounding box to GOES x/y slices."""
+    proj_info  = ds["goes_imager_projection"]
+    lon_origin = float(proj_info.longitude_of_projection_origin)
+    H          = float(proj_info.perspective_point_height) + float(proj_info.semi_major_axis)
+
+    crs_goes = pyproj.CRS.from_dict({
+        "proj": "geos", "lon_0": lon_origin,
+        "h": float(proj_info.perspective_point_height),
+        "a": float(proj_info.semi_major_axis),
+        "b": float(proj_info.semi_minor_axis),
+        "sweep": "x",
+    })
+    transformer = pyproj.Transformer.from_crs(
+        pyproj.CRS.from_epsg(4326), crs_goes, always_xy=True
+    )
+    px, py = transformer.transform(
+        [lon_min, lon_max, lon_min, lon_max],
+        [lat_min, lat_min, lat_max, lat_max],
+    )
+    x_vals, y_vals = ds["x"].values, ds["y"].values
+    x_slice = slice(
+        float(x_vals[np.argmin(np.abs(x_vals - np.nanmin(px) / H))]),
+        float(x_vals[np.argmin(np.abs(x_vals - np.nanmax(px) / H))]),
+    )
+    y_slice = slice(
+        float(y_vals[np.argmin(np.abs(y_vals - np.nanmax(py) / H))]),
+        float(y_vals[np.argmin(np.abs(y_vals - np.nanmin(py) / H))]),
+    )
+    return x_slice, y_slice
+
+
+def _get_g2g_config():
+    """
+    Returns the `config` object (nested dict) from goes2go, regardless of
+    whether the installed version exposes it as `goes2go.config` (current API,
+    goes2go >= 2024.x) or as the submodule `goes2go.config.config` (legacy API,
+    in case someone on the team has an older version installed).
+    Raises an ImportError if neither path works, so as not to
+    mask a genuine installation issue.
+    """
+    try:
+        from goes2go import config as g2g_config
+        return g2g_config
+    except ImportError:
+        pass
+    from goes2go.config import config as g2g_config  # fallback, versiones viejas
+    return g2g_config
+
+
+def get_goes2go_cache_dir():
+    """Returns the directory where goes2go saves downloaded files."""
+    try:
+        g2g_config = _get_g2g_config()
+        return g2g_config.get("default", {}).get("save_dir", os.path.expanduser("~/data"))
+    except Exception:
+        return os.path.expanduser("~/data")
+
+
+def configure_goes2go_cache_dir():
+    """
+    If the GERIS_GOES2GO_CACHE environment variable is set (typically in each
+    machine's local .env), redirects goes2go's internal cache (where the full
+    full-disk .nc file is downloaded before cropping) to that path.
+    If the variable is not set, this function is a no-op and behavior is
+    identical to today (goes2go's default, typically ~/data).
+
+    Must be called once, before the first download.
+    """
+    cache_dir = os.environ.get("GERIS_GOES2GO_CACHE")
+    if not cache_dir:
+        return
+    g2g_config = _get_g2g_config()
+    os.makedirs(cache_dir, exist_ok=True)
+    g2g_config["default"]["save_dir"] = cache_dir
+
+def extract_units_metadata(da) -> dict:
+    """
+    Extracts unit metadata from an xr.DataArray as provided by NOAA's .nc
+    file, to document it in a sidecar JSON.
+
+    Why this is needed: np.save() saves only the array of numbers, without
+    any attributes. Once the .npy is written, the physical unit of those
+    numbers (e.g., mW m-2 sr-1 cm-1, W m-2 sr-1 um-1, K, mm) is no longer
+    stored anywhere except in the developer's memory. This function captures
+    it while it is still available (from the newly opened .nc) and persists
+    it alongside the corresponding .npy.
+
+    - "units"/"long_name"/"valid_range" come from da.attrs, where xarray
+      stores the decoded metadata (CF-compliant).
+    - "scale_factor"/"add_offset" reside in da.encoding rather than da.attrs:
+      xarray removes them from attrs and moves them there when decoding the
+      packed integer to its physical value. Their presence here confirms that
+      da.values is ALREADY in physical units (not raw unscaled integers) —
+      which is the key assumption used throughout fdca_adapter.py.
+    """
+    attrs = da.attrs
+    enc   = da.encoding
+
+    valid_range = attrs.get("valid_range")
+    if valid_range is not None:
+        valid_range = [float(x) for x in np.asarray(valid_range).tolist()]
+
+    cf_decoded = ("scale_factor" in enc) or ("add_offset" in enc)
+
+    return {
+        "units": attrs.get("units"),
+        "long_name": attrs.get("long_name"),
+        "valid_range": valid_range,
+        "cf_decoded": cf_decoded, # True -> .values is already in physical units
+        "scale_factor": float(enc["scale_factor"]) if "scale_factor" in enc else None,
+        "add_offset": float(enc["add_offset"]) if "add_offset" in enc else None,
+        "packed_dtype": str(enc.get("dtype")) if "dtype" in enc else None,
+    }
+    
+
+def download_highres(timestamp, product_cfg, region_cfg, satellite, domain, folder=None):
+    """
+    Downloads and crops high-resolution bands (e.g., B02).
+    Does not save its own geometry: B02 ends up resampled to the 2 km grid
+    of the IR bands in fdca_adapter.py, so the only geometry that matters
+    for FDCAInput is region_geometry.json (generated by the IR bands in
+    the standard branch of download_and_save).
+
+    Returns
+    -------
+    data : np.ndarray
+    units_meta : dict (see extract_units_metadata)
+    """
+    import xarray as xr
+    band = product_cfg.get("band")
+    g = GOES(satellite=satellite, product=product_cfg["product"], domain=domain, bands=band)
+    files_df = g.nearesttime(timestamp, return_as="filelist", save_dir=get_goes2go_cache_dir())
+    if files_df is None or len(files_df) == 0:
+        raise RuntimeError(f"goes2go found no files for {product_cfg['id']} at {timestamp}")
+    relative_path = files_df.iloc[0]["file"]
+    cache_dir = get_goes2go_cache_dir()
+    full_path = os.path.join(cache_dir, relative_path)
+    if not os.path.exists(full_path):
+        raise FileNotFoundError(f"Downloaded file not found at: {full_path}")
+
+    ds = xr.open_dataset(full_path)   # no chunks, still lazy via indexing
+    xs, ys = goes_xy_slices(ds, **region_cfg)
+    da = ds.sel(x=xs, y=ys)[product_cfg["variable"]]
+    units_meta = extract_units_metadata(da)
+    data = da.values
+    ds.close()
+    return data, units_meta
+
+def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, output_root):
+    """
+    Download a single product/timestamp, crop to region, save as .npy.
+    For IR bands (7, 13, 14, 15), also saves Planck calibration coefficients
+    as a parallel JSON file.
+
+    Returns a dict with status and metadata, never raises.
+    """
+    import time
+    import json
+    import shutil
+
+    PLANCK_BANDS = {7, 13, 14, 15}  # IR bands where brightness temperature is relevant
+
+    product_id = product_cfg["id"]
+    folder     = os.path.join(output_root, product_id)
+    os.makedirs(folder, exist_ok=True)
+
+    file_path   = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}.npy")
+    coeffs_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_planck.json")
+    units_path  = os.path.join(folder, "units.json")
+
+    band = product_cfg.get("band")
+
+    legacy_dqf_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_dqf.npy")
+    dqf_folder = os.path.join(output_root, "ABI-L1b-Rad-B07-DFQ") if band == 7 else folder
+    dqf_path   = os.path.join(dqf_folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_dqf.npy")
+    if band == 7:
+        os.makedirs(dqf_folder, exist_ok=True)
+        if os.path.exists(legacy_dqf_path) and not os.path.exists(dqf_path):
+            shutil.copy2(legacy_dqf_path, dqf_path)
+
+    # is it necessary to generate the .npy file? If it already exists, we skip downloading.
+    need_npy = not os.path.exists(file_path)
+
+    # is it necessary to generate the JSON with Planck coefficients? Only for IR bands, and only if it doesn't already exist.
+    need_json = (
+        band in PLANCK_BANDS
+        and not os.path.exists(coeffs_path)
+    )
+
+    # is it necessary to generate the JSON with the units metadata? Unlike
+    # the Planck coefficients, this is saved for ALL products
+    # (B02, DQF, TPW, etc.), not just the IR bands.
+    need_units = not os.path.exists(units_path)
+
+    # is it necessary to generate the .npy with the Data Quality Flag?
+    need_dqf  = band == 7 and not os.path.exists(dqf_path)
+
+    # If all necessary files exist, we don't do anything.
+    if not need_npy and not need_json and not need_units:
+        return {
+            "status": "exists",
+            "path": file_path,
+            "product": product_id,
+            "timestamp": timestamp.strftime("%Y%m%d_%H%M"),
+        }
+
+    print(f"    📥 Downloading {timestamp.strftime('%Y%m%d_%H%M')} {product_id}...", end="", flush=True)
+    start_time = time.time()
+
+    try:
+        if band in HIGH_RES_BANDS:
+            data, units_meta = download_highres(timestamp, product_cfg, region_cfg, satellite, domain, folder)
+            planck_coeffs = None # If the .npy exists but the coefficient JSON is missing (IR band), flag it
+        else:
+            g  = GOES(satellite=satellite, product=product_cfg["product"], domain=domain,
+                    bands=band if band else None)
+            ds = g.nearesttime(timestamp, save_dir=get_goes2go_cache_dir())
+            xs, ys = goes_xy_slices(ds, **region_cfg)
+            ds_cropped = ds.sel(x=xs, y=ys)
+            da = ds_cropped[product_cfg["variable"]]
+            units_meta = extract_units_metadata(da)
+            data = da.values
+
+            # Geometry: once per product/band (the x/y grid is static
+            # over time; the only thing that changes by resolution is the band/product_id,
+            geom_path = os.path.join(os.path.dirname(folder), "geometry.json")
+            if not os.path.exists(geom_path):
+                proj_info = ds_cropped["goes_imager_projection"]
+                geom_meta = {
+                    "x": ds_cropped["x"].values.tolist(),
+                    "y": ds_cropped["y"].values.tolist(),
+                    "longitude_of_projection_origin": float(proj_info.longitude_of_projection_origin),
+                    "perspective_point_height": float(proj_info.perspective_point_height),
+                    "semi_major_axis": float(proj_info.semi_major_axis),
+                    "semi_minor_axis": float(proj_info.semi_minor_axis),
+                    "sweep_angle_axis": "x",
+                }
+                with open(geom_path, "w") as f:
+                    json.dump(geom_meta, f)
+
+            planck_coeffs = None
+            if band in PLANCK_BANDS:
+                planck_coeffs = {
+                    "planck_fk1": float(ds["planck_fk1"].values),
+                    "planck_fk2": float(ds["planck_fk2"].values),
+                    "planck_bc1": float(ds["planck_bc1"].values),
+                    "planck_bc2": float(ds["planck_bc2"].values),
+                    "planck_units": {
+                        "fk1": ds["planck_fk1"].attrs.get("units"),
+                        "fk2": ds["planck_fk2"].attrs.get("units"),
+                        "bc1": ds["planck_bc1"].attrs.get("units"),
+                        "bc2": ds["planck_bc2"].attrs.get("units"),
+                    },
+                }
+                # Real FPT (ATBD 3.4.2.2): L1b does not provide the literal temperature,
+                # but a QC counter indicating whether the 90 K threshold was
+                # exceeded during that scan (treatable as a boolean).
+                if "focal_plane_temperature_threshold_exceeded_count" in ds.variables:
+                    planck_coeffs["fpt_threshold_exceeded_count"] = int(
+                        ds["focal_plane_temperature_threshold_exceeded_count"].values
+                    )
+
+            # Per-pixel DQF, cropped to the region (same grid as radiance).
+            # DQF==4 flags pixels with focal_plane_temperature_threshold_exceeded_qf.
+            if need_dqf and "DQF" in ds_cropped.variables:
+                np.save(dqf_path, ds_cropped["DQF"].values.astype(np.int8))
+                
+            ds.close()
+
+        if data.size == 0:
+            elapsed = time.time() - start_time
+            print(f" ⚠️  vacío ({elapsed:.1f}s)")
+            return {"status": "empty", "path": None, "product": product_id,
+                    "timestamp": timestamp.strftime("%Y%m%d_%H%M")}
+
+        # Save the image only if download was required
+        if need_npy:
+            dtype = np.float32 if product_cfg["dtype"] == "float32" else np.int8
+            np.save(file_path, data.astype(dtype))
+
+        # Save the Planck coefficients JSON only if required
+        if need_json and planck_coeffs is not None:
+            with open(coeffs_path, "w") as f:
+                json.dump(planck_coeffs, f)
+
+        # Save the units JSON — for ALL products, whenever it is missing.
+        # It is the only way to know later which physical unit a .npy was saved in,
+        # as it no longer holds any attributes.
+        if need_units:
+            units_record = {
+                "product_id": product_id,
+                "variable":   product_cfg["variable"],
+                "band":       band,
+                **units_meta,
+            }
+            with open(units_path, "w") as f:
+                json.dump(units_record, f, indent=2)
+
+        elapsed = time.time() - start_time
+        print(f" ✅ ({elapsed:.1f}s, shape={list(data.shape)}, units={units_meta.get('units')})")
+        return {"status": "downloaded", "path": file_path, "product": product_id,
+                "timestamp": timestamp.strftime("%Y%m%d_%H%M"), "shape": list(data.shape),
+                "units": units_meta.get("units")}
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f" ❌ ({elapsed:.1f}s)")
+
+        s3_path    = None
+        status_msg = "error_local"
+        error_detail = f"Failed to download ({elapsed:.1f}s): {str(e)}"
+
+        try:
+            exists_on_s3, s3_path = check_s3_exists(product_cfg, timestamp)
+            if not exists_on_s3:
+                status_msg   = "error_aws_gap"
+                error_detail = f"AWS Data Gap: no data available for {product_id} at s3://{s3_path}"
+            else:
+                status_msg   = "error_local"
+                error_detail = f"File exists on S3 but download failed ({elapsed:.1f}s): {str(e)}"
+        except Exception as s3_err:
+            error_detail += f" | S3 check also failed: {str(s3_err)}"
+
+        return {
+            "status":     "error",
+            "substatus":  status_msg,
+            "product":    product_id,
+            "timestamp":  timestamp.strftime("%Y%m%d_%H%M"),
+            "error":      error_detail,
+            "product_path": s3_path,
+        }
+
+def check_s3_exists(product_cfg, timestamp):
+    """
+    Check if a GOES product file exists on the public NOAA S3 bucket.
+
+    Uses anonymous access (no credentials needed) to list objects matching
+    the expected path pattern for the given product/timestamp.
+
+    Returns
+    -------
+    (exists: bool, s3_path: str)
+        exists  — True if at least one matching object was found.
+        s3_path — The S3 prefix that was checked (useful for error messages).
+    """
+    import boto3
+    from botocore import UNSIGNED
+    from botocore.config import Config
+
+    bucket = "noaa-goes19"
+    product_name = product_cfg["product"]
+    band = product_cfg.get("band")
+    domain = "F"  # Full disk
+
+    # Build the S3 prefix: ABI-L1b-RadF/YYYY/DDD/HH/
+    # or ABI-L2-FDCF/YYYY/DDD/HH/
+    if band:
+        s3_product = f"{product_name}{domain}"
+    else:
+        s3_product = f"{product_name}"
+
+    day_of_year = timestamp.timetuple().tm_yday
+    hour = timestamp.hour
+    prefix = f"{s3_product}/{timestamp.year}/{day_of_year:03d}/{hour:02d}/"
+
+    # Filter by band channel if applicable
+    if band:
+        channel_str = f"C{band:02d}"
+    else:
+        channel_str = None
+
+    s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+
+    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=100)
+    contents = response.get("Contents", [])
+
+    if channel_str:
+        matches = [obj for obj in contents if channel_str in obj["Key"]]
+    else:
+        matches = contents
+
+    s3_path = f"{bucket}/{prefix}"
+    return len(matches) > 0, s3_path
+
+
+def find_camel_climatology_file(camel_dir: str, month: int) -> str | None:
+    """
+    Locally searches for the CAMEL V3 climatology file for the given month.
+    Returns the path if it exists, None if missing.
+    """
+    if not os.path.isdir(camel_dir):
+        return None
+    frag = f"{month:02d}Month"
+    matches = [f for f in os.listdir(camel_dir) if frag in f and f.endswith(".nc")]
+    return os.path.join(camel_dir, matches[0]) if matches else None
+
+
+def download_camel_climatology(month: int, out_dir: str) -> str:
+    """
+    Downloads the CAMEL V3 monthly climatology file (CAM5K30EMCLIM)
+    for the given calendar month via earthaccess.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    existing = find_camel_climatology_file(out_dir, month)
+    if existing is not None:
+        return existing
+
+    auth = earthaccess.login(strategy="environment")
+    if not auth.authenticated:
+        raise RuntimeError(
+            "Failed to authenticate with Earthdata. Please check that .env has "
+            "correct EARTHDATA_USERNAME and EARTHDATA_PASSWORD."
+        )
+
+    results = earthaccess.search_data(short_name="CAM5K30EMCLIM", version="003")
+    frag = f"{month:02d}Month"
+    match = [r for r in results if frag in r["umm"]["GranuleUR"]]
+    if not match:
+        raise FileNotFoundError(
+            f"No data found for CAM5K30EMCLIM for month {month:02d} in CMR."
+        )
+
+    downloaded = earthaccess.download(match, out_dir)
+    return downloaded[0]
