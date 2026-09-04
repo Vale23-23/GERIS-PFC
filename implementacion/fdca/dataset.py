@@ -72,6 +72,23 @@ def missing_required_files(timestamp: str, region: str, dataset_root: str | Path
     return missing
 
 
+def list_remote_reference_timestamps(
+    region: str,
+    repo_id: str = DEFAULT_HF_REPO_ID,
+) -> list[str]:
+    """List timestamps available in the NOAA reference mask on Hugging Face without downloading the whole region."""
+    load_dotenv()
+    from huggingface_hub import list_repo_files
+
+    prefix = f"{region}/ABI-L2-FDCF-Mask/"
+    files = list_repo_files(repo_id=repo_id, repo_type="dataset")
+    return sorted({
+        Path(path).stem
+        for path in files
+        if path.startswith(prefix) and path.endswith(".npy")
+    })
+
+
 def download_timestamp(
     timestamp: str,
     region: str,
