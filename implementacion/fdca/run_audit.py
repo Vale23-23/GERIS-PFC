@@ -597,10 +597,14 @@ def build_pixel_rows(timestamp: str, inp, reference: np.ndarray,
     predicted_fire = np.isin(fire_mask_p2, FIRE_CODES)
     eco_issue_mask = np.isin(diag["eco_mask_fixed"], (150, 151, 152, 153))
 
+    roi_mask = np.ones(reference.shape, dtype=bool)
+    if hasattr(inp, "region_mask"):
+        roi_mask = np.asarray(inp.region_mask, dtype=bool)
+
     if all_pixels:
-        selected = np.ones(reference.shape, dtype=bool)
+        selected = roi_mask.copy()
     else:
-        selected = reference_fire | predicted_fire | candidate_mask | eco_issue_mask
+        selected = roi_mask & (reference_fire | predicted_fire | candidate_mask | eco_issue_mask)
 
     trace_by_pixel = {(row["i"], row["j"]): row for row in part2_trace}
     rows: list[dict] = []
@@ -633,6 +637,7 @@ def build_pixel_rows(timestamp: str, inp, reference: np.ndarray,
             "i": i, "j": j,
             "lat": _get(inp.latitudes, i, j),
             "lon": _get(inp.longitudes, i, j),
+            "in_roi": int(bool(roi_mask[i, j])),
             # ── verdad NOAA vs predicción ────────────────────────────────────
             "ref_code": int(reference[i, j]),
             "ref_fire": int(ref_fire),
