@@ -57,8 +57,10 @@ from fdca.constants import (
     FailChar,
 )
 from fdca.dataset import (
+    DEFAULT_HF_REPO_ID,
     default_dataset_root,
     ensure_timestamp_data,
+    list_remote_reference_timestamps,
     missing_required_files,
 )
 from fdca.fdca_adapter import load_fdca_input
@@ -124,20 +126,28 @@ def add_scores(total: dict | None, new: dict) -> dict:
 
 
 # ── Descubrimiento de timestamps ─────────────────────────────────────────────
-def discover_timestamps(dataset_root: str, region: str) -> list[str]:
+def discover_timestamps(dataset_root: str, region: str,
+                       download: bool = False,
+                       repo_id: str = DEFAULT_HF_REPO_ID) -> list[str]:
     """Timestamps con máscara de referencia NOAA e inputs mínimos presentes."""
     ref_dir = Path(dataset_root) / region / REF_DIR
-    if not ref_dir.exists():
-        raise FileNotFoundError(
-            f"No existe la carpeta de máscaras de referencia: {ref_dir}\n"
-            "Sin la máscara de NOAA no hay contra qué auditar."
-        )
-    found = []
-    for path in sorted(ref_dir.glob("*.npy")):
-        timestamp = path.stem
-        if not missing_required_files(timestamp, region, dataset_root):
-            found.append(timestamp)
-    return found
+    if ref_dir.exists():
+        found = []
+        for path in sorted(ref_dir.glob("*.npy")):
+            timestamp = path.stem
+            if not missing_required_files(timestamp, region, dataset_root):
+                found.append(timestamp)
+        return found
+
+    if download:
+        remote = list_remote_reference_timestamps(region=region, repo_id=repo_id)
+        if remote:
+            return remote
+
+    raise FileNotFoundError(
+        f"No existe la carpeta de máscaras de referencia: {ref_dir}\n"
+        "Sin la máscara de NOAA no hay contra qué auditar."
+    )
 
 
 def load_reference(dataset_root: str, region: str, timestamp: str) -> np.ndarray:
@@ -160,7 +170,12 @@ def pick_timestamps(args) -> list[str]:
     if args.timestamps:
         return [t.strip() for t in args.timestamps.split(",") if t.strip()]
 
-    available = discover_timestamps(args.dataset_root, args.region)
+    available = discover_timestamps(
+        args.dataset_root,
+        args.region,
+        download=args.download,
+        repo_id=DEFAULT_HF_REPO_ID,
+    )
     if not available:
         raise SystemExit(
             f"No hay escenas completas con máscara de referencia en "
@@ -183,6 +198,21 @@ def pick_timestamps(args) -> list[str]:
               f"disponibles{' con fuego' if args.only_with_fire else ''}.")
     rng = random.Random(args.seed)
     return sorted(rng.sample(pool, n))
+
+
+def ensure_selected_timestamps(args, timestamps: list[str]) -> None:
+    """Asegura que cada timestamp elegido esté completo y, si hace falta, lo descarga."""
+    if not timestamps:
+        return
+
+    for timestamp in timestamps:
+        ensure_timestamp_data(
+            timestamp=timestamp,
+            region=args.region,
+            dataset_root=args.dataset_root,
+            download=args.download,
+            repo_id=DEFAULT_HF_REPO_ID,
+        )
 
 
 # ── Estado temporal (ATBD 3.4.2.16) ──────────────────────────────────────────
@@ -1042,6 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     timestamps = pick_timestamps(args)
+    ensure_selected_timestamps(args, timestamps)
 
     run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(args.output_dir) / run_id
