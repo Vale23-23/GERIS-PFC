@@ -4,7 +4,7 @@ VIIRS data retrieval module
 import pandas as pd
 
 
-MAP_KEY = "..."
+MAP_KEY = "726e2860ec89af63969f678db66c2bab"
 
 def build_bounding_box_str(north:float,east:float,south:float,west:float) -> str:
     return f"{west},{south},{east},{north}"
@@ -19,6 +19,7 @@ def build_bounding_box_region(region:str) -> str:
     return box
 
 def get_viirs_fires(region: str, dataset: str, date:str) -> pd.DataFrame:
+    date = pd.Timestamp(date).strftime("%Y-%m-%d")
     url = (
     f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
     f"{MAP_KEY}/{dataset}/{region}/1/{date}"
