@@ -89,6 +89,7 @@ def main() -> None:
         coeffs14=inp.coeffs14,
         coeffs13=inp.coeffs13,
         land_mask=inp.land_mask,
+        region_mask=getattr(inp, "region_mask", np.ones_like(inp.land_mask, dtype=bool)),
         eco_mask=inp.eco_mask,
         data_quality=inp.data_quality,
     )

@@ -117,6 +117,7 @@ DESERT_BRIGHT     = 2
 USGS_SEA_WATER    = 15
 USGS_COAST_FRINGE = {80, 85}
 USGS_INLAND_WATER = {14, 73, 74, 75}
+OUT_OF_REGION = 255 
 
 # ── Part II — False alarm elimination (ATBD 3.4.2.14) ────────────────────────
 

@@ -157,6 +157,7 @@ def run_fdca(inp: FDCAInput) -> FDCAOutput:
         lut_tpw=inp.lut_tpw, FPT=inp.FPT,
         coeffs7=inp.coeffs7, coeffs14=inp.coeffs14, coeffs13=inp.coeffs13,
         land_mask=inp.land_mask,
+        region_mask=getattr(inp, "region_mask", np.ones_like(inp.land_mask, dtype=bool)),
         eco_mask=(inp.eco_mask if inp.eco_mask is not None
                   else np.zeros_like(inp.land_mask, dtype=np.uint8)),
         data_quality=inp.data_quality,

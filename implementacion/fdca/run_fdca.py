@@ -507,6 +507,7 @@ def main():
         lut_tpw=inp.lut_tpw, FPT=inp.FPT,
         coeffs7=inp.coeffs7, coeffs14=inp.coeffs14, coeffs13=inp.coeffs13,
         land_mask=inp.land_mask,
+        region_mask=inp.region_mask,
         eco_mask=inp.eco_mask,
         data_quality=inp.data_quality,
     )

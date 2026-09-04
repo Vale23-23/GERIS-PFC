@@ -359,6 +359,7 @@ def run_part1(
     # ── Auxiliary static ─────────────────────────────────────────────────────
     #land_cover:  np.ndarray,           # MODIS land mask values
     land_mask:   np.ndarray,           # Binary land mask (True = land)
+    region_mask: np.ndarray,           # True = inside ROI geographic area (e.g. Uruguay)
     #desert_mask: np.ndarray,           # Desert mask
     #usgs_eco:    np.ndarray,           # USGS ecosystem type
     eco_mask:    np.ndarray,           # precomputed mask codes 150/151/152/153
@@ -479,6 +480,12 @@ def run_part1(
     # can leak statistics between scan lines.
     for i in range(L):
         for j in range(W):
+            # ──out of ROI ─────────────────────
+            
+            if not region_mask[i, j]:
+                fire_mask[i, j] = OUT_OF_REGION
+                continue
+
             # ATBD 3.4.2.3 ─────────────────────────────────────────────────────
 
             # ── Space pixel ───────────────────────────────────────────────────

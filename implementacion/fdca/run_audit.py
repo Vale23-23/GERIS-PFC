@@ -290,8 +290,8 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
         tpw=inp.tpw, emiss7=inp.emiss7, emiss14=inp.emiss14,
         lut_tpw=inp.lut_tpw, FPT=inp.FPT,
         coeffs7=inp.coeffs7, coeffs14=inp.coeffs14, coeffs13=inp.coeffs13,
-        land_mask=inp.land_mask, eco_mask=inp.eco_mask,
-        data_quality=inp.data_quality,
+        land_mask=inp.land_mask, region_mask=inp.region_mask,
+        eco_mask=inp.eco_mask, data_quality=inp.data_quality,
         diag_out=diag,
     )
     part1_seconds = (datetime.now() - started).total_seconds()
@@ -334,9 +334,12 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
         "temporal_source": args.temporal_source,
         "n_prev_fire_pixels": (0 if prev_fire_mask is None
                                else int(np.count_nonzero(prev_fire_mask > 0))),
-        "metrics": scene_metrics(reference, candidate_mask, fire_mask_p2),
-        "funnel": recall_funnel(reference, fire_mask_p1, fail_char_p1, diag["stage"]),
-        "fp_breakdown": fp_breakdown(reference, fire_mask_p2, part2_trace),
+        "metrics": scene_metrics(reference, candidate_mask, fire_mask_p2,
+                                 region_mask=inp.region_mask),
+        "funnel": recall_funnel(reference, fire_mask_p1, fail_char_p1,
+                                diag["stage"], region_mask=inp.region_mask),
+        "fp_breakdown": fp_breakdown(reference, fire_mask_p2, part2_trace,
+                                     region_mask=inp.region_mask),
         "part2_paths": part2_path_counts(part2_trace),
         "bkg_approach": bkg_approach_summary(diag, candidate_mask),
     }
@@ -362,9 +365,29 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
 
 
 # ── Métricas de una escena ───────────────────────────────────────────────────
+def _valid_pixel_mask(reference: np.ndarray, region_mask: np.ndarray | None = None) -> np.ndarray:
+    """Mascara de píxeles válidos para métricas; por defecto toda la escena."""
+    valid = np.ones(reference.shape, dtype=bool)
+    if region_mask is not None:
+        region_mask = np.asarray(region_mask, dtype=bool)
+        if region_mask.shape != reference.shape:
+            raise ValueError(
+                f"region_mask shape {region_mask.shape} no coincide con "
+                f"reference shape {reference.shape}"
+            )
+        valid &= region_mask
+    return valid
+
+
 def scene_metrics(reference: np.ndarray, candidate_mask: np.ndarray,
-                  fire_mask_p2: np.ndarray) -> dict:
+                  fire_mask_p2: np.ndarray,
+                  region_mask: np.ndarray | None = None) -> dict:
     """Binario total, por etiqueta exacta y por etiqueta base (todo por píxel)."""
+    valid = _valid_pixel_mask(reference, region_mask)
+    reference = np.asarray(reference)[valid]
+    fire_mask_p2 = np.asarray(fire_mask_p2)[valid]
+    candidate_mask = np.asarray(candidate_mask, dtype=bool)[valid]
+
     reference_fire = np.isin(reference, FIRE_CODES)
     predicted_fire = np.isin(fire_mask_p2, FIRE_CODES)
     reference_base = to_base_code(reference)
@@ -399,7 +422,8 @@ def confusion_counts(reference: np.ndarray, prediction: np.ndarray) -> dict:
 
 
 def recall_funnel(reference: np.ndarray, fire_mask_p1: np.ndarray,
-                  fail_char_p1: np.ndarray, stage: np.ndarray) -> dict:
+                  fail_char_p1: np.ndarray, stage: np.ndarray,
+                  region_mask: np.ndarray | None = None) -> dict:
     """
     Dónde mueren los píxeles que NOAA marcó como fuego.
 
@@ -407,6 +431,12 @@ def recall_funnel(reference: np.ndarray, fire_mask_p1: np.ndarray,
     de Parte I, cuántos píxeles de fuego de la referencia llegaron hasta ahí y
     ahí se cayeron, con el código de máscara y el FailChar con que quedaron.
     """
+    valid = _valid_pixel_mask(reference, region_mask)
+    reference = np.asarray(reference)[valid]
+    fire_mask_p1 = np.asarray(fire_mask_p1)[valid]
+    fail_char_p1 = np.asarray(fail_char_p1)[valid]
+    stage = np.asarray(stage)[valid]
+
     reference_fire = np.isin(reference, FIRE_CODES)
     total = int(np.count_nonzero(reference_fire))
     per_stage: dict = {}
@@ -436,15 +466,19 @@ def recall_funnel(reference: np.ndarray, fire_mask_p1: np.ndarray,
 
 
 def fp_breakdown(reference: np.ndarray, fire_mask_p2: np.ndarray,
-                 part2_trace: list[dict]) -> dict:
+                 part2_trace: list[dict],
+                 region_mask: np.ndarray | None = None) -> dict:
     """Falsos positivos: qué etiqueta les pusimos y qué dice NOAA en ese píxel."""
-    reference_fire = np.isin(reference, FIRE_CODES)
-    predicted_fire = np.isin(fire_mask_p2, FIRE_CODES)
+    valid = _valid_pixel_mask(reference, region_mask)
+    reference = np.asarray(reference)
+    fire_mask_p2 = np.asarray(fire_mask_p2)
+    reference_fire = np.isin(reference[valid], FIRE_CODES)
+    predicted_fire = np.isin(fire_mask_p2[valid], FIRE_CODES)
     false_positive = predicted_fire & ~reference_fire
     trace_by_pixel = {(row["i"], row["j"]): row for row in part2_trace}
 
     fail_char_out: Counter = Counter()
-    for (i, j) in zip(*np.nonzero(false_positive)):
+    for i, j in np.argwhere(valid & (np.isin(fire_mask_p2, FIRE_CODES) & ~np.isin(reference, FIRE_CODES))):
         row = trace_by_pixel.get((int(i), int(j)))
         if row is not None:
             fail_char_out[row.get("fail_char_out", "?")] += 1
@@ -453,10 +487,10 @@ def fp_breakdown(reference: np.ndarray, fire_mask_p2: np.ndarray,
         "n_false_positive": int(np.count_nonzero(false_positive)),
         "predicted_codes": {
             str(int(k)): int(v) for k, v in
-            sorted(Counter(fire_mask_p2[false_positive].tolist()).items())},
+            sorted(Counter(fire_mask_p2[valid][false_positive].tolist()).items())},
         "reference_codes_at_fp": {
             str(int(k)): int(v) for k, v in
-            sorted(Counter(reference[false_positive].tolist()).items())},
+            sorted(Counter(reference[valid][false_positive].tolist()).items())},
         "fail_char_out": {str(k): int(v) for k, v in sorted(fail_char_out.items())},
     }
 
@@ -561,11 +595,12 @@ def build_pixel_rows(timestamp: str, inp, reference: np.ndarray,
     sza_cos = diag["sza_cos"]
     reference_fire = np.isin(reference, FIRE_CODES)
     predicted_fire = np.isin(fire_mask_p2, FIRE_CODES)
+    eco_issue_mask = np.isin(diag["eco_mask_fixed"], (150, 151, 152, 153))
 
     if all_pixels:
         selected = np.ones(reference.shape, dtype=bool)
     else:
-        selected = reference_fire | predicted_fire | candidate_mask
+        selected = reference_fire | predicted_fire | candidate_mask | eco_issue_mask
 
     trace_by_pixel = {(row["i"], row["j"]): row for row in part2_trace}
     rows: list[dict] = []

@@ -59,6 +59,7 @@ from __future__ import annotations  # permite 'np.ndarray | None' en Python < 3.
 import os
 import sys
 import json
+from functools import lru_cache
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
@@ -450,42 +451,191 @@ def load_static_eco_mask(shape: tuple[int, int], path: Path = STATIC_ECO_MASK_PA
 
 
 
+def load_region_bounds(region_name: str = "uruguay", config_path: str | Path | None = None) -> dict:
+    """Read geographic bounds for a configured region, with a safe fallback."""
+    config_file = Path(config_path) if config_path is not None else Path(__file__).resolve().parent / "config.yaml"
+    defaults = {
+        "uruguay": {"lat_min": -35.5, "lat_max": -29.5, "lon_min": -59.0, "lon_max": -52.0},
+        "rio_de_la_plata": {"lat_min": -38.0, "lat_max": -28.0, "lon_min": -62.0, "lon_max": -48.0},
+    }
+
+    if config_file.exists():
+        try:
+            import yaml
+            with open(config_file, "r", encoding="utf-8") as fh:
+                cfg = yaml.safe_load(fh) or {}
+            region_cfg = (cfg.get("regions") or {}).get(region_name)
+            if isinstance(region_cfg, dict):
+                return region_cfg
+        except Exception:
+            pass
+
+    return defaults.get(region_name, {})
+
+
+NATURAL_EARTH_URL = (
+    "https://naturalearth.s3.amazonaws.com/110m_cultural/"
+    "ne_110m_admin_0_countries.zip"
+)
+# Nombre fijo y único del geojson de países. Se busca en UN solo lugar
+# (base_path/COUNTRY_GEOJSON_FILENAME, ej. dataset/uruguay/ne_110m_admin_0_countries.geojson);
+# si no está ahí, se cae al caché de paquete y, si tampoco existe, se descarga.
+COUNTRY_GEOJSON_FILENAME = "ne_110m_admin_0_countries.geojson"
+NATURAL_EARTH_CACHE_DIR = Path(__file__).resolve().parent / "data" / "natural_earth"
+NATURAL_EARTH_CACHE_FILE = NATURAL_EARTH_CACHE_DIR / COUNTRY_GEOJSON_FILENAME
+
+
+def _resolve_country_geojson_path(base_path: str | Path | None) -> Path | None:
+    """Ruta directa y única al geojson: base_path/<archivo>, o el caché del paquete."""
+    if base_path is not None:
+        candidate = Path(base_path) / COUNTRY_GEOJSON_FILENAME
+        if candidate.exists():
+            return candidate
+    if NATURAL_EARTH_CACHE_FILE.exists():
+        return NATURAL_EARTH_CACHE_FILE
+    return None
+
+
+@lru_cache(maxsize=16)
+def _load_country_geometry(region_name: str, base_path: str | None = None):
+    """Carga el polígono del país desde el geojson del dataset (base_path/
+    ne_110m_admin_0_countries.geojson); si no existe ahí ni en el caché del
+    paquete, lo descarga una vez de Natural Earth."""
+    key = region_name.strip().lower()
+    try:
+        import geopandas as gpd
+    except Exception as exc:
+        raise RuntimeError(
+            "GeoPandas no está instalado en este entorno. "
+            "La máscara de país usa Natural Earth y requiere geopandas. "
+            "Usá el venv del proyecto: ./implementacion/geris/bin/python ."
+        ) from exc
+
+    geojson_path = _resolve_country_geojson_path(base_path)
+    if geojson_path is not None:
+        world = gpd.read_file(str(geojson_path))
+    else:
+        try:
+            NATURAL_EARTH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            world = gpd.read_file(NATURAL_EARTH_URL)
+            world.to_file(NATURAL_EARTH_CACHE_FILE, driver="GeoJSON")
+        except Exception:
+            return None
+
+    admin_col = "ADMIN" if "ADMIN" in world.columns else "NAME"
+    matches = world[world[admin_col].astype(str).str.lower() == key]
+    if matches.empty:
+        # fallback a substring solo si no hubo match exacto por nombre
+        matches = world[world[admin_col].astype(str).str.contains(key, case=False, na=False)]
+    if matches.empty:
+        return None
+    geometry = matches.iloc[0].geometry
+    if geometry is None:
+        return None
+    return geometry
+
+
+def build_region_mask(lat: np.ndarray, lon: np.ndarray,
+                      region_name: str = "uruguay",
+                      region_cfg: dict | None = None,
+                      base_path: str | Path | None = None) -> np.ndarray:
+    """Return True only for pixels inside the region.
+
+    Prefer a dataset-local country GeoJSON if present (e.g. under the region
+    dataset root), then the Natural Earth cache, and finally the config bounds.
+    """
+    try:
+        geom = _load_country_geometry(region_name, base_path=str(base_path) if base_path is not None else None)
+    except RuntimeError:
+        geom = None
+
+    if geom is not None:
+        from shapely.geometry import Point
+        mask = np.zeros(lat.shape, dtype=bool)
+        for i in range(lat.shape[0]):
+            for j in range(lat.shape[1]):
+                point = Point(float(lon[i, j]), float(lat[i, j]))
+                mask[i, j] = geom.covers(point) or geom.contains(point) or geom.touches(point)
+        return mask
+
+    if region_cfg is None:
+        region_cfg = load_region_bounds(region_name)
+    if not region_cfg:
+        return np.ones(lat.shape, dtype=bool)
+
+    lat_min = float(region_cfg["lat_min"])
+    lat_max = float(region_cfg["lat_max"])
+    lon_min = float(region_cfg["lon_min"])
+    lon_max = float(region_cfg["lon_max"])
+
+    lat_mask = (lat >= lat_min) & (lat <= lat_max)
+    lon_norm = ((lon + 180.0) % 360.0) - 180.0
+    lon_min_norm = ((lon_min + 180.0) % 360.0) - 180.0
+    lon_max_norm = ((lon_max + 180.0) % 360.0) - 180.0
+
+    if lon_min_norm <= lon_max_norm:
+        lon_mask = (lon_norm >= lon_min_norm) & (lon_norm <= lon_max_norm)
+    else:
+        lon_mask = (lon_norm >= lon_min_norm) | (lon_norm <= lon_max_norm)
+
+    return lat_mask & lon_mask
+
+
 def build_surface_masks(lat: np.ndarray, lon: np.ndarray,
-                         region_name: str = "uruguay") -> dict:
+                         region_name: str = "uruguay",
+                         eco_mask_path: str | Path | np.ndarray | None = None,
+                         base_path: str | Path | None = None) -> dict:
     """
     Máscaras de superficie para la región.
 
-    En producción ideal se usarían:
-      - ABI ANC producto de land cover
-      - MCD12Q1 (MODIS land cover)
-      - Base de datos de desiertos brillantes del FDCA
-
-    Aquí usamos una aproximación geográfica que es correcta para Uruguay/Cono Sur:
-      - Todo el dominio de Uruguay es tierra (no hay grandes cuerpos de agua internos)
-      - Sin desiertos brillantes (la región es pampa/campos)
-      - USGS ecosystem: 10 = Grassland/savanna (representativo del Cono Sur)
-      - MODIS land cover: 8 = Wooded grassland (válido para Uruguay)
+    El ROI geográfico se fija desde config.yaml (lat/lon bounds) y no se procesa
+    ningún pixel fuera del dominio de la región. Si el eco-mask estático del
+    dataset coincide con la geometría actual, se usa como fuente autoritativa
+    para distinguir tierra y agua.
     """
     H, W = lat.shape
 
-    land_mask   = np.ones ((H, W), dtype=bool)
+    region_mask = build_region_mask(lat, lon, region_name=region_name, base_path=base_path)
+    land_mask   = region_mask.copy()
     land_cover  = np.full ((H, W), 8,  dtype=np.int32)   # Wooded grassland
     desert_mask = np.zeros((H, W),     dtype=np.int32)   # Sin desierto
     usgs_eco    = np.full ((H, W), 10, dtype=np.int32)   # Grassland/savanna
 
-    # Para la región río_de_la_plata: el Río de la Plata es agua
-    # Aproximación: lat < -34, lon entre -58 y -52 → zona del estuario
-    if region_name in ("rio_de_la_plata",):
-        water_zone = (lat < -34.0) & (lon > -58.0) & (lon < -52.0)
-        land_mask  [water_zone] = False
-        land_cover [water_zone] = 0    # agua
-        usgs_eco   [water_zone] = 0
+    eco_mask = None
+    if eco_mask_path is not None:
+        if isinstance(eco_mask_path, np.ndarray):
+            eco_mask = np.asarray(eco_mask_path)
+        else:
+            eco_mask = np.load(eco_mask_path, allow_pickle=False)
+        if eco_mask.shape != (H, W):
+            eco_mask = None
+
+    if eco_mask is None and STATIC_ECO_MASK_PATH.exists():
+        try:
+            eco_mask = load_static_eco_mask((H, W), STATIC_ECO_MASK_PATH)
+        except (FileNotFoundError, ValueError, TypeError):
+            eco_mask = None
+
+    if eco_mask is not None:
+        eco_mask_fixed = eco_mask.astype(np.uint8)
+        land_mask = region_mask & (eco_mask_fixed == 0)
+        land_cover[~land_mask] = 0
+        usgs_eco[~land_mask] = 0
+    else:
+        # Para la región río_de_la_plata: el Río de la Plata es agua
+        # Aproximación: lat < -34, lon entre -58 y -52 → zona del estuario
+        if region_name in ("rio_de_la_plata",):
+            water_zone = (lat < -34.0) & (lon > -58.0) & (lon < -52.0)
+            land_mask  [water_zone] = False
+            land_cover [water_zone] = 0    # agua
+            usgs_eco   [water_zone] = 0
 
     return {
         "land_mask":   land_mask,
         "land_cover":  land_cover,
         "desert_mask": desert_mask,
         "usgs_eco":    usgs_eco,
+        "region_mask": region_mask,
     }
 
 
@@ -955,7 +1105,7 @@ def load_fdca_input(
     
 
     # ── Máscaras de superficie ────────────────────────────────────────────────
-    masks = build_surface_masks(lat2d, lon2d, region_name=region)
+    masks = build_surface_masks(lat2d, lon2d, region_name=region, base_path=base)
 
     # ── LUT TPW ───────────────────────────────────────────────────────────────
     # Universal ATBD table, shared across all regions -> lives at the dataset
@@ -982,11 +1132,13 @@ def load_fdca_input(
     eco_mask_path = os.path.join(base, "eco_mask.npy")
     eco_mask = load_static_eco_mask(shape, eco_mask_path)
 
-    # The static ecosystem mask is authoritative for background land pixels.
+    # The static ecosystem mask is authoritative for background land pixels,
+    # but it must still be constrained to the configured regional ROI.
     # Codes 150–153 represent invalid ecosystem, sea water, coast fringe,
     # and inland water; only code 0 is included as land.
     eco_mask_fixed = eco_mask.astype(np.uint8)
-    masks["land_mask"] = eco_mask_fixed == 0
+    region_mask = masks.get("region_mask", np.ones_like(eco_mask_fixed, dtype=bool))
+    masks["land_mask"] = region_mask & (eco_mask_fixed == 0)
 
     # ── Armar FDCAInput ───────────────────────────────────────────────────────
     inp = FDCAInput(
@@ -1011,6 +1163,12 @@ def load_fdca_input(
         data_quality=data_quality,
         eco_mask=eco_mask,
     )
+
+    # region_mask (recorte geográfico puro, ej. Uruguay) no es un campo del
+    # constructor de FDCAInput -- se adjunta post-construcción, igual que
+    # prev_fire_mask en run_fdca.py. run_part1 lo necesita para descartar
+    # píxeles fuera del ROI antes de cualquier otro test.
+    inp.region_mask = region_mask
 
     if verbose:
         print(f"\n  ✓ FDCAInput construido — shape {shape}")
