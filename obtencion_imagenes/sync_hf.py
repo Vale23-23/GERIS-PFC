@@ -183,7 +183,7 @@ def collect_dataset_files(dataset_dir: Path):
             if Path(fname).suffix.lower() not in VALID_EXTENSIONS:
                 continue
             local_path = Path(root) / fname
-            rel_path = str(local_path.relative_to(dataset_dir))
+            rel_path = _month_sharded_rel_path(str(local_path.relative_to(dataset_dir)))
             files.append((local_path, rel_path))
     return files
 
