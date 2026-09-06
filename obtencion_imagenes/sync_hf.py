@@ -37,12 +37,21 @@ import re
 import sys
 import time
 from pathlib import Path
+from dotenv import load_dotenv
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HF_REPO         = "valentina2323/GERIS-Goes19-uruguay-fires"
-DATASET_DIR     = Path(__file__).parent / "dataset"
-IMPL_DATA_DIR   = Path(__file__).parent.parent / "implementacion" / "data" / "uruguay"
-ENV_FILE        = Path(__file__).parent.parent / ".env"
+
+ENV_FILE = Path(__file__).parent.parent / ".env"
+load_dotenv(ENV_FILE)  # populates GERIS_DATASET_ROOT (and HF_TOKEN) into os.environ
+
+# GERIS_DATASET_ROOT lets both branch checkouts point at one shared physical
+# folder (see dataset.default_dataset_root() in the testing-fdca-real
+# branch). Falls back to the relative "dataset" folder for simple
+# single-checkout setups, same default as the rest of the pipeline.
+_DATASET_ROOT   = Path(os.environ.get("GERIS_DATASET_ROOT", str(Path(__file__).parent / "dataset")))
+DATASET_DIR     = _DATASET_ROOT
+IMPL_DATA_DIR   = _DATASET_ROOT / "uruguay"
 
 VALID_EXTENSIONS = {".npy", ".json", ".nc"}
 EXCLUDE_FILES    = {"metadata.csv"}
