@@ -56,6 +56,51 @@ IMPL_DATA_DIR   = _DATASET_ROOT / "uruguay"
 VALID_EXTENSIONS = {".npy", ".json", ".nc"}
 EXCLUDE_FILES    = {"metadata.csv"}
 
+import re
+
+# Per-timestamp product folders that accumulate enough files per month to
+# eventually threaten HF's 10,000-files-per-directory limit.
+# camel_emissivity/ and TPW-GFS/ stay untouched -- far fewer files/month.
+SHARDABLE_FOLDERS = {
+    "ABI-L1b-Rad-B02", "ABI-L1b-Rad-B07", "ABI-L1b-Rad-B07-DFQ",
+    "ABI-L1b-Rad-B13", "ABI-L1b-Rad-B14", "ABI-L1b-Rad-B15",
+    "ABI-L2-FDCF-DQF", "ABI-L2-FDCF-Mask",
+}
+
+_TIMESTAMP_RE = re.compile(r"^(\d{8})_\d{4}")
+
+
+def _month_sharded_rel_path(rel_path: str) -> str:
+    """
+    Route every per-timestamp file in a SHARDABLE_FOLDERS band into a
+    YYYYMM-suffixed sibling folder, e.g.:
+
+        "uruguay/ABI-L1b-Rad-B07/20251218_0000.npy"
+        -> "uruguay/ABI-L1b-Rad-B07-202512/20251218_0000.npy"
+
+    At ~4500 files/month max, each folder stays far under HF's
+    10,000-files-per-directory hard limit even after retries/duplicates.
+    Applied uniformly (no "keep the first bracket flat" exception) so
+    there is only one convention across the whole dataset. Anything
+    outside SHARDABLE_FOLDERS (camel_emissivity/, TPW-GFS/, geometry.json,
+    manifest.json) is left untouched.
+    """
+    parts = rel_path.split("/")
+    if len(parts) < 3:
+        return rel_path
+
+    band_folder = parts[1]
+    if band_folder not in SHARDABLE_FOLDERS:
+        return rel_path
+
+    match = _TIMESTAMP_RE.match(parts[-1])
+    if not match:
+        return rel_path
+
+    yyyymm = match.group(1)[:6]
+    parts[1] = f"{band_folder}-{yyyymm}"
+    return "/".join(parts)
+
 # HF tiene dos límites distintos que chocan entre sí:
 #   1) Un commit con demasiados archivos de una hace timeout (504) al
 #      construir el árbol del lado del servidor.
