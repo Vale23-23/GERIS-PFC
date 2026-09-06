@@ -7,7 +7,42 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from .tpw_downloader import cycle_path_for_timestamp
+
 DEFAULT_HF_REPO_ID = "valentina2323/GERIS-Goes19-uruguay-fires"
+
+import re
+
+_MONTH_SUFFIX_RE = re.compile(r"^(.+)-(\d{6})$")
+
+
+def _flatten_sharded_downloads(dataset_root: str | Path, region: str) -> None:
+    """
+    sync_hf.py routes per-timestamp files into YYYYMM-suffixed sibling
+    folders (e.g. ABI-L1b-Rad-B07-202512/) to stay under HF's
+    10,000-files-per-directory limit. Every reader in this codebase
+    expects a flat "<band>/<timestamp>.npy" layout regardless of month,
+    so merge any freshly downloaded sharded folder back into its base
+    folder right after snapshot_download().
+    """
+    region_dir = Path(dataset_root) / region
+    if not region_dir.exists():
+        return
+    for sharded_dir in list(region_dir.iterdir()):
+        if not sharded_dir.is_dir():
+            continue
+        match = _MONTH_SUFFIX_RE.match(sharded_dir.name)
+        if not match:
+            continue
+        base_dir = region_dir / match.group(1)
+        base_dir.mkdir(exist_ok=True)
+        for file_path in sharded_dir.iterdir():
+            target = base_dir / file_path.name
+            if not target.exists():
+                file_path.rename(target)
+        try:
+            sharded_dir.rmdir()
+        except OSError:
+            pass
 
 def default_dataset_root() -> str:
     """
@@ -126,6 +161,8 @@ def download_timestamp(
         ],
         local_dir=str(dataset_root),
     )
+    _flatten_sharded_downloads(Path(dataset_root), region)
+    
 
 
 def ensure_timestamp_data(
