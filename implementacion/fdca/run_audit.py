@@ -67,6 +67,22 @@ from fdca.fdca_adapter import load_fdca_input
 from fdca.part1 import Stage, run_part1
 from fdca.part2 import run_part2
 
+def build_null_tpw_lut(reference_lut: np.ndarray) -> np.ndarray:
+    """
+    Control LUT with no atmospheric correction (trans=1, offset=0), keeping
+    the TPW/angle bin label rows intact. Used to isolate the TPW LUT's own
+    contribution to Part I results: compare a run with --tpw-lut-mode null 
+    against the default 'real' run on the same scene to quantify how much 
+    of the background BT shift comes from the LUT itself, independent of 
+    whether its physical values are disputed.
+    """
+    null_lut = reference_lut.copy()
+    null_lut[2, :] = 1.0  # trans_4um
+    null_lut[3, :] = 1.0  # trans_11um
+    null_lut[4, :] = 0.0  # offset_4um
+    null_lut[5, :] = 0.0  # offset_11um
+    return null_lut
+
 # ── Códigos de fuego (Tabla 3.11 del ATBD) ───────────────────────────────────
 FIRE_CODES = (10, 11, 12, 13, 14, 15, 30, 31, 32, 33, 34, 35)
 BASE_FIRE_CODES = (10, 11, 12, 13, 14, 15)
@@ -263,7 +279,8 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
     inp = load_fdca_input(timestamp=timestamp, region=args.region,
                           dataset_root=args.dataset_root,
                           config_path=args.config, verbose=False)
-
+    if args.tpw_lut_mode == "null":
+        inp.lut_tpw = build_null_tpw_lut(inp.lut_tpw)
     reference = load_reference(args.dataset_root, args.region, timestamp)
     if reference.shape != inp.bt7.shape:
         raise ValueError(
@@ -342,6 +359,7 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
                                      region_mask=inp.region_mask),
         "part2_paths": part2_path_counts(part2_trace),
         "bkg_approach": bkg_approach_summary(diag, candidate_mask),
+        "tpw_lut_mode": args.tpw_lut_mode,
     }
     arrays = {
         "reference": reference,
@@ -1100,6 +1118,10 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=("atbd", "conservative"),
                         help="atbd = categorías normativas; conservative = "
                              "perfil empírico para subir precisión contra NOAA")
+    parser.add_argument("--tpw-lut-mode", default="real",
+                        choices=("real", "null"),
+                        help="real = LUT original; null = trans=1/offset=0 "
+                             "(corrida de control para aislar el efecto de la LUT)")
     parser.add_argument("--output-dir", default="results/audit")
     parser.add_argument("--run-id", default=None,
                         help="nombre de la subcarpeta de salida")
