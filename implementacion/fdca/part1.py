@@ -187,7 +187,7 @@ def _background_albedo(vis_mean_bkg: float, sza_cos: float, day_pixel: bool) -> 
 
 # ── TPW look-up correction (ATBD 3.4.2.8) ────────────────────────────────────
 def _tpw_lut_indices(tpw_mm: float, lza_deg: float) -> tuple[int, int]:
-    """Return (row_offset, col_index) for the LUT lookup."""
+    """Return the 0-based column index into the TPW LUT for this (tpw, lza) pair."""
     bin_tpw = int(round(tpw_mm / 10.0))
     bin_tpw = max(1, min(5, bin_tpw))
     bin_ang = int(round(lza_deg / 10.0))

@@ -96,8 +96,8 @@ def _valid_background_mask(
 
     Returns
     -------
-    valid_mask  : 2-D bool array (shape of full image), True where pixel is valid
-    in_window   : 2-D bool array, True inside the window (including out-of-bounds)
+    valid_mask  : 2-D bool array, local to the clipped window, True where the
+                  background pixel is valid.
     window_size : total number of positions in the (2*half+1)^2 window
                   (out-of-bounds count toward denominator per ATBD)
     """
