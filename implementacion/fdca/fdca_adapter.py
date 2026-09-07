@@ -1023,7 +1023,22 @@ def load_fdca_input(
             if os.path.exists(path):
                 return np.load(path)
         return None
+    
+    def load_kappa0(base: str) -> float | None:
+        """Read the B02 kappa0 calibration coefficient from its units.json.
 
+        kappa0 is per-band metadata (one units.json per band folder, not
+        per timestamp -- see sync_hf.py), and only exists for datasets
+        downloaded after the download_highres fix that persists it. Returns
+        None for older datasets so the caller can fall back to ESUN_B02.
+        """
+        path = os.path.join(base, "ABI-L1b-Rad-B02", "units.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            meta = json.load(f)
+        kappa0 = meta.get("kappa0")
+        return float(kappa0) if kappa0 is not None else None
 
     from fdca.planck import planck_temp_from_coeffs, planck_rad
 
@@ -1118,17 +1133,30 @@ def load_fdca_input(
         day_pct = 100 * (sza <= 85).mean()
         print(f"  {'Píxeles diurnos':<22}: {day_pct:.0f}%")
 
-
     # ── Reflectancia B02 ──────────────────────────────────────────────────────
     if rad02 is not None:
         # B02 es aproximadamente 4x más fino que la grilla térmica.
         # El ATBD pide reflectancia muestreada a 2 km: promediar bloques
         # conserva el promedio espacial y evita interpolar valores inválidos.
         rad02_resized = resample_b02_to_grid(rad02, shape)
-        refl2 = rad_b02_to_reflectance(rad02_resized)
+
+        kappa0 = load_kappa0(base)
+        if kappa0 is None:
+            raise FileNotFoundError(
+                f"Falta 'kappa0' en {os.path.join(base, 'ABI-L1b-Rad-B02', 'units.json')}.\n"
+                f"Este dataset fue descargado antes del fix de kappa0 (ver "
+                f"revision_fdca.md M6). Borrá ese units.json y volvé a "
+                f"correr:\n  python pipeline.py download --region {region} "
+                f"--start '{dt.strftime('%Y-%m-%d %H:%M')}' "
+                f"--end '{dt.strftime('%Y-%m-%d %H:%M')}' "
+                f"--products ABI-L1b-Rad-B02"
+            )
+        refl2 = rad_b02_to_reflectance(rad02_resized, kappa0)
+        if verbose:
+            print(f"  {'B02 reflectance':<22}: kappa0={kappa0:.6e} "
+                  f"(from units.json)")
     else:
         refl2 = None
-
     if verbose:
         print(f"\n  {'BT7 range [K]':<22}: {np.nanmin(bt7):.1f} – {np.nanmax(bt7):.1f}")
         print(f"  {'BT14 range [K]':<22}: {np.nanmin(bt14):.1f} – {np.nanmax(bt14):.1f}")
