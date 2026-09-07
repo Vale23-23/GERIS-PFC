@@ -495,6 +495,46 @@ def _resolve_country_geojson_path(base_path: str | Path | None) -> Path | None:
         return NATURAL_EARTH_CACHE_FILE
     return None
 
+def _download_natural_earth_zip(dest_dir: Path) -> Path:
+    """
+    Download the Natural Earth 110m countries shapefile via `requests`,
+    the same pattern used elsewhere in this pipeline (tpw_downloader's GRIB
+    fetch, download_camel_climatology's earthaccess.download) instead of
+    letting GDAL/OGR fetch it internally.
+
+    gpd.read_file(NATURAL_EARTH_URL) delegates the HTTP fetch to GDAL's
+    vsicurl driver, which links against the *system* libcurl. If that
+    libcurl doesn't match the one GDAL was built against (common in conda
+    envs that mix system and conda-forge builds), the failure shows up as a
+    segfault, not a Python exception -- nothing downstream can catch it.
+    Downloading the zip with `requests` keeps the entire HTTP layer in
+    Python; GDAL/geopandas only ever sees a local file.
+    """
+    import requests
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = dest_dir / "ne_110m_admin_0_countries.zip"
+
+    resp = requests.get(NATURAL_EARTH_URL, timeout=60)
+    resp.raise_for_status()
+    zip_path.write_bytes(resp.content)
+    return zip_path
+
+
+def _extract_shapefile(zip_path: Path, extract_dir: Path) -> Path:
+    """Extract the Natural Earth zip and return the path to the .shp file."""
+    import zipfile
+
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(extract_dir)
+
+    shp_matches = list(extract_dir.glob("*.shp"))
+    if not shp_matches:
+        raise FileNotFoundError(
+            f"No .shp file found inside {zip_path} after extraction"
+        )
+    return shp_matches[0]
 
 @lru_cache(maxsize=16)
 def _load_country_geometry(region_name: str, base_path: str | None = None):
@@ -515,11 +555,31 @@ def _load_country_geometry(region_name: str, base_path: str | None = None):
     if geojson_path is not None:
         world = gpd.read_file(str(geojson_path))
     else:
+        print(
+            f"  ⚠ Natural Earth country boundaries not found locally "
+            f"(looked in dataset root and {NATURAL_EARTH_CACHE_FILE}).\n"
+            f"    Downloading ne_110m_admin_0_countries.zip ...",
+            flush=True,
+        )
         try:
+            import tempfile
+            import time
+
             NATURAL_EARTH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            world = gpd.read_file(NATURAL_EARTH_URL)
+            t0 = time.time()
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_dir = Path(tmp_dir)
+                zip_path = _download_natural_earth_zip(tmp_dir)
+                shp_path = _extract_shapefile(zip_path, tmp_dir / "extracted")
+                world = gpd.read_file(str(shp_path))
             world.to_file(NATURAL_EARTH_CACHE_FILE, driver="GeoJSON")
-        except Exception:
+            print(
+                f"  ✓ Downloaded and cached at {NATURAL_EARTH_CACHE_FILE} "
+                f"({time.time() - t0:.1f}s)",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"  ❌ Natural Earth download failed: {e!r}", flush=True)
             return None
 
     admin_col = "ADMIN" if "ADMIN" in world.columns else "NAME"
