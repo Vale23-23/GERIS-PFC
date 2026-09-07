@@ -12,6 +12,8 @@ obtencion_imagenes/dataset/
 !implementacion/fdca/data/eco_mask.npy
 
 implementacion/data/
+implementacion/dataset/
+implementacion/figures/
 implementacion/results/
 
 # Entorno virtual

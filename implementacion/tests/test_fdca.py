@@ -7,10 +7,15 @@ Correr con: python -m pytest tests/ -v o python tests/test_fdca.py
 
 import sys
 import os
+from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import unittest
+from fdca.part1 import FireCandidate, _cloud_bt_mask_code
+from fdca.part2 import _high_med_thresholds, _upgrade_confidence
+from fdca.fdca_adapter import build_surface_masks
+from fdca.run_audit import build_pixel_rows
 from fdca.planck import (
     planck_rad, planck_temp, planck_deriv_T,
     planck_rad_from_coeffs,
@@ -93,6 +98,156 @@ class TestPart1(unittest.TestCase):
         self.assertTrue(np.isfinite(albedo[0, 0]))
         self.assertTrue(np.isnan(albedo[1, 0]))
         self.assertGreater(vis_brightness[0, 1], 0.0)
+
+
+class TestPart2Regression(unittest.TestCase):
+
+    def test_high_med_threshold_uses_background_7_minus_14_difference(self):
+        cand = FireCandidate(
+            i=0,
+            j=0,
+            lat=-34.0,
+            lon=-56.0,
+            fire_id=1,
+            bt7=330.0,
+            bt14=290.0,
+            bt7_bkg=310.0,
+            bt14_bkg=300.0,
+            bt7_bkg_std=1.0,
+            n_passes=3,
+            refl_pixel=1.0,
+            reflb=0.0,
+            std_dev_reflb_max=1.0,
+            pass_along_scan=True,
+            fire_temp=-999.0,
+            fail_char=FailChar.F3,
+            bkg=SimpleNamespace(std_dev_7_14_diff=0.5),
+        )
+
+        _, thr2_h = _high_med_thresholds(cand, "high")
+        expected_thr2 = 5.0 + min(5.0, 3.0 / 3.0) + (cand.bt7_bkg - cand.bt14_bkg) + 2.0 * 0.5
+        self.assertAlmostEqual(thr2_h, expected_thr2, places=6)
+        upgraded, _ = _upgrade_confidence(cand)
+        self.assertEqual(upgraded, FireMask.HIGH_PROB)
+
+    def test_negative_bt_difference_reaches_cloud_code_205(self):
+        # Both channels are warm, so the signed negative-difference branch
+        # must survive the minimum-fire gate and reach the cloud tests.
+        self.assertEqual(
+            _cloud_bt_mask_code(278.0, 283.0),
+            FireMask.CLOUD_BT7_BT14_NEG,
+        )
+
+    def test_build_surface_masks_uses_eco_mask_for_water_pixels(self):
+        lat = np.array([[-34.5, -34.5], [-35.0, -35.0]], dtype=np.float32)
+        lon = np.array([[-56.0, -55.5], [-56.0, -55.5]], dtype=np.float32)
+        eco_mask = np.array([[0, 0], [150, 153]], dtype=np.uint8)
+
+        masks = build_surface_masks(lat, lon, region_name="uruguay", eco_mask_path=None)
+        self.assertTrue(masks["land_mask"].shape == lat.shape)
+
+        masks = build_surface_masks(lat, lon, region_name="uruguay", eco_mask_path=eco_mask)
+        self.assertTrue(np.array_equal(masks["land_mask"], np.array([[True, True], [False, False]])))
+
+    def test_build_surface_masks_respects_region_bounds(self):
+        lat = np.array([[-34.0, -31.0], [-35.0, -29.0]], dtype=np.float32)
+        lon = np.array([[-56.0, -51.5], [-52.5, -58.5]], dtype=np.float32)
+        eco_mask = np.zeros_like(lat, dtype=np.uint8)
+
+        masks = build_surface_masks(lat, lon, region_name="uruguay", eco_mask_path=eco_mask)
+        expected_region = np.array([[True, False], [True, False]], dtype=bool)
+        self.assertTrue(np.array_equal(masks["region_mask"], expected_region))
+        # Land validity is independent of the output ROI so border windows can
+        # use valid ancillary land outside Uruguay.
+        self.assertTrue(np.array_equal(masks["land_mask"], np.ones_like(lat, dtype=bool)))
+
+    def test_build_pixel_rows_includes_eco_mask_codes(self):
+        lat = np.array([[-34.5, -34.5], [-35.0, -35.0]], dtype=np.float32)
+        lon = np.array([[-56.0, -55.5], [-56.0, -55.5]], dtype=np.float32)
+        ref = np.zeros((2, 2), dtype=np.int16)
+        pred = np.zeros((2, 2), dtype=np.int16)
+        part1 = np.zeros((2, 2), dtype=np.int16)
+        part2 = np.zeros((2, 2), dtype=np.int16)
+        fail_char_p1 = np.zeros((2, 2), dtype=np.int16)
+        fail_char_p2 = np.zeros((2, 2), dtype=np.int16)
+        candidate_mask = np.zeros((2, 2), dtype=bool)
+        confirmed_mask = np.zeros((2, 2), dtype=bool)
+        eco_mask_fixed = np.array([[0, 150], [0, 0]], dtype=np.uint8)
+
+        inp = SimpleNamespace(
+            bt7=np.ones((2, 2), dtype=np.float32) * 295.0,
+            bt14=np.ones((2, 2), dtype=np.float32) * 293.0,
+            bt15=np.ones((2, 2), dtype=np.float32) * 291.0,
+            refl2=np.ones((2, 2), dtype=np.float32) * 0.2,
+            sza=np.zeros((2, 2), dtype=np.float32),
+            lza=np.zeros((2, 2), dtype=np.float32),
+            glint_angle=np.zeros((2, 2), dtype=np.float32),
+            tpw=np.ones((2, 2), dtype=np.float32) * 25.0,
+            emiss7=np.ones((2, 2), dtype=np.float32) * 0.98,
+            emiss14=np.ones((2, 2), dtype=np.float32) * 0.99,
+            latitudes=lat,
+            longitudes=lon,
+            bt14_eff=np.ones((2, 2), dtype=np.float32) * 293.0,
+        )
+        diag = {
+            "stage": np.zeros((2, 2), dtype=np.int16),
+            "bt14_eff": np.ones((2, 2), dtype=np.float32) * 293.0,
+            "refl": np.zeros((2, 2), dtype=np.float32),
+            "albedo": np.zeros((2, 2), dtype=np.float32),
+            "is_day": np.zeros((2, 2), dtype=bool),
+            "sza_cos": np.ones((2, 2), dtype=np.float32),
+            "bt7_bkg": np.ones((2, 2), dtype=np.float32) * 295.0,
+            "bt14_bkg": np.ones((2, 2), dtype=np.float32) * 293.0,
+            "reflb": np.zeros((2, 2), dtype=np.float32),
+            "std_7b14b": np.zeros((2, 2), dtype=np.float32),
+            "std_7b": np.ones((2, 2), dtype=np.float32) * 2.0,
+            "std_reflb": np.ones((2, 2), dtype=np.float32) * 0.5,
+            "std_reflb_max": np.ones((2, 2), dtype=np.float32) * 2.5,
+            "eco_mask_fixed": eco_mask_fixed,
+            "bt7_bkg_std": np.ones((2, 2), dtype=np.float32),
+            "bt14_bkg_std": np.ones((2, 2), dtype=np.float32),
+            "bkg_hist_won": np.zeros((2, 2), dtype=np.int16),
+            "t7_stat_std": np.ones((2, 2), dtype=np.float32),
+            "t7_hist_std": np.ones((2, 2), dtype=np.float32),
+            "n_passes": np.zeros((2, 2), dtype=np.int16),
+            "n_hist_selected": np.zeros((2, 2), dtype=np.int16),
+            "half_width": np.zeros((2, 2), dtype=np.int16),
+            "rad_diff_sigma": np.ones((2, 2), dtype=np.float32),
+            "alb_bkg": np.zeros((2, 2), dtype=np.float32),
+            "is_cloudy": np.zeros((2, 2), dtype=bool),
+            "sat_flag": np.zeros((2, 2), dtype=np.int16),
+            "pass_along": np.zeros((2, 2), dtype=bool),
+            "bt7_corr": np.ones((2, 2), dtype=np.float32) * 295.0,
+            "bt14_corr": np.ones((2, 2), dtype=np.float32) * 293.0,
+            "bt7_bkg_corr": np.ones((2, 2), dtype=np.float32) * 295.0,
+            "bt14_bkg_corr": np.ones((2, 2), dtype=np.float32) * 293.0,
+            "skip_dozier": np.zeros((2, 2), dtype=bool),
+            "dozier_valid": np.zeros((2, 2), dtype=bool),
+            "fire_temp": np.zeros((2, 2), dtype=np.float32),
+            "fire_frac": np.zeros((2, 2), dtype=np.float32),
+            "frp": np.zeros((2, 2), dtype=np.float32),
+            "use_ch13": np.zeros((2, 2), dtype=bool),
+            "vis_brightness": np.ones((2, 2), dtype=np.float32) * 10.0,
+        }
+
+        rows = build_pixel_rows(
+            "20251116_1000",
+            inp,
+            ref,
+            part1,
+            part2,
+            fail_char_p1,
+            fail_char_p2,
+            candidate_mask,
+            confirmed_mask,
+            diag,
+            [],
+            all_pixels=False,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["eco_code"], 150)
+        self.assertEqual(rows[0]["verdict"], "TN")
 
 
 # ── Test estadísticos de Background ──────────────────────────────────────────

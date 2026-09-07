@@ -143,9 +143,9 @@ def _upgrade_confidence(cand: FireCandidate) -> tuple[Optional[int], int]:
     Tb14 = cand.bt14_bkg
     refl_test = (cand.refl_pixel - cand.reflb >= cand.std_dev_reflb_max or _refl_along_scan_part2(cand))
 
-    if bt7c - Tb7 > thr1_h and Tb7 - Tb14 > thr2_h and refl_test:
+    if bt7c - Tb7 > thr1_h and bt7c - cand.bt14 > thr2_h and refl_test:
         return FireMask.HIGH_PROB, 30
-    if bt7c - Tb7 > thr1_m and Tb7 - Tb14 > thr2_m and refl_test:
+    if bt7c - Tb7 > thr1_m and bt7c - cand.bt14 > thr2_m and refl_test:
         return FireMask.MED_PROB, 20
     return FireMask.LOW_PROB, 0
 
@@ -169,14 +169,13 @@ def _high_med_thresholds(
     scaled1 = add_c + bg_off + 2.0 * cand.bt7_bkg_std
     thresh1 = max(base, scaled1)
 
-    # Threshold 2
-    diff_std    = cand.bkg.std_dev_7_14_diff if cand.bkg else 0.0
-    # The Part II pseudocode uses the observed channel difference in the
-    # threshold term; the category test itself compares the background
-    # difference (Tb7 - Tb14).  Using the background difference here too
-    # makes the latter condition impossible because of the positive offset.
-    t7_t14_diff = cand.bt7 - cand.bt14
-    scaled2 = add_c + bg_off + t7_t14_diff + 2.0 * diff_std
+    # Threshold 2.  The confidence test compares the observed channel
+    # difference on the left (T7 - T14) with a threshold derived from the
+    # background channel difference.  This mirrors threshold 1's structure
+    # and keeps the high/medium branches reachable for a sub-pixel fire.
+    diff_std = cand.bkg.std_dev_7_14_diff if cand.bkg else 0.0
+    background_diff = cand.bt7_bkg - cand.bt14_bkg
+    scaled2 = add_c + bg_off + background_diff + 2.0 * diff_std
     thresh2 = max(base, scaled2)
 
     return thresh1, thresh2
