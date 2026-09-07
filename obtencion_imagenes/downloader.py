@@ -158,6 +158,14 @@ def download_highres(timestamp, product_cfg, region_cfg, satellite, domain, fold
     xs, ys = goes_xy_slices(ds, **region_cfg)
     da = ds.sel(x=xs, y=ys)[product_cfg["variable"]]
     units_meta = extract_units_metadata(da)
+    # kappa0 converts B02 radiance directly to reflectance factor and
+    # already includes the Earth-Sun distance correction (unlike the
+    # hardcoded ESUN_B02 = 1622.088 constant in fdca_adapter.py that it replaces).
+    # It's a scalar variable on the full dataset, not per-pixel, so it
+    # must be read here from `ds` before `ds.close()` -- `da` (the cropped
+    # DataArray) doesn't carry it.
+    if band == 2 and "kappa0" in ds.variables:
+        units_meta["kappa0"] = float(ds["kappa0"].values)
     data = da.values
     ds.close()
     return data, units_meta
@@ -235,6 +243,9 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
             ds_cropped = ds.sel(x=xs, y=ys)
             da = ds_cropped[product_cfg["variable"]]
             units_meta = extract_units_metadata(da)
+         
+            if band == 2 and "kappa0" in ds_cropped.variables:
+                units_meta["kappa0"] = float(ds_cropped["kappa0"].values)
             data = da.values
 
             # Geometry: once per product/band (the x/y grid is static
