@@ -219,21 +219,26 @@ def _solar_correction(
     coeffs14: dict,
     pixel_sza: float,
 ) -> float:
-
     """
     Correct solar reflectivity using emissivity-corrected pixel and
     background radiances at a common radiometric level.
+
+    [DEVIATION FROM ATBD] Two choices below are not stated in ATBD
+    §3.4.2.8, which applies the correction unconditionally:
+      1. The correction is only applied for 0 <= SZA <= 85 (daylight);
+         at night there is no solar reflectivity to correct for, so the
+         raw emissivity-corrected radiance is returned unchanged.
+      2. `rad_solar` is clamped to be non-negative, since a negative
+         solar reflectivity term has no physical meaning here.
+    Both are physically motivated but are inferences, not stated ATBD
+    requirements -- see revision_fdca.md M8/M9.
     """
-    # Brightness temperature from the emissivity-corrected background 14 µm
-    # radiance, then converted to Channel 7 radiance space.
     T_bkg14 = planck_temp_from_coeffs(
         rad14_bkg_corr_emiss, **coeffs14
     )
     rad7from14_bkg = planck_rad_from_coeffs(T_bkg14, **coeffs7)
 
     if 0 <= pixel_sza <= 85:
-        # Both terms are already emissivity-corrected; do not divide the
-        # background a second time here.
         rad_solar = max(
             0.0,
             rad7_bkg_corr_emiss - emiss7 * rad7from14_bkg,
