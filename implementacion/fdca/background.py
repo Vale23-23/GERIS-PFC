@@ -132,6 +132,12 @@ def _valid_background_mask(
     valid_mask = land_mask[sl] & finite_thermal & ~warm & ~cold
 
     # Exclude central pixel 
+    # [DEVIATION FROM ATBD] Exclude the center pixel from its own
+    # background window. Not explicitly stated in ATBD §3.4.2.5, but
+    # consistent with WFABBA heritage practice: including the candidate
+    # pixel in its own background statistics would bias the mean/stddev
+    # toward the candidate itself, weakening every downstream contextual
+    # threshold test. 
     center_local_i = i0 - i_lo
     center_local_j = j0 - j_lo
     valid_mask[center_local_i, center_local_j] = False
