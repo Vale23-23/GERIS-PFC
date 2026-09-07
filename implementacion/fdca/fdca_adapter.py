@@ -72,8 +72,16 @@ import xarray as xr
 
 # ── Constantes físicas para conversión de radiancia B02 ──────────────────────
 # Irradiancia solar exoatmosférica para ABI Band 2 (0.64 µm) [W·m⁻²·µm⁻¹]
-# Valor de la tabla de calibración ABI (GOES-R PUG-L1B, Tabla 7-6)
-ESUN_B02 = 1622.088   # [W·m⁻²·µm⁻¹] #CHEQUEAR ESTE VALOR CUAL ES
+def rad_b02_to_reflectance(rad: np.ndarray, kappa0: float) -> np.ndarray:
+    """
+    Convert B02 radiance [W·m⁻²·sr⁻¹·µm⁻¹] to reflectance factor [-]
+    using the ABI L1b ``kappa0`` calibration coefficient, which already
+    includes the annual Earth-Sun distance correction (unlike the
+    hardcoded ESUN_B02 constant this replaces).
+
+    refl = kappa0 * Rad
+    """
+    return np.clip(kappa0 * rad, 0.0, 1.5).astype(np.float32)
 # Factor de corrección: Rad [W·m⁻²·sr⁻¹·µm⁻¹] → Reflectance factor [-]
 # refl_factor = π * Rad / (ESUN * cos(SZA))
 # Acá calculamos sin dividir por cos(SZA) — eso lo hace part1.py al calcular albedo
