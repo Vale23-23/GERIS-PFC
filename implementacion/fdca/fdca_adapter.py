@@ -82,9 +82,6 @@ def rad_b02_to_reflectance(rad: np.ndarray, kappa0: float) -> np.ndarray:
     refl = kappa0 * Rad
     """
     return np.clip(kappa0 * rad, 0.0, 1.5).astype(np.float32)
-# Factor de corrección: Rad [W·m⁻²·sr⁻¹·µm⁻¹] → Reflectance factor [-]
-# refl_factor = π * Rad / (ESUN * cos(SZA))
-# Acá calculamos sin dividir por cos(SZA) — eso lo hace part1.py al calcular albedo
 
 # Constantes GOES-19 — SOLO fallback si geometry.json no trae estos campos.
 # IMPORTANTE: compute_latlon_grid() y compute_local_zenith() deben usar los
@@ -1006,15 +1003,17 @@ def load_fdca_input(
                 return np.load(path)
         return None
     
-    def load_kappa0(base: str) -> float | None:
-        """Read the B02 kappa0 calibration coefficient from its units.json.
+    def load_kappa0(base: str, timestamp: str) -> float | None:
+        """Read the B02 kappa0 calibration coefficient for this scene.
 
-        kappa0 is per-band metadata (one units.json per band folder, not
-        per timestamp -- see sync_hf.py), and only exists for datasets
-        downloaded after the download_highres fix that persists it. Returns
-        None for older datasets so the caller can fall back to ESUN_B02.
+        kappa0 tracks the Earth-Sun distance of the specific scan (it
+        varies ~3.4% peak-to-peak over the year), so it lives in its own
+        per-timestamp sidecar ("{timestamp}_kappa0.json"), not in the
+        shared units.json -- reusing one scene's kappa0 for every other
+        scene would silently reintroduce the seasonal error this fix is
+        meant to remove. Returns None if the sidecar is missing.
         """
-        path = os.path.join(base, "ABI-L1b-Rad-B02", "units.json")
+        path = os.path.join(base, "ABI-L1b-Rad-B02", f"{timestamp}_kappa0.json")
         if not os.path.exists(path):
             return None
         with open(path) as f:
@@ -1121,14 +1120,15 @@ def load_fdca_input(
         # El ATBD pide reflectancia muestreada a 2 km: promediar bloques
         # conserva el promedio espacial y evita interpolar valores inválidos.
         rad02_resized = resample_b02_to_grid(rad02, shape)
-
-        kappa0 = load_kappa0(base)
+        kappa0 = load_kappa0(base, timestamp)
         if kappa0 is None:
             raise FileNotFoundError(
-                f"Falta 'kappa0' en {os.path.join(base, 'ABI-L1b-Rad-B02', 'units.json')}.\n"
-                f"Este dataset fue descargado antes del fix de kappa0 (ver "
-                f"revision_fdca.md M6). Borrá ese units.json y volvé a "
-                f"correr:\n  python pipeline.py download --region {region} "
+                f"Falta '{timestamp}_kappa0.json' en "
+                f"{os.path.join(base, 'ABI-L1b-Rad-B02')}.\n"
+                f"kappa0 se guarda por escena (varía ~3.4% en el año por la "
+                f"distancia Tierra-Sol real; ver revision_fdca.md M6), así "
+                f"que cada timestamp necesita su propio archivo. Descargalo con:\n"
+                f"  python pipeline.py download --region {region} "
                 f"--start '{dt.strftime('%Y-%m-%d %H:%M')}' "
                 f"--end '{dt.strftime('%Y-%m-%d %H:%M')}' "
                 f"--products ABI-L1b-Rad-B02"
