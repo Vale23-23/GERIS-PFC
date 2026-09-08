@@ -214,7 +214,21 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
     # is it necessary to generate the JSON with the units metadata? Unlike
     # the Planck coefficients, this is saved for ALL products
     # (B02, DQF, TPW, etc.), not just the IR bands.
+    #
+    # For B02 specifically, a units.json written before the kappa0 fix
+    # exists on disk but lacks the "kappa0" key fdca_adapter.py now
+    # requires. Checking only file existence treats that stale file as
+    # up to date, so download_and_save() returns status="exists" and
+    # kappa0 is never fetched -- fdca_adapter.py then fails downstream
+    # with a confusing "missing kappa0" error that looks like a download
+    # problem. Re-check content for B02, not just presence.
     need_units = not os.path.exists(units_path)
+    if band == 2 and not need_units:
+        try:
+            with open(units_path) as f:
+                need_units = "kappa0" not in json.load(f)
+        except (OSError, json.JSONDecodeError):
+            need_units = True
 
     # is it necessary to generate the .npy with the Data Quality Flag?
     need_dqf  = band == 7 and not os.path.exists(dqf_path)
