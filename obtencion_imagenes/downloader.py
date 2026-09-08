@@ -191,7 +191,7 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
     file_path   = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}.npy")
     coeffs_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_planck.json")
     units_path  = os.path.join(folder, "units.json")
-
+    kappa0_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_kappa0.json")
     band = product_cfg.get("band")
 
     legacy_dqf_path = os.path.join(folder, f"{timestamp.strftime('%Y%m%d_%H%M')}_dqf.npy")
@@ -214,27 +214,17 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
     # is it necessary to generate the JSON with the units metadata? Unlike
     # the Planck coefficients, this is saved for ALL products
     # (B02, DQF, TPW, etc.), not just the IR bands.
-    #
-    # For B02 specifically, a units.json written before the kappa0 fix
-    # exists on disk but lacks the "kappa0" key fdca_adapter.py now
-    # requires. Checking only file existence treats that stale file as
-    # up to date, so download_and_save() returns status="exists" and
-    # kappa0 is never fetched -- fdca_adapter.py then fails downstream
-    # with a confusing "missing kappa0" error that looks like a download
-    # problem. Re-check content for B02, not just presence.
     need_units = not os.path.exists(units_path)
-    if band == 2 and not need_units:
-        try:
-            with open(units_path) as f:
-                need_units = "kappa0" not in json.load(f)
-        except (OSError, json.JSONDecodeError):
-            need_units = True
 
     # is it necessary to generate the .npy with the Data Quality Flag?
     need_dqf  = band == 7 and not os.path.exists(dqf_path)
 
+    # is it necessary to fetch this scene's kappa0? Only applies to B02;
+    # unlike need_units, this is per-timestamp on purpose (see kappa0_path).
+    need_kappa0 = band == 2 and not os.path.exists(kappa0_path)
+
     # If all necessary files exist, we don't do anything.
-    if not need_npy and not need_json and not need_units:
+    if not need_npy and not need_json and not need_units and not need_kappa0:
         return {
             "status": "exists",
             "path": file_path,
@@ -308,6 +298,10 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
                 
             ds.close()
 
+        kappa0_value = None
+        if band == 2:
+            kappa0_value = units_meta.pop("kappa0", None)
+
         if data.size == 0:
             elapsed = time.time() - start_time
             print(f" ⚠️  vacío ({elapsed:.1f}s)")
@@ -336,6 +330,12 @@ def download_and_save(timestamp, product_cfg, region_cfg, satellite, domain, out
             }
             with open(units_path, "w") as f:
                 json.dump(units_record, f, indent=2)
+
+        # Save kappa0 for THIS scene (Band 2 only) -- see kappa0_path above.
+        if need_kappa0 and kappa0_value is not None:
+            with open(kappa0_path, "w") as f:
+                json.dump({"kappa0": kappa0_value}, f)
+
 
         elapsed = time.time() - start_time
         print(f" ✅ ({elapsed:.1f}s, shape={list(data.shape)}, units={units_meta.get('units')})")
