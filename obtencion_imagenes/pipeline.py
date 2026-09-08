@@ -28,13 +28,6 @@ def load_config(path="config.yaml"):
         return yaml.safe_load(f)
 
 
-def load_manifest(output_root):
-    path = os.path.join(output_root, "manifest.json")
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
 # --- Workaround para bug de OpenSSL (ASN1_R_NOT_ENOUGH_DATA en Windows) ---
 # Ver: https://github.com/openssl/openssl/issues/31807
 # https://github.com/python/cpython/issues/151504
@@ -330,10 +323,25 @@ def cmd_retry(args, cfg):
         return
 
     output_root = os.path.join(cfg["output_root"], args.region)
-    manifest_entries = load_manifest(output_root)
-    if not manifest_entries:
+    manifest_data = manifest.load(output_root)
+    if not manifest_data:
         print(f"❌ No manifest.json found or it is empty in: {output_root}")
         return
+
+    # manifest.json es un dict keyed por timestamp, cada uno con un dict
+    # "bands" keyed por product id (ver manifest.py) -- no es una lista
+    # plana. Lo aplanamos acá a {status, product, timestamp, error}, que es
+    # la forma que espera el resto de esta función.
+    manifest_entries = [
+        {
+            "timestamp": ts,
+            "product": prod_id,
+            "status": band_info.get("status"),
+            "error": band_info.get("error"),
+        }
+        for ts, ts_data in manifest_data.items()
+        for prod_id, band_info in ts_data.get("bands", {}).items()
+    ]
 
     product_map = {p["id"]: p for p in cfg["products"]}
     retry_entries = [
