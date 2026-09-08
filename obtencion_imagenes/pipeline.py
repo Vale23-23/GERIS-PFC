@@ -328,48 +328,72 @@ def cmd_retry(args, cfg):
         print(f"❌ No manifest.json found or it is empty in: {output_root}")
         return
 
-    # manifest.json es un dict keyed por timestamp, cada uno con un dict
-    # "bands" keyed por product id (ver manifest.py) -- no es una lista
-    # plana. Lo aplanamos acá a {status, product, timestamp, error}, que es
-    # la forma que espera el resto de esta función.
-    manifest_entries = [
-        {
-            "timestamp": ts,
-            "product": prod_id,
-            "status": band_info.get("status"),
-            "error": band_info.get("error"),
-        }
-        for ts, ts_data in manifest_data.items()
-        for prod_id, band_info in ts_data.get("bands", {}).items()
-    ]
-
     product_map = {p["id"]: p for p in cfg["products"]}
-    retry_entries = [
-        e for e in manifest_entries
-        if e["status"] in ("error", "empty")
-        and (not args.products or e["product"] in args.products)
-    ]
+    required_ids = args.products if args.products else list(product_map.keys())
+    unknown = set(required_ids) - set(product_map)
+    if unknown:
+        print(f"⚠️  Unknown products ignored: {', '.join(unknown)}")
+        required_ids = [p for p in required_ids if p in product_map]
+
+    # Filtro opcional de rango de fechas, mismo formato que `download`.
+    ts_start = datetime.strptime(args.start, "%Y-%m-%d %H:%M") if args.start else None
+    ts_end   = datetime.strptime(args.end,   "%Y-%m-%d %H:%M") if args.end   else None
+
+    def _in_range(ts_str):
+        if ts_start is None and ts_end is None:
+            return True
+        ts_dt = datetime.strptime(ts_str, "%Y%m%d_%H%M")
+        if ts_start and ts_dt < ts_start:
+            return False
+        if ts_end and ts_dt > ts_end:
+            return False
+        return True
+
+    # Dos tipos de "necesita reintento":
+    #  1) fallas explícitas en el manifest (status error/empty)
+    #  2) productos que NUNCA se intentaron para ese timestamp (ausentes de
+    #     "bands"): cmd_status los cuenta como incompletos, pero antes
+    #     cmd_retry no los veía porque no hay ninguna entrada de error que
+    #     leer -- simplemente no están.
+    retry_entries = []
+    skipped_by_range = 0
+    for ts, ts_data in manifest_data.items():
+        if not _in_range(ts):
+            skipped_by_range += 1
+            continue
+        bands = ts_data.get("bands", {})
+        for prod_id in required_ids:
+            band_info = bands.get(prod_id)
+            if band_info is None:
+                retry_entries.append({
+                    "timestamp": ts, "product": prod_id,
+                    "status": "missing", "error": None,
+                })
+            elif band_info.get("status") in ("error", "empty"):
+                retry_entries.append({
+                    "timestamp": ts, "product": prod_id,
+                    "status": band_info.get("status"),
+                    "error": band_info.get("error"),
+                })
 
     if not retry_entries:
-        print("✅ No failed downloads pending retry.")
+        extra = f" (fuera de rango: {skipped_by_range} timestamps)" if skipped_by_range else ""
+        print(f"✅ No hay descargas fallidas o faltantes pendientes de reintento{extra}.")
         return
 
-    if args.products:
-        unknown = set(args.products) - set(product_map)
-        if unknown:
-            print(f"⚠️  Unknown products ignored: {', '.join(unknown)}")
+    print(f"🔎 {len(retry_entries)} archivos a reintentar "
+          f"({sum(1 for e in retry_entries if e['status']=='missing')} nunca intentados, "
+          f"{sum(1 for e in retry_entries if e['status']!='missing')} con error previo)"
+          + (f", {skipped_by_range} timestamps excluidos por rango" if skipped_by_range else ""))
 
     tasks = []
     for entry in retry_entries:
         prod = product_map.get(entry["product"])
         if not prod:
-            print(f"⚠️  Product not defined in config.yaml: {entry['product']}")
             continue
-
-        # Convertimos el string "20250901_1200" a un objeto datetime
         ts_obj = datetime.strptime(entry["timestamp"], "%Y%m%d_%H%M")
         tasks.append((ts_obj, prod))
-    
+
     if not tasks:
         print("❌ No valid tasks to retry.")
         return
@@ -391,22 +415,15 @@ def cmd_retry(args, cfg):
             icon = {"downloaded": "💾", "exists": "✅", "empty": "⚠️", "error": "❌"}.get(result["status"], "?")
             print(f"  {icon} {result['timestamp']}  {result['product']:<30}  {result['status']}")
 
-    # 1. Obtenemos todos los IDs definidos en el config.yaml para esta región
     all_ids = [p["id"] for p in cfg["products"]]
-    
-    # 2. Obtenemos la configuración de la región
     region_cfg = cfg["regions"][args.region]
-    
-    # 3. Actualizamos el manifest
     manifest.update(output_root, results, all_ids, region_cfg)
-
 
     downloaded = sum(1 for r in results if r["status"] == "downloaded")
     skipped    = sum(1 for r in results if r["status"] == "exists")
     errors     = sum(1 for r in results if r["status"] in ("error", "empty"))
     print(f"\n✔ Reintentos completados: descargados={downloaded}  |  ya existían={skipped}  |  errores={errors}")
     print(f"📋 Manifest actualizado en: {output_root}/manifest.json")
-
 def cmd_download_camel(args, cfg):
     region_cfg = cfg["regions"].get(args.region)
     if not region_cfg:
@@ -542,7 +559,8 @@ def main():
     rt.add_argument("--region",   required=True, help="Region key from config.yaml")
     rt.add_argument("--products", nargs="+", help="Limit retry to these product IDs")
     rt.add_argument("--workers",  type=int, default=None, help="Parallel workers (overrides config)")
-
+    rt.add_argument("--start", default=None, help='Restrict retry to timestamps >= "YYYY-MM-DD HH:MM"')
+    rt.add_argument("--end",   default=None, help='Restrict retry to timestamps <= "YYYY-MM-DD HH:MM"')
     # download-camel
     dc = sub.add_parser("download-camel", help="Descarga climatología de emisividad CAMEL V3 (LP DAAC)")
     dc.add_argument("--region", required=True, help="Region key from config.yaml")
