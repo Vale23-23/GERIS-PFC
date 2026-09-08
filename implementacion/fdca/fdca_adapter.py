@@ -666,7 +666,9 @@ def build_surface_masks(lat: np.ndarray, lon: np.ndarray,
 
     if eco_mask is not None:
         eco_mask_fixed = eco_mask.astype(np.uint8)
-        land_mask = region_mask & (eco_mask_fixed == 0)
+        # The country/ROI polygon is for output clipping only.  Background
+        # windows must still be able to use valid land outside that polygon.
+        land_mask = (eco_mask_fixed == 0)
         land_cover[~land_mask] = 0
         usgs_eco[~land_mask] = 0
     else:
@@ -1214,7 +1216,10 @@ def load_fdca_input(
     # and inland water; only code 0 is included as land.
     eco_mask_fixed = eco_mask.astype(np.uint8)
     region_mask = masks.get("region_mask", np.ones_like(eco_mask_fixed, dtype=bool))
-    masks["land_mask"] = region_mask & (eco_mask_fixed == 0)
+    # Keep ROI clipping separate from the ancillary land mask.  The latter is
+    # intentionally allowed to include valid land outside Uruguay for windows
+    # centered near the border.
+    masks["land_mask"] = eco_mask_fixed == 0
 
     # ── Armar FDCAInput ───────────────────────────────────────────────────────
     inp = FDCAInput(
@@ -1238,13 +1243,8 @@ def load_fdca_input(
         prev_fire_mask=None,
         data_quality=data_quality,
         eco_mask=eco_mask,
+        region_mask=region_mask,
     )
-
-    # region_mask (recorte geográfico puro, ej. Uruguay) no es un campo del
-    # constructor de FDCAInput -- se adjunta post-construcción, igual que
-    # prev_fire_mask en run_fdca.py. run_part1 lo necesita para descartar
-    # píxeles fuera del ROI antes de cualquier otro test.
-    inp.region_mask = region_mask
 
     if verbose:
         print(f"\n  ✓ FDCAInput construido — shape {shape}")

@@ -186,8 +186,8 @@ def _background_albedo(vis_mean_bkg: float, sza_cos: float, day_pixel: bool) -> 
     return ((vis_mean_bkg / 25.5) ** 2) / (max(sza_cos, 1e-6) * 100.0)
 
 # ── TPW look-up correction (ATBD 3.4.2.8) ────────────────────────────────────
-def _tpw_lut_indices(tpw_mm: float, lza_deg: float) -> tuple[int, int]:
-    """Return the 0-based column index into the TPW LUT for this (tpw, lza) pair."""
+def _tpw_lut_indices(tpw_mm: float, lza_deg: float) -> int:
+    """Return the flattened LUT column index for TPW and viewing angle."""
     bin_tpw = int(round(tpw_mm / 10.0))
     bin_tpw = max(1, min(5, bin_tpw))
     bin_ang = int(round(lza_deg / 10.0))
@@ -208,6 +208,18 @@ def _apply_tpw_correction(rad: float, offset: float, trans: float) -> float:
     additive extinction/absorption term, so it is subtracted once.
     """
     return (rad - offset) / trans
+
+def _cloud_bt_mask_code(bt7: float, bt14: float) -> Optional[int]:
+    """Return the ordered BT cloud-mask code, or ``None`` if it passes."""
+    diff = bt7 - bt14
+    if bt14 < CLOUD_BT14_THRESH:
+        return FireMask.CLOUD_BT14
+    if diff < CLOUD_BT7_BT14_NEG:
+        return FireMask.CLOUD_BT7_BT14_NEG
+    if diff > CLOUD_BT7_BT14_POS and bt7 < CLOUD_BT7_FOR_POS:
+        return FireMask.CLOUD_BT7_BT14_POS
+    return None
+
 
 # ── Solar reflectivity correction ────────────────────────────────────────────
 def _solar_correction(
@@ -565,7 +577,7 @@ def run_part1(
             # difference is 2K or less, the pixel is skipped (code 100)."
             # "If the difference is < 2K and either Ch7 or Ch14 ≤ 273K → code 201"
             diff_bt = bt7[i, j] - bt14_eff[i, j]
-            if (bt7[i, j] > 273 or bt14_eff[i, j] > 273) and diff_bt <= 2.0:
+            if (bt7[i, j] > 273 or bt14_eff[i, j] > 273) and abs(diff_bt) <= 2.0:
                 continue
             if diff_bt < 2.0 and (bt7[i, j] <= 273 or bt14_eff[i, j] <= 273):
                 fire_mask[i, j] = FireMask.TOO_COLD;       continue
@@ -584,17 +596,12 @@ def run_part1(
             is_cloudy = False
 
             if fire_mask[i, j] == FireMask.FIRE_FREE:
-                if bt14_eff[i, j] < CLOUD_BT14_THRESH:
-                    fire_mask[i, j] = FireMask.CLOUD_BT14;  is_cloudy = True
-
-            if fire_mask[i, j] == FireMask.FIRE_FREE:
-                if bt7[i, j] - bt14_eff[i, j] < CLOUD_BT7_BT14_NEG:
-                    fire_mask[i, j] = FireMask.CLOUD_BT7_BT14_NEG; is_cloudy = True
-
-            if fire_mask[i, j] == FireMask.FIRE_FREE:
-                if (bt7[i, j] - bt14_eff[i, j] > CLOUD_BT7_BT14_POS
-                        and bt7[i, j] < CLOUD_BT7_FOR_POS):
-                    fire_mask[i, j] = FireMask.CLOUD_BT7_BT14_POS; is_cloudy = True
+                cloud_code = _cloud_bt_mask_code(
+                    float(bt7[i, j]), float(bt14_eff[i, j])
+                )
+                if cloud_code is not None:
+                    fire_mask[i, j] = cloud_code
+                    is_cloudy = True
 
             if fire_mask[i, j] == FireMask.FIRE_FREE:
                 if day_pixel and refl2 is not None:
@@ -1013,8 +1020,13 @@ def run_part1(
                 r7_diff_si = native_wavenumber_radiance_to_per_meter(
                     float(r7_diff), LAMBDA[7]
                 )
+                r7_bkg_frp = (
+                    float(rad7from14_bkg)
+                    if 0.0 <= float(sza[i, j]) <= 85.0
+                    else float(r7_bkg_corr)
+                )
                 r7_bkg_corr_si = native_wavenumber_radiance_to_per_meter(
-                    float(r7_bkg_corr), LAMBDA[7]
+                    r7_bkg_frp, LAMBDA[7]
                 )
                 frp_val = compute_frp(
                     pix_area, float(r7_diff_si), float(r7_bkg_corr_si)
@@ -1032,7 +1044,7 @@ def run_part1(
                 bt7=float(bt7[i, j]),
                 bt14=float(bt14_eff[i, j]),
                 rad7=r7, rad14=r14,
-                bt7_corr=T7c, bt14_corr=T14c, bt_bkg_corr=Tbc7,
+                bt7_corr=T7c, bt14_corr=T14c, bt_bkg_corr=Tbc14,
                 bt7_bkg=bkg.temp7_bkg_mean,
                 bt14_bkg=bkg.temp14_bkg_mean,
                 bt7_bkg_std=bkg.temp7_bkg_stddev,

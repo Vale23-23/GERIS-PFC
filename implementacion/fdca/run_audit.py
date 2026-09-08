@@ -397,10 +397,24 @@ def _valid_pixel_mask(reference: np.ndarray, region_mask: np.ndarray | None = No
     return valid
 
 
+def _exclude_low_probability_pixels(reference: np.ndarray, prediction: np.ndarray | None = None,
+                                  *, keep_prediction: bool = True) -> np.ndarray:
+    """Marca píxeles de baja probabilidad (base 15/35) para excluirlos opcionalmente."""
+    ref_base = to_base_code(np.asarray(reference))
+    pred_base = to_base_code(np.asarray(prediction if prediction is not None else reference))
+    if keep_prediction:
+        return ~((ref_base == 15) | (pred_base == 15))
+    return ~(ref_base == 15)
+
+
 def scene_metrics(reference: np.ndarray, candidate_mask: np.ndarray,
                   fire_mask_p2: np.ndarray,
                   region_mask: np.ndarray | None = None) -> dict:
-    """Binario total, por etiqueta exacta y por etiqueta base (todo por píxel)."""
+    """Binario total, por etiqueta exacta y por etiqueta base (todo por píxel).
+
+    Además devuelve una variante paralela `*_no_low_prob` que excluye explicitamente
+    los píxeles de baja probabilidad (códigos base 15/35) sin tocar las métricas actuales.
+    """
     valid = _valid_pixel_mask(reference, region_mask)
     reference = np.asarray(reference)[valid]
     fire_mask_p2 = np.asarray(fire_mask_p2)[valid]
@@ -411,7 +425,16 @@ def scene_metrics(reference: np.ndarray, candidate_mask: np.ndarray,
     reference_base = to_base_code(reference)
     predicted_base = to_base_code(fire_mask_p2)
 
-    return {
+    keep_no_low_prob = _exclude_low_probability_pixels(reference, fire_mask_p2)
+    ref_no_low = reference[keep_no_low_prob]
+    pred_no_low = fire_mask_p2[keep_no_low_prob]
+    cand_no_low = candidate_mask[keep_no_low_prob]
+    ref_fire_no_low = np.isin(ref_no_low, FIRE_CODES)
+    pred_fire_no_low = np.isin(pred_no_low, FIRE_CODES)
+    ref_base_no_low = to_base_code(ref_no_low)
+    pred_base_no_low = to_base_code(pred_no_low)
+
+    metrics = {
         # Parte I: techo de recall — un fuego que Parte I descarta ya no se
         # puede recuperar en Parte II.
         "part1_binary": scores(reference_fire, candidate_mask),
@@ -424,8 +447,15 @@ def scene_metrics(reference: np.ndarray, candidate_mask: np.ndarray,
             str(code): scores(reference_base == code, predicted_base == code)
             for code in BASE_FIRE_CODES
         },
+        "part1_binary_no_low_prob": scores(ref_fire_no_low, cand_no_low),
+        "part2_binary_no_low_prob": scores(ref_fire_no_low, pred_fire_no_low),
+        "by_base_code_no_low_prob": {
+            str(code): scores(ref_base_no_low == code, pred_base_no_low == code)
+            for code in BASE_FIRE_CODES if code != 15
+        },
         "confusion": confusion_counts(reference, fire_mask_p2),
     }
+    return metrics
 
 
 def confusion_counts(reference: np.ndarray, prediction: np.ndarray) -> dict:
@@ -783,9 +813,10 @@ TRACE_COLUMNS_FIRST = [
 
 # ── Agregación entre escenas (micro: se suman TP/FP/FN/TN) ────────────────────
 def aggregate(scenes: list[dict]) -> dict:
-    part1 = part2 = None
+    part1 = part2 = part1_no_low = part2_no_low = None
     by_code: dict = {str(c): None for c in FIRE_CODES}
     by_base: dict = {str(c): None for c in BASE_FIRE_CODES}
+    by_base_no_low: dict = {str(c): None for c in BASE_FIRE_CODES if c != 15}
     funnel: dict = {}
     funnel_all: Counter = Counter()
     n_reference_fire = 0
@@ -801,10 +832,14 @@ def aggregate(scenes: list[dict]) -> dict:
         metrics = scene["metrics"]
         part1 = add_scores(part1, metrics["part1_binary"])
         part2 = add_scores(part2, metrics["part2_binary"])
+        part1_no_low = add_scores(part1_no_low, metrics["part1_binary_no_low_prob"])
+        part2_no_low = add_scores(part2_no_low, metrics["part2_binary_no_low_prob"])
         for code in by_code:
             by_code[code] = add_scores(by_code[code], metrics["by_code"][code])
         for code in by_base:
             by_base[code] = add_scores(by_base[code], metrics["by_base_code"][code])
+        for code in by_base_no_low:
+            by_base_no_low[code] = add_scores(by_base_no_low[code], metrics["by_base_code_no_low_prob"][code])
 
         n_reference_fire += scene["funnel"]["n_reference_fire"]
         for stage_value, info in scene["funnel"]["by_stage"].items():
@@ -834,8 +869,11 @@ def aggregate(scenes: list[dict]) -> dict:
         "n_reference_fire_pixels": n_reference_fire,
         "part1_binary": finish_scores(part1) if part1 else None,
         "part2_binary": finish_scores(part2) if part2 else None,
+        "part1_binary_no_low_prob": finish_scores(part1_no_low) if part1_no_low else None,
+        "part2_binary_no_low_prob": finish_scores(part2_no_low) if part2_no_low else None,
         "by_code": {k: finish_scores(v) for k, v in by_code.items() if v},
         "by_base_code": {k: finish_scores(v) for k, v in by_base.items() if v},
+        "by_base_code_no_low_prob": {k: finish_scores(v) for k, v in by_base_no_low.items() if v},
         "recall_funnel": dict(sorted(funnel.items(), key=lambda kv: int(kv[0]))),
         "all_pixels_by_stage": dict(sorted(funnel_all.items(), key=lambda kv: int(kv[0]))),
         "fp_predicted_codes": dict(sorted(fp_pred.items(), key=lambda kv: int(kv[0]))),
@@ -935,6 +973,12 @@ def build_report(args, timestamps: list[str], scenes: list[dict],
         f"encuentra, Parte II conserva {part2['tp']} "
         f"(pierde {part1['tp'] - part2['tp']}).\n")
 
+    add("## 1b. Variante sin código base 15 (low prob)\n")
+    add(SCORE_HEADER)
+    add(_score_row("Parte II final, ignorando código 15/35", totals["part2_binary_no_low_prob"]))
+    add("")
+    add("Esta variante excluye los píxeles de baja probabilidad (código base 15/35) de la métrica final, sin tocar la métrica original.\n")
+
     add("## 2. Por etiqueta exacta (códigos 10-15 y 30-35)\n")
     add(SCORE_HEADER)
     for code in FIRE_CODES:
@@ -947,6 +991,19 @@ def build_report(args, timestamps: list[str], scenes: list[dict],
     add(SCORE_HEADER)
     for code in BASE_FIRE_CODES:
         s = totals["by_base_code"][str(code)]
+        if s["support_ref"] or s["support_pred"]:
+            add(_score_row(f"{code} — {CODE_LABELS[code]}", s))
+    add("")
+
+    add("## 3b. Por etiqueta base sin código 15 (low prob)\n")
+    add(SCORE_HEADER)
+    for code in BASE_FIRE_CODES:
+        if code == 15:
+            continue
+        s = totals["by_base_code_no_low_prob"].get(str(code), {
+            "precision": 0.0, "recall": 0.0, "f1": 0.0,
+            "tp": 0, "fp": 0, "fn": 0, "support_ref": 0, "support_pred": 0,
+        })
         if s["support_ref"] or s["support_pred"]:
             add(_score_row(f"{code} — {CODE_LABELS[code]}", s))
     add("")
@@ -1071,6 +1128,10 @@ def print_console_summary(totals: dict) -> None:
     print(f"Parte II (final)      : precision={_pct(part2['precision'])} "
           f"recall={_pct(part2['recall'])} f1={_pct(part2['f1'])} "
           f"TP={part2['tp']} FP={part2['fp']} FN={part2['fn']}")
+    part2_no_low = totals["part2_binary_no_low_prob"]
+    print(f"Parte II (sin c15)    : precision={_pct(part2_no_low['precision'])} "
+          f"recall={_pct(part2_no_low['recall'])} f1={_pct(part2_no_low['f1'])} "
+          f"TP={part2_no_low['tp']} FP={part2_no_low['fp']} FN={part2_no_low['fn']}")
     print("\nPor etiqueta base (30-35 colapsados a 10-15):")
     print(f"  {'código':>8} {'precision':>10} {'recall':>10} {'f1':>10} "
           f"{'TP':>5} {'FP':>6} {'FN':>5}")
