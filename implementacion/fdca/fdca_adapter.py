@@ -365,26 +365,6 @@ def rad_to_bt(band: int, rad: np.ndarray) -> np.ndarray: # QUEDA PENDIENTE REVIS
     return bt.astype(np.float32)
 
 
-def rad_b02_to_reflectance(rad: np.ndarray) -> np.ndarray:
-    """
-    Convert B02 radiance [W·m⁻²·sr⁻¹·µm⁻¹] to reflectance factor [-].
-
-    refl = π * Rad / ESUN_B02
-
-    Do NOT divide by cos(SZA) here: refl2 must stay as the raw reflectance
-    factor (ATBD Table 3.1), not normalized by solar angle. The division by
-    cos(SZA) happens exactly once, in part1.calculate_albedo(), where
-    refl2 / cos(SZA) produces Albedo (ATBD Table 3.4). Dividing here too would
-    make calculate_albedo() divide by cos(SZA) twice, and vis_brightness
-    (255*sqrt(refl2)) would end up wrong with nothing downstream to correct it.
-
-    FDCA uses this value as 'refl2' for the daytime cloud and glint tests.
-    """
-    import math
-    refl = math.pi * rad / (ESUN_B02)
-    return np.clip(refl, 0.0, 1.5).astype(np.float32)   # clip para sat/ruido
-
-
 def resample_b02_to_grid(rad: np.ndarray, target_shape: tuple[int, int],
                           max_pixel_slack: int = 4) -> np.ndarray:
     """Reduce B02 to the 2 km thermal grid using area-block averaging.
