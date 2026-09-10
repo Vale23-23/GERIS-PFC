@@ -838,17 +838,14 @@ def run_part1(
             stage[i, j] = Stage.TPW_OK
 
             # Smoke/thin cloud correction (daylight, albedo diff in (0.025, 0.07))
-            smoke_corrected = False
             if day_pixel and refl2 is not None and not np.isnan(alb_ij) and not np.isnan(alb_bkg):
                 alb_diff = alb_ij - alb_bkg
                 if CLOUD_ADJ_ALBEDO_LOW < alb_diff < CLOUD_ADJ_ALBEDO_HIGH:
                     T7_corr  += CLOUD_ADJ_BT7_COEF  * alb_diff
                     T14_corr += CLOUD_ADJ_BT14_COEF * alb_diff
-                    smoke_corrected = True
                 elif alb_ij > CLOUD_ALBEDO_THRESH or alb_diff >= CLOUD_ADJ_ALBEDO_HIGH:
                     T7_corr  += CLOUD_ADJ_BT7_FIXED
                     T14_corr += CLOUD_ADJ_BT14_FIXED
-                    smoke_corrected = True
 
             # Emissivity correction (validated above against ATBD code 160)
             r7_corr_em  = r7_corr  / em7
