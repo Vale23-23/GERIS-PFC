@@ -1017,8 +1017,12 @@ def run_part1(
                 r7_diff_si = native_wavenumber_radiance_to_per_meter(
                     float(r7_diff), LAMBDA[7]
                 )
+                # L_B,MIR must be the solar-free background at the SAME
+                # emissivity level as r7_diff (already divided by em7).
+                # rad7from14_bkg is the raw (non-emissivity) Planck radiance
+                # implied by Tbc14; multiply by em7 before using it here
                 r7_bkg_frp = (
-                    float(rad7from14_bkg)
+                    float(em7 * rad7from14_bkg)
                     if 0.0 <= float(sza[i, j]) <= 85.0
                     else float(r7_bkg_corr)
                 )
