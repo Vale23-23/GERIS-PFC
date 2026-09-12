@@ -908,8 +908,7 @@ def run_part1(
             min_t14 = 285.0  
             min_t7 = 285.0 + offset_day
 
-
-            if T14c < min_t14 or T7c < min_t7:
+            if fc != FailChar.F7 and (T14c < min_t14 or T7c < min_t7):
                 fc = FailChar.F3
 
             elif T14c - Tbc14 < 0.25:
