@@ -457,15 +457,15 @@ def load_region_bounds(region_name: str = "uruguay", config_path: str | Path | N
 
     return defaults.get(region_name, {})
 
-
 NATURAL_EARTH_URL = (
-    "https://naturalearth.s3.amazonaws.com/110m_cultural/"
-    "ne_110m_admin_0_countries.zip"
+    "https://naturalearth.s3.amazonaws.com/10m_cultural/"
+    "ne_10m_admin_0_countries.zip"
 )
+COUNTRY_GEOJSON_FILENAME = "ne_10m_admin_0_countries.geojson"
 # Nombre fijo y único del geojson de países. Se busca en UN solo lugar
 # (base_path/COUNTRY_GEOJSON_FILENAME, ej. dataset/uruguay/ne_110m_admin_0_countries.geojson);
 # si no está ahí, se cae al caché de paquete y, si tampoco existe, se descarga.
-COUNTRY_GEOJSON_FILENAME = "ne_110m_admin_0_countries.geojson"
+
 NATURAL_EARTH_CACHE_DIR = Path(__file__).resolve().parent / "data" / "natural_earth"
 NATURAL_EARTH_CACHE_FILE = NATURAL_EARTH_CACHE_DIR / COUNTRY_GEOJSON_FILENAME
 
@@ -498,7 +498,7 @@ def _download_natural_earth_zip(dest_dir: Path) -> Path:
     import requests
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = dest_dir / "ne_110m_admin_0_countries.zip"
+    zip_path = dest_dir / "ne_10m_admin_0_countries.zip"
 
     resp = requests.get(NATURAL_EARTH_URL, timeout=60)
     resp.raise_for_status()
@@ -595,13 +595,8 @@ def build_region_mask(lat: np.ndarray, lon: np.ndarray,
         geom = None
 
     if geom is not None:
-        from shapely.geometry import Point
-        mask = np.zeros(lat.shape, dtype=bool)
-        for i in range(lat.shape[0]):
-            for j in range(lat.shape[1]):
-                point = Point(float(lon[i, j]), float(lat[i, j]))
-                mask[i, j] = geom.covers(point) or geom.contains(point) or geom.touches(point)
-        return mask
+        import shapely.vectorized
+        return shapely.vectorized.contains(geom, lon, lat)
 
     if region_cfg is None:
         region_cfg = load_region_bounds(region_name)
