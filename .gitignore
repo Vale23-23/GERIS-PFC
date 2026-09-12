@@ -1,0 +1,17 @@
+# Ignore local dataset assets and generated binary files
+implementacion/dataset/uruguay/
+*.npy
+*.npz
+__pycache__/
+*.py[cod]
+geris
+dataset
+results
+figures
+implementacion
+# Credentials and ML experiment artifacts
+.env
+.comet.config
+comet-logs/
+machine_learning/artifacts/
+machine_learning/checkpoints/
