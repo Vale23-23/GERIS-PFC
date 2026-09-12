@@ -733,7 +733,8 @@ def run_part1(
                     rad14=float(rad14_eff[i, j]),
                     bt7_corr=np.nan,
                     bt14_corr=np.nan,
-                    bt_bkg_corr=float(bkg.temp7_bkg_mean),
+                    bt_bkg_corr=float(bkg.temp7_bkg_mean), # [DEVIATION] No TPW/emissivity correction runs on this quick path (saturated / n_passes>max), 
+                    #so there is no real Tbc14 here, this stays the raw background mean. Nothing currently reads bt_bkg_corr
                     bt7_bkg=bkg.temp7_bkg_mean,
                     bt14_bkg=bkg.temp14_bkg_mean,
                     bt7_bkg_std=bkg.temp7_bkg_stddev,
