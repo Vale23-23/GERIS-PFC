@@ -220,35 +220,50 @@ def _build_goes_latlon_grid(goes_npy_shape, region_cfg):
 
 def _regrid(pwat, gfs_lats, gfs_lons, target_lats, target_lons):
     """
-    Bilinear interpolation from the GFS grid to the ABI pixel grid.
-    Uses scipy.interpolate.RegularGridInterpolator.
+    Interpolate GFS PWAT onto the ABI pixel grid.
+
+    Accepts two shapes for target_lats/target_lons:
+      * 1-D vectors (legacy path): a rectangular linspace approximation of
+        the region bounding box. Kept for backward compatibility and as a
+        fallback when the real per-pixel lat/lon field isn't available.
+      * 2-D arrays, same shape as the ABI scene: the real geostationary
+        projection lat/lon field (from fdca_adapter.compute_latlon_grid).
+        Each pixel is queried directly -- no meshgrid, since the real
+        projection is not row/column-separable the way a rectangular
+        lat/lon grid would be.
 
     GFS lats may be descending; RegularGridInterpolator requires ascending,
     so we flip if needed.
     """
     from scipy.interpolate import RegularGridInterpolator
 
-    # Ensure lats are ascending for the interpolator
     if gfs_lats[0] > gfs_lats[-1]:
         gfs_lats = gfs_lats[::-1]
-        pwat     = pwat[::-1, :]
+        pwat = pwat[::-1, :]
 
     interp = RegularGridInterpolator(
         (gfs_lats, gfs_lons),
         pwat,
-        method       = "linear",
-        bounds_error = False,
-        fill_value   = np.nan,
+        method="linear",
+        bounds_error=False,
+        fill_value=np.nan,
     )
 
-    # Build meshgrid of target points (rows = lats descending → we reverse)
-    target_lats_asc = target_lats[::-1]   # ascending for meshgrid query
-    lon_grid, lat_grid = np.meshgrid(target_lons, target_lats_asc)
-    points = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
+    target_lats = np.asarray(target_lats)
+    target_lons = np.asarray(target_lons)
 
-    result = interp(points).reshape(len(target_lats_asc), len(target_lons))
-    return result[::-1, :].astype(np.float32)   # flip back to north-first
+    if target_lats.ndim == 1:
+        # Legacy rectangular-grid path.
+        target_lats_asc = target_lats[::-1]
+        lon_grid, lat_grid = np.meshgrid(target_lons, target_lats_asc)
+        points = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
+        result = interp(points).reshape(len(target_lats_asc), len(target_lons))
+        return result[::-1, :].astype(np.float32)
 
+    # Real 2-D per-pixel lat/lon field: query directly, one point per pixel.
+    points = np.column_stack([target_lats.ravel(), target_lons.ravel()])
+    result = interp(points).reshape(target_lats.shape)
+    return result.astype(np.float32)
 
 def _infer_goes_shape(output_root: str, timestamp: datetime) -> tuple[int, int] | None:
     """
@@ -301,6 +316,7 @@ def download_and_save(
     region_cfg:  dict,
     output_root: str,
     goes_shape:  tuple[int, int] | None = None,
+    goes_latlon: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict:
     """
     Download GFS TPW for the given timestamp, regrid to the ABI grid, save as .npy.
@@ -332,9 +348,13 @@ def download_and_save(
     file_path = os.path.join(folder, f"{cycle_str}.npy")
 
     if os.path.exists(file_path):
-        return {"status": "exists", "path": file_path,
-                "product": PRODUCT_ID, "timestamp": ts_str,
-                "gfs_cycle": cycle_str}
+        cached = np.load(file_path)
+        if not np.all(np.isnan(cached)):
+            return {"status": "exists", "path": file_path,
+                    "product": PRODUCT_ID, "timestamp": ts_str,
+                    "gfs_cycle": cycle_str}
+        # Stale all-NaN cache from a run predating the regrid/crop fixes;
+        # fall through and regenerate instead of trusting a broken file.
 
     grib_url = _build_grib_url(cycle_dt, cycle_hour)
 
@@ -355,13 +375,39 @@ def download_and_save(
             return {"status": "empty", "path": None,
                     "product": PRODUCT_ID, "timestamp": ts_str}
 
-        # 4. Crop to the region bounding box
-        pwat, gfs_lats, gfs_lons = _crop_to_region(pwat, gfs_lats, gfs_lons, region_cfg)
+                # 4. Crop to the region bounding box.
+        #
+        # When the real per-pixel lat/lon field is available (goes_latlon),
+        # crop to ITS actual extent plus a safety margin, not region_cfg's
+        # declared bounds. The ABI crop's real geostationary-projection
+        # footprint can exceed the declared config.yaml box by a wide
+        # margin (observed on uruguay_padded: up to ~3.3 deg in longitude)
+        # -- cropping GFS to the narrower declared box left real target
+        # pixels outside the interpolator's domain, producing NaN.
+        if goes_latlon is not None:
+            real_lat, real_lon = goes_latlon
+            margin = 1.0  # degrees; well over one native GFS 0.25 deg cell
+            crop_cfg = {
+                "lat_min": float(np.nanmin(real_lat)) - margin,
+                "lat_max": float(np.nanmax(real_lat)) + margin,
+                "lon_min": float(np.nanmin(real_lon)) - margin,
+                "lon_max": float(np.nanmax(real_lon)) + margin,
+            }
+        else:
+            crop_cfg = region_cfg
 
+        pwat, gfs_lats, gfs_lons = _crop_to_region(pwat, gfs_lats, gfs_lons, crop_cfg)
         # 5. Determine target grid shape
         shape = goes_shape or _infer_goes_shape(output_root, timestamp)
 
-        if shape is not None:
+        if goes_latlon is not None:
+            # Real geostationary-projection lat/lon grid (matches
+            # fdca_adapter.compute_latlon_grid exactly), not the linspace
+            # rectangle approximation -- avoids edge-of-domain NaN from
+            # projection distortion, worse the larger the region.
+            target_lats, target_lons = goes_latlon
+            pwat_regridded = _regrid(pwat, gfs_lats, gfs_lons, target_lats, target_lons)
+        elif shape is not None:
             target_lats, target_lons = _build_goes_latlon_grid(shape, region_cfg)
             pwat_regridded = _regrid(pwat, gfs_lats, gfs_lons, target_lats, target_lons)
         else:
