@@ -1,36 +1,37 @@
-# Guía para principiantes: cómo crear y registrar experimentos en Comet
+# Guía rápida para experimentos reproducibles con Decision Tree
 
-Esta guía está pensada para alguien que nunca usó Comet y quiere empezar con un experimento muy simple, sin juntarse con datos reales ni con una infraestructura complicada.
+Esta guía resume el flujo que estamos usando en el proyecto para experimentar en forma ordenada y reproducible, sin depender de `train_test_split` aleatorio cada vez ni de cambiar la configuración a mano en cada corrida.
 
-La idea es: crear un script, entrenar un modelo pequeño, registrar parámetros y métricas, y ver todo ordenado en Comet.
-
----
-
-## 1. Qué es Comet
-
-Comet es una plataforma para registrar experimentos de machine learning.
-
-Te permite guardar:
-- nombre del experimento
-- parámetros del modelo
-- métricas (accuracy, loss, F1, etc.)
-- tags para organizar runs
-- archivos y artefactos
-- gráficos o resultados
-
-En este proyecto ya está integrado para que quede muy simple usarlo.
+La idea central es esta:
+- guardar splits fijos una sola vez
+- definir feature sets en YAML
+- correr experimentos con nombres claros y tags útiles
+- registrar todo en Comet de forma consistente
 
 ---
 
-## 2. Qué necesitas antes de empezar
+## 1. Qué hace este flujo
 
-Necesitas:
-- tener activado el entorno virtual del proyecto
-- tener instalada la dependencia de Comet
-- tener tu API key de Comet
-- tener un workspace correcto
+El proyecto ya tiene una base para experimentos reales de clasificación tabular con árboles de decisión.
 
-Puedes ver esto en el archivo [.env](../../.env), por ejemplo:
+Incluye:
+- generación de splits fijos con IDs de fila
+- definición de feature sets por nombre
+- configuración de cada experimento en YAML
+- logging simple y reusable a Comet
+
+Los archivos principales son:
+- [machine_learning/experiments/generate_fixed_splits.py](../experiments/generate_fixed_splits.py)
+- [machine_learning/experiments/decision_tree_real_data.py](../experiments/decision_tree_real_data.py)
+- [machine_learning/configs/feature_sets.yaml](../configs/feature_sets.yaml)
+- [machine_learning/configs/experiments/dt_baseline_v1.yaml](../configs/experiments/dt_baseline_v1.yaml)
+- [machine_learning/tracking.py](../tracking.py)
+
+---
+
+## 2. Entorno y Comet
+
+Lo ideal es dejar en [.env](../../.env) solo lo que no cambia entre corridas:
 
 ```dotenv
 COMET_ENABLED=true
@@ -39,7 +40,12 @@ COMET_PROJECT_NAME="GERIS-PFC"
 COMET_WORKSPACE="labs"
 ```
 
-> Si `COMET_ENABLED` está en `true`, el script intenta subir el experimento.
+Con eso no hace falta tocar el `.env` cada vez que quieras correr un experimento nuevo.
+
+Solo cambias:
+- `--experiment-name`
+- `--tags`
+- la config del run o el feature set
 
 ---
 
@@ -52,7 +58,7 @@ cd /Users/valentinachagas/GERIS-PFC
 source geris/bin/activate
 ```
 
-Si todavía no tienes paquetes instalados:
+Si hace falta instalar dependencias:
 
 ```bash
 python -m pip install -r requirements.txt
@@ -60,204 +66,240 @@ python -m pip install -r requirements.txt
 
 ---
 
-## 4. Verificar que el proyecto ya tiene un ejemplo listo
+## 4. Generar splits fijos
 
-En el proyecto hay un script de ejemplo muy sencillo:
-
-```bash
-python machine_learning/experiments/decision_tree_simple_comet.py --experiment-name "toy-decision-tree-v1" --tags "toy,baseline"
-```
-
-Ese script:
-- crea un dataset sintético pequeño
-- entrena un `DecisionTreeClassifier`
-- calcula métricas
-- las sube a Comet
-
-Si funciona, ya tenés el flujo básico listo para repetirlo con otros modelos o parámetros.
-
----
-
-## 5. Entender el flujo básico de un experimento
-
-Un experimento en ML normalmente tiene esta estructura:
-
-1. definir el problema
-2. preparar los datos
-3. elegir el modelo
-4. elegir hiperparámetros
-5. entrenar
-6. evaluar
-7. loguear todo en Comet
-
-En este proyecto, la parte de logging está centralizada en:
-
-- [machine_learning/tracking.py](../tracking.py)
-
-Ese archivo define:
-- un tracker vacío para cuando Comet está apagado
-- una integración con Comet cuando está activado
-- funciones para guardar parámetros y métricas
-
----
-
-## 6. Cómo nombrar experimentos
-
-Cada vez que corrés un experimento, conviene darle un nombre claro.
-
-Buenas prácticas:
-- `toy-decision-tree-v1`
-- `baseline-tree-depth3`
-- `tree-maxdepth5-randomstate42`
-- `fire-model-exp-001`
-
-Puedes ponerlo al correr el script:
+La primera vez que tenés un dataset, lo más importante es generar los splits una sola vez y guardar los row IDs.
 
 ```bash
-python machine_learning/experiments/decision_tree_simple_comet.py --experiment-name "baseline-tree-depth3" --tags "baseline,tree"
+python machine_learning/experiments/generate_fixed_splits.py \
+  --csv /ruta/al/dataset.csv \
+  --target target \
+  --output-dir machine_learning/splits
 ```
 
-El nombre te ayuda a distinguir runs en Comet.
+Esto crea:
+- `train_ids.csv`
+- `test_ids.csv`
+
+Con eso ya no dependés de un split aleatorio cada vez.
 
 ---
 
-## 7. Cómo organizar experimentos con tags
+## 5. Definir feature sets en YAML
 
-Los tags son palabras clave para agrupar runs.
+En [machine_learning/configs/feature_sets.yaml](../configs/feature_sets.yaml) se registran los nombres de los feature sets y las columnas que usan.
+
+Ejemplo:
+
+```yaml
+goes_baseline:
+  - b07
+  - b14
+  - b07_minus_b14
+
+full_v1:
+  - feature_a
+  - feature_b
+  - feature_c
+```
+
+Así después podés correr con un nombre legible como:
+
+```bash
+--feature-set goes_baseline
+```
+
+o incluso combinar varios sets con `+`:
+
+```bash
+--feature-set goes_baseline+contextuales_tabular
+```
+
+---
+
+## 6. Configurar cada experimento en YAML
+
+El archivo [machine_learning/configs/experiments/dt_baseline_v1.yaml](../configs/experiments/dt_baseline_v1.yaml) sirve para dejar fijo todo lo que define el experimento:
+
+```yaml
+model: DecisionTreeClassifier
+feature_set: radiometria_directa
+target: target
+random_state: 42
+max_depth: 6
+min_samples_leaf: 5
+train_test_split:
+  test_size: 0.25
+  stratify: true
+experiment_name: dt_baseline_v1
+tags:
+  - baseline
+  - fixed_split
+  - yaml_config
+```
+
+Esto ayuda a que cada comparación tenga la misma lógica y sea reproducible.
+
+---
+
+## 7. Ejecutar un entrenamiento con split fijo
+
+Ahora el pipeline recomendado es:
+
+```bash
+python machine_learning/experiments/decision_tree_real_data.py \
+  --csv /ruta/al/dataset.csv \
+  --target target \
+  --config machine_learning/configs/feature_sets.yaml \
+  --experiment-config machine_learning/configs/experiments/dt_baseline_v1.yaml \
+  --train-split machine_learning/splits/train_ids.csv \
+  --test-split machine_learning/splits/test_ids.csv \
+  --no-comet
+```
+
+Con esto se usan:
+- un split fijo guardado en disco
+- un feature set llamado por nombre
+- hiperparámetros definidos por YAML
+- logging de parámetros y métricas en Comet si está habilitado
+
+---
+
+## 8. Cómo nombrar experimentos
+
+La convención recomendada es algo así:
+
+```text
+dt_{feature_set}_{split_date}_{version}
+```
 
 Por ejemplo:
+- `dt_goes_baseline_20251115_v1`
+- `dt_radiometria_directa_20251115_v2`
+- `dt_full_v1_test42_v3`
+
+También podés usar tags para agrupar:
 
 ```bash
---tags "toy,baseline,tree"
+--tags "baseline,tree,fixed-split,goes"
 ```
 
-o
-
-```bash
---tags "debug,maxdepth3"
-```
-
-Los tags te permiten:
-- filtrar experimentos
-- comparar distintos modelos
-- separar pruebas rápidas de pruebas serias
+Esto te permite filtrar runs por set de features, fecha del split o tipo de validación.
 
 ---
 
-## 8. Qué registrar en un experimento
+## 9. Qué se registra en Comet
 
-Lo más útil es guardar:
-
-### Parámetros
+El script registra normalmente:
 - nombre del modelo
-- profundidad máxima
-- random_state
-- tamaño del dataset
-- número de features
-- porcentaje de test
-
-### Métricas
-- `accuracy`
-- `precision`
-- `recall`
-- `f1`
-
-### Extras
-- nombre del experiment
-- tags
 - dataset usado
-- fecha o versión
+- feature set elegido
+- columnas usadas
+- target
+- tamaño train/test
+- random_state
+- max_depth
+- min_samples_leaf
+- métricas: accuracy, precision, recall, F1
 
-En el script de ejemplo, esto ya está hecho:
-
-```python
-tracker.log_parameters({
-    "model": "DecisionTreeClassifier",
-    "experiment_name": experiment_name,
-    "random_state": cfg.random_state,
-    "max_depth": cfg.max_depth,
-    "dataset_kind": "toy_synthetic_fire_detection",
-})
-
-tracker.log_metrics({
-    "accuracy": accuracy_score(y_test, y_pred),
-    "precision": precision_score(y_test, y_pred, zero_division=0),
-    "recall": recall_score(y_test, y_pred, zero_division=0),
-    "f1": f1_score(y_test, y_pred, zero_division=0),
-}, step=1)
-```
-
-Eso es exactamente lo que Comet visualiza.
+Eso permite comparar corridas distintas sin depender de la memoria.
 
 ---
 
-## 9. Cómo hacer un nuevo experimento
+## 10. Flujo recomendado para empezar
 
-Para crear otro experimento, haz esto:
+1. preparar CSV limpio con columnas de features y target
+2. generar split fijo
+3. definir feature sets en YAML
+4. crear una config del experimento
+5. correr la experimentación con `decision_tree_real_data.py`
+6. comparar resultados en Comet por feature set y split
 
-1. copia el script base
-2. cambia los hiperparámetros
-3. cambia el nombre del run
-4. cambia los tags
-5. corrés el script
-
-Ejemplo:
-
-```bash
-python machine_learning/experiments/decision_tree_simple_comet.py \
-  --experiment-name "tree-depth-5" \
-  --tags "baseline,tree,depth5"
-```
-
-Luego otro:
-
-```bash
-python machine_learning/experiments/decision_tree_simple_comet.py \
-  --experiment-name "tree-depth-3" \
-  --tags "baseline,tree,depth3"
-```
-
-Así comparás distintos modelos en la UI de Comet.
+Esto es mucho más robusto que hacer un `train_test_split` aleatorio desde el script cada vez.
 
 ---
 
-## 10. Cómo correr sin cambiar el .env cada vez
+## 11. Recomendación práctica
 
-Lo ideal es dejar fijo en [.env](../../.env) lo que no cambia:
+Para trabajo serio, el patrón ideal es:
+- un split por dataset o fecha
+- un YAML por feature set
+- un YAML por versión del experimento
+- a lo sumo un par de flags por corrida, como `--experiment-name` y `--tags`
 
-```dotenv
-COMET_ENABLED=true
-COMET_API_KEY="tu_api_key_real"
-COMET_PROJECT_NAME="GERIS-PFC"
-COMET_WORKSPACE="labs"
-```
-
-Y para cada run solo cambias:
-- `--experiment-name`
-- `--tags`
-
-Ejemplo:
-
-```bash
-python machine_learning/experiments/decision_tree_simple_comet.py --experiment-name "toy-run-02" --tags "toy,quick-check"
-```
+Así la comparación de resultados se vuelve consistente y mucho más fácil de interpretar.
 
 ---
 
-## 11. Si algo sale mal
+## 12. Si aparece un problema
 
-### El script no sube nada
-Revisá:
-- que `COMET_ENABLED=true` esté en el `.env`
-- que la API key sea válida
-- que el workspace exista
-- que el proyecto tenga nombre
+### El split no se ve reproducible
+Revisá que estés usando `--train-split` y `--test-split` con los CSV generados previamente.
 
-### El experimento no se ve
-Revisá:
-- que el script terminó correctamente
-- que tu comando fue ejecutado desde la raíz del proyecto
-- que el entorno virtual está activo
+### El feature set falla
+Revisá que las columnas existan en el CSV y que estén escritas exactamente igual que en [machine_learning/configs/feature_sets.yaml](../configs/feature_sets.yaml).
+
+### Comet no sube el run
+Revisá que `COMET_ENABLED` esté en `true` y que la API key del `.env` sea válida.
+
+### El run no imprime métricas esperadas
+Chequear si el CSV tiene clases balanceadas o si el target tiene pocos ejemplos; si hace falta, conviene revisar el dataset antes de comparar modelos.
+
+---
+
+## 13. Plantilla lista para copiar
+
+Si querés arrancar un nuevo experimento sin reinventar la estructura, podés copiar esta plantilla y dejarla en la carpeta de configs:
+
+```yaml
+# machine_learning/configs/experiments/dt_variant_01.yaml
+model: DecisionTreeClassifier
+feature_set: radiometria_directa
+target: target
+random_state: 42
+max_depth: 6
+min_samples_leaf: 5
+train_test_split:
+  test_size: 0.25
+  stratify: true
+experiment_name: dt_variant_01
+tags:
+  - baseline
+  - decision_tree
+  - fixed_split
+```
+
+Luego lo corrés así:
+
+```bash
+python machine_learning/experiments/decision_tree_real_data.py \
+  --csv /ruta/al/dataset.csv \
+  --target target \
+  --config machine_learning/configs/feature_sets.yaml \
+  --experiment-config machine_learning/configs/experiments/dt_variant_01.yaml \
+  --train-split machine_learning/splits/train_ids.csv \
+  --test-split machine_learning/splits/test_ids.csv \
+  --experiment-name "dt_variant_01" \
+  --tags "baseline,decision_tree,fixed_split" \
+  --no-comet
+```
+
+Regla simple:
+- cambiás solo `feature_set`, `max_depth`, `min_samples_leaf`, `experiment_name` y tags
+- el split fijo se mantiene igual
+- la comparación entre corridas se vuelve limpia y reproducible
+
+---
+
+## 14. Resumen corto
+
+La filosofía del proyecto ya no es “correr un árbol con un dataset chiquito y listo”, sino:
+- dejar fija la partición de datos
+- declarar los feature sets en YAML
+- versionar cada experiencia
+- comparar resultados de forma ordenada
+
+Eso hace que cada run sea mucho más útil que una prueba aislada.
 
 ### Quiero probar algo sin riesgo
 Usa siempre el script toy de ejemplo primero.

@@ -4,4 +4,5 @@ pandas>=2.2,<3
 scikit-learn>=1.5,<2
 matplotlib>=3.8,<4
 python-dotenv>=1.0,<2
+pyyaml>=6.0,<7
 comet-ml==3.58.3
