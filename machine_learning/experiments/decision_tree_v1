@@ -1,9 +1,11 @@
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
@@ -45,6 +47,8 @@ def parse_args() -> argparse.Namespace:
         help="Timestamps a usar, formato YYYYMMDD_HHMM (ej. 20251115_0850). "
         "Si no se especifica, se descubren automaticamente todos los disponibles en dataset-root.",
     )
+    parser.add_argument("--split-dir", default=None, help="Carpeta con el bundle de split generado por generate_fixed_splits.py.")
+    parser.add_argument("--split-id", default=None, help="Identificador del split a usar. Se registra en Comet si existe un bundle.")
     parser.add_argument("--experiment-name", default=os.getenv("COMET_EXPERIMENT_NAME"), help="Nombre del experimento en Comet.")
     parser.add_argument("--tags", default=os.getenv("COMET_TAGS", "goes,b02-b07-b14,tree"), help="Tags separados por coma.")
     parser.add_argument("--max-samples-per-class", type=int, default=2000, help="Maximo de pixeles por clase, por escena.")
@@ -67,12 +71,59 @@ def discover_dates(dataset_root: Path) -> list[str]:
     return dates
 
 
+def resample_b02_to_grid(rad: np.ndarray, target_shape: tuple[int, int], max_pixel_slack: int = 4) -> np.ndarray:
+    """Reduce B02 to the 2 km thermal grid using area-block averaging."""
+    target_h, target_w = target_shape
+    height, width = rad.shape
+
+    factor_h = round(height / target_h)
+    factor_w = round(width / target_w)
+    if factor_h != factor_w or factor_h < 1:
+        raise ValueError(
+            f"B02 shape {rad.shape} no es compatible con la grilla {target_shape} "
+            f"(factor_h={factor_h}, factor_w={factor_w})"
+        )
+    factor = factor_h
+    expected_h, expected_w = target_h * factor, target_w * factor
+
+    pad_h = expected_h - height
+    pad_w = expected_w - width
+    if pad_h < 0 or pad_w < 0 or max(pad_h, pad_w) > max_pixel_slack:
+        raise ValueError(
+            f"B02 shape {rad.shape} difiere demasiado de lo esperado "
+            f"({expected_h}, {expected_w}) para factor={factor}."
+        )
+    if pad_h or pad_w:
+        rad = np.pad(rad, ((0, pad_h), (0, pad_w)), constant_values=np.nan)
+
+    valid_rad = np.where(rad >= 0, rad, np.nan)
+    blocks = valid_rad.reshape(target_h, factor, target_w, factor)
+
+    valid_count = np.sum(np.isfinite(blocks), axis=(1, 3))
+    valid_sum = np.nansum(blocks, axis=(1, 3))
+    result = np.full((target_h, target_w), np.nan, dtype=np.float64)
+    np.divide(valid_sum, valid_count, out=result, where=valid_count > 0)
+    return result.astype(np.float32)
+
+
 def load_scene(dataset_root: Path, date_str: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     b02 = np.load(dataset_root / BAND_FOLDERS["B02"] / f"{date_str}.npy")
     b07 = np.load(dataset_root / BAND_FOLDERS["B07"] / f"{date_str}.npy")
     b14 = np.load(dataset_root / BAND_FOLDERS["B14"] / f"{date_str}.npy")
     fire_codes = np.load(dataset_root / FIRE_MASK_FOLDER / f"{date_str}.npy")
-    return b02.astype(np.float32), b07.astype(np.float32), b14.astype(np.float32), fire_codes.astype(np.int16)
+
+    b07 = b07.astype(np.float32)
+    b14 = b14.astype(np.float32)
+    fire_codes = fire_codes.astype(np.int16)
+
+    if b07.shape != b14.shape:
+        raise ValueError(f"B07 y B14 tienen dimensiones incompatibles para {date_str}: {b07.shape} vs {b14.shape}")
+    if fire_codes.shape != b07.shape:
+        raise ValueError(f"Mascara de fuego incompatible para {date_str}: {fire_codes.shape} vs {b07.shape}")
+    if b02.shape != b07.shape:
+        b02 = resample_b02_to_grid(b02.astype(np.float32), b07.shape)
+
+    return b02.astype(np.float32), b07, b14, fire_codes
 
 
 def codes_to_binary_label(fire_codes: np.ndarray) -> np.ndarray:
@@ -106,6 +157,39 @@ def build_scene_samples(
     return X[idx], y[idx]
 
 
+def load_split_dates(split_dir: str | None, split_id: str | None) -> tuple[list[str], str | None, Path | None, Path | None]:
+    if not split_dir:
+        return [], None, None, None
+
+    split_path = Path(split_dir).expanduser().resolve()
+    if not split_path.exists():
+        raise FileNotFoundError(f"No se encontro el directorio de split: {split_path}")
+
+    candidates = sorted(split_path.glob("*_metadata.json"))
+    if not candidates:
+        raise FileNotFoundError(f"No se encontro ninguna metainformacion de split en {split_path}")
+
+    if split_id:
+        selected = [candidate for candidate in candidates if candidate.stem.startswith(f"{split_id}_") or candidate.stem == split_id]
+        if not selected:
+            raise FileNotFoundError(f"No se encontro un split con id '{split_id}' en {split_path}")
+        candidate = selected[0]
+    else:
+        candidate = candidates[0]
+
+    metadata = json.loads(candidate.read_text(encoding="utf-8"))
+    split_name = metadata.get("split_id") or candidate.stem.replace("_metadata", "")
+    train_path = split_path / metadata.get("train_file", f"{split_name}_train_dates.csv")
+    test_path = split_path / metadata.get("test_file", f"{split_name}_test_dates.csv")
+
+    if not train_path.exists() or not test_path.exists():
+        raise FileNotFoundError(f"Split '{split_name}' no tiene train/test csv validos en {split_path}")
+
+    train_dates = pd.read_csv(train_path)["date"].astype(str).tolist()
+    test_dates = pd.read_csv(test_path)["date"].astype(str).tolist()
+    return sorted(train_dates + test_dates), split_name, train_path, test_path
+
+
 def main() -> None:
     args = parse_args()
 
@@ -113,7 +197,11 @@ def main() -> None:
         os.environ["COMET_ENABLED"] = "false"
 
     dataset_root = Path(args.dataset_root).expanduser().resolve()
-    dates = args.dates if args.dates else discover_dates(dataset_root)
+    split_dates, split_id, split_train_path, split_test_path = load_split_dates(args.split_dir, args.split_id)
+    if split_dates:
+        dates = split_dates
+    else:
+        dates = args.dates if args.dates else discover_dates(dataset_root)
 
     rng = np.random.default_rng(args.random_state)
     X_parts, y_parts, scenes_used, scenes_skipped = [], [], [], []
@@ -121,7 +209,7 @@ def main() -> None:
     for date_str in dates:
         try:
             b02, b07, b14, fire_codes = load_scene(dataset_root, date_str)
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ValueError) as exc:
             scenes_skipped.append(f"{date_str} ({exc})")
             continue
         X_scene, y_scene = build_scene_samples(b02, b07, b14, fire_codes, args.max_samples_per_class, rng)
@@ -177,6 +265,10 @@ def main() -> None:
             "random_state": int(args.random_state),
             "max_depth": int(args.max_depth),
             "min_samples_leaf": int(args.min_samples_leaf),
+            "split_dir": str(args.split_dir) if args.split_dir else "none",
+            "split_id": split_id or "none",
+            "split_train_file": str(split_train_path) if split_train_path else "none",
+            "split_test_file": str(split_test_path) if split_test_path else "none",
             "n_train": int(len(X_train)),
             "n_test": int(len(X_test)),
             "positive_rate": float(y.mean()),

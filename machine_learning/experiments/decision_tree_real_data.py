@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment-name", default=os.getenv("COMET_EXPERIMENT_NAME"), help="Comet experiment name.")
     parser.add_argument("--tags", default=os.getenv("COMET_TAGS", "real-data,decision-tree"), help="Comma-separated Comet tags.")
     parser.add_argument("--test-size", type=float, default=0.25, help="Fraction of the dataset to reserve for testing when no split files are provided.")
+    parser.add_argument("--stratify", action=argparse.BooleanOptionalAction, default=True, help="Whether to stratify the train/test split when splitting by random sample.")
     parser.add_argument("--random-state", type=int, default=42, help="Random state for reproducibility.")
     parser.add_argument("--max-depth", type=int, default=5, help="Maximum depth of the decision tree.")
     parser.add_argument("--min-samples-leaf", type=int, default=5, help="Minimum samples per leaf.")
@@ -56,6 +57,37 @@ def load_yaml_config(path: str | None) -> dict:
 
 def load_feature_sets(path: str | None) -> dict:
     return load_yaml_config(path)
+
+
+def apply_experiment_config(args: argparse.Namespace, experiment_config: dict) -> None:
+    if not experiment_config:
+        return
+
+    train_test_split_cfg = experiment_config.get("train_test_split")
+    if isinstance(train_test_split_cfg, dict):
+        for key in ["test_size", "stratify"]:
+            if key in train_test_split_cfg and train_test_split_cfg[key] is not None:
+                setattr(args, key, train_test_split_cfg[key])
+
+    for key in [
+        "feature_set",
+        "target",
+        "random_state",
+        "max_depth",
+        "min_samples_leaf",
+        "tags",
+        "experiment_name",
+    ]:
+        if key in experiment_config and experiment_config[key] is not None:
+            if key == "feature_set" and args.feature_set != "all":
+                continue
+            setattr(args, key, experiment_config[key])
+
+    for key in ["test_size", "stratify"]:
+        if key in experiment_config and experiment_config[key] is not None:
+            if isinstance(train_test_split_cfg, dict) and key in train_test_split_cfg:
+                continue
+            setattr(args, key, experiment_config[key])
 
 
 def resolve_feature_columns(df: pd.DataFrame, target: str, feature_set_name: str, feature_sets: dict, explicit_columns: list[str] | None) -> list[str]:
@@ -123,21 +155,7 @@ def build_pipeline(numeric_cols: list[str], categorical_cols: list[str], max_dep
 def main() -> None:
     args = parse_args()
     experiment_config = load_yaml_config(args.experiment_config)
-    if experiment_config:
-        for key in [
-            "feature_set",
-            "target",
-            "test_size",
-            "random_state",
-            "max_depth",
-            "min_samples_leaf",
-            "tags",
-            "experiment_name",
-        ]:
-            if key in experiment_config and experiment_config[key] is not None:
-                if key == "feature_set" and args.feature_set != "all":
-                    continue
-                setattr(args, key, experiment_config[key])
+    apply_experiment_config(args, experiment_config)
 
     if isinstance(args.tags, list):
         args.tags = ",".join(str(tag) for tag in args.tags)
@@ -180,7 +198,7 @@ def main() -> None:
             y,
             test_size=args.test_size,
             random_state=args.random_state,
-            stratify=y,
+            stratify=y if args.stratify else None,
         )
 
     numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
@@ -211,6 +229,7 @@ def main() -> None:
             "max_depth": int(args.max_depth),
             "min_samples_leaf": int(args.min_samples_leaf),
             "test_size": float(args.test_size),
+            "stratify": bool(args.stratify),
             "numeric_columns": ",".join(numeric_cols) if numeric_cols else "none",
             "categorical_columns": ",".join(categorical_cols) if categorical_cols else "none",
             "target_classes": ",".join(str(value) for value in sorted(y.unique().tolist())),
