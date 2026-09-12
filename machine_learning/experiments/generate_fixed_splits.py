@@ -125,27 +125,35 @@ def split_scene_class(
     random_state: int,
     min_count_in_each_split: int = 1,
 ) -> tuple[list[str], list[str]]:
-    if len(class_dates) <= 1:
-        return sorted(class_dates), []
+    class_dates = sorted(class_dates)
+    n = len(class_dates)
 
-    if len(class_dates) == 2:
-        return [class_dates[0]], [class_dates[1]]
-
-    if min_count_in_each_split > 0 and len(class_dates) >= 2 * min_count_in_each_split:
-        train_dates, test_dates = train_test_split(
-            class_dates,
-            test_size=test_size,
-            random_state=random_state,
+    if n == 0:
+        return [], []
+    if n == 1:
+        return class_dates, []
+    if min_count_in_each_split < 0:
+        raise ValueError("min_count_in_each_split must be non-negative.")
+    if n < 2 * min_count_in_each_split:
+        raise ValueError(
+            f"Not enough class samples ({n}) to satisfy min_count_in_each_split={min_count_in_each_split}. "
+            "At least 2x the minimum is required for both splits to contain that many items."
         )
-        return sorted(train_dates), sorted(test_dates)
 
-    # Fallback: preserve at least one example per side when possible without breaking validity.
-    train_dates, test_dates = train_test_split(
-        class_dates,
-        test_size=max(0.5, min(test_size, 0.5)),
-        random_state=random_state,
+    target_test_count = max(
+        min_count_in_each_split,
+        min(n - min_count_in_each_split, int(round(n * test_size))),
     )
-    return sorted(train_dates), sorted(test_dates)
+    if target_test_count > n - min_count_in_each_split:
+        target_test_count = n - min_count_in_each_split
+
+    rng = np.random.default_rng(random_state)
+    shuffled = np.array(class_dates, dtype=object)
+    rng.shuffle(shuffled)
+
+    test_dates = sorted(shuffled[:target_test_count].tolist())
+    train_dates = sorted(shuffled[target_test_count:].tolist())
+    return train_dates, test_dates
 
 
 def generate_scene_split(

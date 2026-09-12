@@ -133,3 +133,37 @@ def test_generate_scene_split_keeps_fire_in_both_sets_when_possible(tmp_path):
 
     assert train_fire and test_fire
     assert train_no_fire and test_no_fire
+
+
+def test_generate_scene_split_respects_min_class_counts_in_each_split(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    (dataset_root / "ABI-L1b-Rad-B07").mkdir(parents=True)
+    (dataset_root / "ABI-L2-FDCF-Mask").mkdir(parents=True)
+
+    dates = [f"20251115_{hour:04d}" for hour in range(1500, 1500 + 8 * 30, 30)]
+    for date in dates:
+        np.save(dataset_root / "ABI-L1b-Rad-B07" / f"{date}.npy", np.ones((4, 4), dtype=np.float32))
+
+    for idx, date in enumerate(dates):
+        values = np.full((4, 4), 100, dtype=np.int16)
+        if idx < 4:
+            values[0, 0] = 10
+        np.save(dataset_root / "ABI-L2-FDCF-Mask" / f"{date}.npy", values)
+
+    train_dates, test_dates = generate_scene_split(
+        dataset_root,
+        test_size=0.1,
+        random_state=42,
+        min_positive_scenes=2,
+        min_negative_scenes=2,
+    )
+
+    positive_train = [date for date in train_dates if date in dates[:4]]
+    positive_test = [date for date in test_dates if date in dates[:4]]
+    negative_train = [date for date in train_dates if date in dates[4:]]
+    negative_test = [date for date in test_dates if date in dates[4:]]
+
+    assert len(positive_train) >= 2
+    assert len(positive_test) >= 2
+    assert len(negative_train) >= 2
+    assert len(negative_test) >= 2
