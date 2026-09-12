@@ -13,6 +13,11 @@ regions:
     lat_max: -28.0
     lon_min: -62.0
     lon_max: -48.0
+  uruguay_padded:
+    lat_min: -36.7   # uruguay.lat_min - ~1.2°
+    lat_max: -28.3   # uruguay.lat_max + ~1.2°
+    lon_min: -60.5   # uruguay.lon_min - ~1.5° (a esta latitud, 1° lon ≈ 94 km)
+    lon_max: -50.5   # uruguay.lon_max + ~1.5°
 products:
   - id: ABI-L1b-Rad-B07
     product: ABI-L1b-Rad
