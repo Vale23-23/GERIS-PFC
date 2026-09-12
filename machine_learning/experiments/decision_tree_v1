@@ -49,15 +49,68 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--split-dir", default=None, help="Carpeta con el bundle de split generado por generate_fixed_splits.py.")
     parser.add_argument("--split-id", default=None, help="Identificador del split a usar. Se registra en Comet si existe un bundle.")
+    parser.add_argument("--config", "--experiment-config", dest="config", default=str(PROJECT_ROOT / "machine_learning" / "configs" / "experiments" / "dt_baseline_v1.yaml"), help="YAML con hiperparametros del experimento y configuracion de split.")
+    parser.add_argument("--feature-set", default="b02+b07+b14", help="Nombre o combinacion de feature set para compatibilidad con la configuracion YAML.")
+    parser.add_argument("--target", default="target", help="Nombre del target para compatibilidad con la configuracion YAML.")
     parser.add_argument("--experiment-name", default=os.getenv("COMET_EXPERIMENT_NAME"), help="Nombre del experimento en Comet.")
     parser.add_argument("--tags", default=os.getenv("COMET_TAGS", "goes,b02-b07-b14,tree"), help="Tags separados por coma.")
     parser.add_argument("--max-samples-per-class", type=int, default=2000, help="Maximo de pixeles por clase, por escena.")
     parser.add_argument("--test-size", type=float, default=0.2, help="Fraccion reservada para test.")
+    parser.add_argument("--stratify", action=argparse.BooleanOptionalAction, default=True, help="Si se estratifica el split por clase al crear train/test.")
     parser.add_argument("--random-state", type=int, default=42, help="Semilla aleatoria.")
     parser.add_argument("--max-depth", type=int, default=5, help="Profundidad maxima del arbol.")
     parser.add_argument("--min-samples-leaf", type=int, default=20, help="Minimo de muestras por hoja.")
     parser.add_argument("--no-comet", action="store_true", help="Desactiva el logging a Comet (solo local).")
     return parser.parse_args()
+
+
+def load_yaml_config(path: str | None) -> dict:
+    if not path:
+        return {}
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.exists():
+        return {}
+    with open(config_path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if isinstance(data, dict):
+        return data
+    raise ValueError(f"YAML config at '{config_path}' must contain a dictionary at the root.")
+
+
+def apply_experiment_config(args: argparse.Namespace, experiment_config: dict) -> None:
+    if not experiment_config:
+        return
+
+    train_test_split_cfg = experiment_config.get("train_test_split")
+    if isinstance(train_test_split_cfg, dict):
+        for key in ["test_size", "stratify"]:
+            if key in train_test_split_cfg and train_test_split_cfg[key] is not None:
+                setattr(args, key, train_test_split_cfg[key])
+
+    for key in [
+        "feature_set",
+        "target",
+        "random_state",
+        "max_depth",
+        "min_samples_leaf",
+        "tags",
+        "experiment_name",
+    ]:
+        if key in experiment_config and experiment_config[key] is not None:
+            value = experiment_config[key]
+            if key == "tags" and isinstance(value, (list, tuple, set)):
+                value = ",".join(str(item) for item in value)
+            setattr(args, key, value)
+
+    for key in ["test_size", "stratify"]:
+        if key in experiment_config and experiment_config[key] is not None:
+            if isinstance(train_test_split_cfg, dict) and key in train_test_split_cfg:
+                continue
+            setattr(args, key, experiment_config[key])
+
+
+if not "yaml" in globals():
+    import yaml
 
 
 def discover_dates(dataset_root: Path) -> list[str]:
@@ -192,6 +245,12 @@ def load_split_dates(split_dir: str | None, split_id: str | None) -> tuple[list[
 
 def main() -> None:
     args = parse_args()
+
+    experiment_config = load_yaml_config(args.config)
+    apply_experiment_config(args, experiment_config)
+
+    if isinstance(args.tags, list):
+        args.tags = ",".join(str(tag) for tag in args.tags)
 
     if args.no_comet:
         os.environ["COMET_ENABLED"] = "false"
