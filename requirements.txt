@@ -1,0 +1,7 @@
+# Core scientific and ML stack for the toy decision-tree experiments and Comet logging
+numpy>=1.26,<3
+pandas>=2.2,<3
+scikit-learn>=1.5,<2
+matplotlib>=3.8,<4
+python-dotenv>=1.0,<2
+comet-ml==3.58.3

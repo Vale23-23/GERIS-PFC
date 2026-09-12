@@ -110,6 +110,36 @@ The Hugging Face notebook records model/training parameters, training loss, vali
 
 The current integration follows Comet's Python SDK `comet_ml.start()` flow and standard parameter/metric logging. See the [Comet Python SDK documentation](https://www.comet.com/docs/v2/api-and-sdk/python-sdk/start-experiment/) and [metrics and parameters guide](https://www.comet.com/docs/v2/guides/experiment-management/log-data/metrics-and-parameters/).
 
+## Quickstart: tiny decision-tree experiment with Comet
+
+A minimal toy example is available at `machine_learning/experiments/decision_tree_simple_comet.py`. It trains a small scikit-learn decision tree on a synthetic binary dataset and logs parameters/metrics to Comet when enabled.
+
+Install the project requirements into your active environment and copy the environment template:
+
+```bash
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+Set the static defaults once in `.env`, then override them per run when you want a different experiment name or tags without editing the file again:
+
+```bash
+export COMET_ENABLED=true
+export COMET_API_KEY="your-comet-api-key"
+export COMET_PROJECT_NAME="geris-pfc-ml"
+export COMET_WORKSPACE="your-workspace"
+python machine_learning/experiments/decision_tree_simple_comet.py --experiment-name "toy-decision-tree-v2" --tags "toy,baseline,debug"
+```
+
+You can also pass the values directly inline without editing `.env`:
+
+```bash
+COMET_ENABLED=true COMET_EXPERIMENT_NAME="toy-decision-tree-v3" COMET_TAGS="toy,baseline" \
+python machine_learning/experiments/decision_tree_simple_comet.py
+```
+
+If `COMET_ENABLED` is false or unset, the script still works in local mode using the no-op tracker.
+
 ## Reproducibility risks
 
 - The local dataset is not versioned and timestamps are not guaranteed to be regular.

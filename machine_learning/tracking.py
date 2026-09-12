@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping, Optional, Protocol
+
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env", override=False)
 
 
 class Tracker(Protocol):
@@ -46,7 +52,10 @@ class CometTracker:
         self.experiment.end()
 
 
-def create_tracker(enabled: Optional[bool] = None) -> Tracker:
+def create_tracker(
+    enabled: Optional[bool] = None,
+    experiment_name: Optional[str] = None,
+) -> Tracker:
     """Create a Comet tracker when explicitly enabled, otherwise a no-op tracker."""
     if enabled is None:
         enabled = os.getenv("COMET_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -62,7 +71,7 @@ def create_tracker(enabled: Optional[bool] = None) -> Tracker:
     except ImportError as exc:
         raise RuntimeError(
             "Comet tracking is enabled but comet_ml is not installed. "
-            "Install machine_learning/requirements-comet.txt."
+            "Install requirements.txt or machine_learning/requirements-comet.txt."
         ) from exc
 
     kwargs = {
@@ -72,5 +81,14 @@ def create_tracker(enabled: Optional[bool] = None) -> Tracker:
     if workspace:
         kwargs["workspace"] = workspace
 
+    name = experiment_name or os.getenv("COMET_EXPERIMENT_NAME")
+
+    tags = os.getenv("COMET_TAGS", "")
+    tag_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
+
     experiment = comet_ml.start(**kwargs)
+    if name:
+        experiment.set_name(name)
+    if tag_list:
+        experiment.add_tags(tag_list)
     return CometTracker(experiment)
