@@ -949,7 +949,6 @@ def run_part1(
                 is_glint = (fc == FailChar.F8)
                 doz = compute_dozier(
                     r7_diff, r14_diff,
-                    r7_bkg_corr, r14_bkg_corr,
                     Tbc14,
                     coeffs7, coeffs_long,
                     is_potential_glint=is_glint,

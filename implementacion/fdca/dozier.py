@@ -46,7 +46,6 @@ def _background_radiances(Tb: float, coeffs7: dict, coeffs14: dict) -> tuple[flo
 
 def _solve_bisection(
     rad7: float, rad14: float,
-    _rad7_bkg: float, _rad14_bkg: float,
     Tb: float,
     coeffs7: dict, coeffs14: dict,
 ) -> tuple[float, float]:
