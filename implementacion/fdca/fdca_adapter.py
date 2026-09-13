@@ -791,6 +791,7 @@ def get_tpw_real(
             region_cfg=region_cfg,
             output_root=base,
             goes_shape=shape,
+            goes_latlon=(lat, lon),
         )
     except Exception as e:
         if verbose:
