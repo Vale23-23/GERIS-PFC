@@ -1,2 +1,0 @@
-# Optional experiment tracking dependency for the testing-ml branch.
-comet-ml==3.58.3
