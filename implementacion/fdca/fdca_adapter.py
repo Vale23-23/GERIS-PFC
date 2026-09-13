@@ -1172,10 +1172,12 @@ def load_fdca_input(
 
 
 
-       # ── TPW ───────────────────────────────────────────────────────────────────
+    # ── TPW ───────────────────────────────────────────────────────────────────
     tpw = get_tpw_real(dt, region_cfg, base, shape, lat2d, lon2d, verbose=verbose)
     if verbose:
-        print(f"  {'TPW range [mm]':<22}: {tpw.min():.1f} – {tpw.max():.1f}")
+        n_nan = int(np.isnan(tpw).sum())
+        nan_note = f"  ({n_nan} NaN px)" if n_nan else ""
+        print(f"  {'TPW range [mm]':<22}: {np.nanmin(tpw):.1f} – {np.nanmax(tpw):.1f}{nan_note}")
     
 
     # ── Máscaras de superficie ────────────────────────────────────────────────
