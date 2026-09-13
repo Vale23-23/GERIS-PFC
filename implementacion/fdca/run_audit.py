@@ -279,8 +279,12 @@ def run_scene(timestamp: str, args, own_state: np.ndarray | None) -> dict:
     inp = load_fdca_input(timestamp=timestamp, region=args.region,
                           dataset_root=args.dataset_root,
                           config_path=args.config, verbose=False)
+
     if args.tpw_lut_mode == "null":
         inp.lut_tpw = build_null_tpw_lut(inp.lut_tpw)
+    if args.tpw_source == "climatology":
+        from fdca.fdca_adapter import get_tpw_estimate
+        inp.tpw = get_tpw_estimate(inp.latitudes, inp.longitudes, inp.scan_time)
     reference = load_reference(args.dataset_root, args.region, timestamp)
     if reference.shape != inp.bt7.shape:
         raise ValueError(
@@ -1183,6 +1187,10 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=("real", "null"),
                         help="real = LUT original; null = trans=1/offset=0 "
                              "(corrida de control para aislar el efecto de la LUT)")
+    parser.add_argument("--tpw-source", default="real",
+                        choices=("real", "climatology"),
+                        help="real = GFS vía get_tpw_real (ya cargado en inp.tpw); "
+                             "climatology = placeholder mensual get_tpw_estimate, sin red")
     parser.add_argument("--output-dir", default="results/audit")
     parser.add_argument("--run-id", default=None,
                         help="nombre de la subcarpeta de salida")
