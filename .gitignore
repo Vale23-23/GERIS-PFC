@@ -5,6 +5,7 @@
 obtencion_imagenes/dataset/
 implementacion/data
 dataset/
+implementacion/dataset/uruguay/
 
 # Archivos de datos
 *.npy
@@ -22,6 +23,7 @@ entrenamiento/checkpoints/
 __pycache__/
 *.pyc
 *.pyo
+*.py[cod]
 
 # Caché de goes2go (descarga archivos NetCDF localmente)
 goes2go/
@@ -33,3 +35,13 @@ goes2go/
 # Jupyter
 .ipynb_checkpoints/
 prueba.ipynb
+
+# Resultados y artefactos locales
+results/
+figures/
+
+# Artefactos de experimentación ML
+.comet.config
+comet-logs/
+machine_learning/artifacts/
+machine_learning/checkpoints/
