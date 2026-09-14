@@ -1,0 +1,368 @@
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from machine_learning.tracking import create_tracker
+
+# Códigos de fuego activo según la tabla del ATBD (ver model_architecture.md):
+# 10/30 = Processed Fire, 11/31 = Saturated, 12/32 = Cloud Contaminated,
+# 13/33 = High Prob, 14/34 = Medium Prob, 15/35 = Low Prob.
+# Todo lo demás (100=limpio, 200-245=nubes, 40/50/60=block-outs, 150-153=agua/inválido)
+# se considera NO fuego (clase 0).
+FIRE_CODES = {10, 11, 12, 13, 14, 15, 30, 31, 32, 33, 34, 35}
+
+BAND_FOLDERS = {
+    "B02": "ABI-L1b-Rad-B02",
+    "B07": "ABI-L1b-Rad-B07",
+    "B14": "ABI-L1b-Rad-B14",
+}
+FIRE_MASK_FOLDER = "ABI-L2-FDCF-Mask"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Arbol de decision pixel-wise (B02, B07, B14 -> fuego 0/1) sobre escenas GOES reales."
+    )
+    parser.add_argument(
+        "--dataset-root",
+        default="/Users/valentinachagas/GERIS-PFC/implementacion/dataset/uruguay",
+        help="Carpeta que contiene las subcarpetas de bandas y la mascara FDCF.",
+    )
+    parser.add_argument(
+        "--dates",
+        nargs="*",
+        default=None,
+        help="Timestamps a usar, formato YYYYMMDD_HHMM (ej. 20251115_0850). "
+        "Si no se especifica, se descubren automaticamente todos los disponibles en dataset-root.",
+    )
+    parser.add_argument("--split-dir", default=None, help="Carpeta con el bundle de split generado por generate_fixed_splits.py.")
+    parser.add_argument("--split-id", default=None, help="Identificador del split a usar. Se registra en Comet si existe un bundle.")
+    parser.add_argument("--config", "--experiment-config", dest="config", default=str(PROJECT_ROOT / "machine_learning" / "configs" / "experiments" / "dt_baseline_v1.yaml"), help="YAML con hiperparametros del experimento y configuracion de split.")
+    parser.add_argument("--feature-set", default="b02+b07+b14", help="Nombre o combinacion de feature set para compatibilidad con la configuracion YAML.")
+    parser.add_argument("--target", default="target", help="Nombre del target para compatibilidad con la configuracion YAML.")
+    parser.add_argument("--experiment-name", default=os.getenv("COMET_EXPERIMENT_NAME"), help="Nombre del experimento en Comet.")
+    parser.add_argument("--tags", default=os.getenv("COMET_TAGS", "goes,b02-b07-b14,tree"), help="Tags separados por coma.")
+    parser.add_argument("--max-samples-per-class", type=int, default=2000, help="Maximo de pixeles por clase, por escena.")
+    parser.add_argument("--test-size", type=float, default=0.2, help="Fraccion reservada para test.")
+    parser.add_argument("--stratify", action=argparse.BooleanOptionalAction, default=True, help="Si se estratifica el split por clase al crear train/test.")
+    parser.add_argument("--random-state", type=int, default=42, help="Semilla aleatoria.")
+    parser.add_argument("--max-depth", type=int, default=5, help="Profundidad maxima del arbol.")
+    parser.add_argument("--min-samples-leaf", type=int, default=20, help="Minimo de muestras por hoja.")
+    parser.add_argument("--no-comet", action="store_true", help="Desactiva el logging a Comet (solo local).")
+    return parser.parse_args()
+
+
+def load_yaml_config(path: str | None) -> dict:
+    if not path:
+        return {}
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.exists():
+        return {}
+    with open(config_path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if isinstance(data, dict):
+        return data
+    raise ValueError(f"YAML config at '{config_path}' must contain a dictionary at the root.")
+
+
+def apply_experiment_config(args: argparse.Namespace, experiment_config: dict) -> None:
+    if not experiment_config:
+        return
+
+    train_test_split_cfg = experiment_config.get("train_test_split")
+    if isinstance(train_test_split_cfg, dict):
+        for key in ["test_size", "stratify"]:
+            if key in train_test_split_cfg and train_test_split_cfg[key] is not None:
+                setattr(args, key, train_test_split_cfg[key])
+
+    for key in [
+        "feature_set",
+        "target",
+        "random_state",
+        "max_depth",
+        "min_samples_leaf",
+        "tags",
+        "experiment_name",
+    ]:
+        if key in experiment_config and experiment_config[key] is not None:
+            value = experiment_config[key]
+            if key == "tags" and isinstance(value, (list, tuple, set)):
+                value = ",".join(str(item) for item in value)
+            setattr(args, key, value)
+
+    for key in ["test_size", "stratify"]:
+        if key in experiment_config and experiment_config[key] is not None:
+            if isinstance(train_test_split_cfg, dict) and key in train_test_split_cfg:
+                continue
+            setattr(args, key, experiment_config[key])
+
+
+if not "yaml" in globals():
+    import yaml
+
+
+def discover_dates(dataset_root: Path) -> list[str]:
+    """Busca todos los timestamps disponibles usando la carpeta de B07 como referencia."""
+    reference_folder = dataset_root / BAND_FOLDERS["B07"]
+    if not reference_folder.exists():
+        raise FileNotFoundError(f"No se encontro la carpeta de referencia: {reference_folder}")
+    dates = sorted(p.stem for p in reference_folder.glob("*.npy"))
+    if not dates:
+        raise FileNotFoundError(f"No se encontraron archivos .npy en {reference_folder}")
+    return dates
+
+
+def resample_b02_to_grid(rad: np.ndarray, target_shape: tuple[int, int], max_pixel_slack: int = 4) -> np.ndarray:
+    """Reduce B02 to the 2 km thermal grid using area-block averaging."""
+    target_h, target_w = target_shape
+    height, width = rad.shape
+
+    factor_h = round(height / target_h)
+    factor_w = round(width / target_w)
+    if factor_h != factor_w or factor_h < 1:
+        raise ValueError(
+            f"B02 shape {rad.shape} no es compatible con la grilla {target_shape} "
+            f"(factor_h={factor_h}, factor_w={factor_w})"
+        )
+    factor = factor_h
+    expected_h, expected_w = target_h * factor, target_w * factor
+
+    pad_h = expected_h - height
+    pad_w = expected_w - width
+    if pad_h < 0 or pad_w < 0 or max(pad_h, pad_w) > max_pixel_slack:
+        raise ValueError(
+            f"B02 shape {rad.shape} difiere demasiado de lo esperado "
+            f"({expected_h}, {expected_w}) para factor={factor}."
+        )
+    if pad_h or pad_w:
+        rad = np.pad(rad, ((0, pad_h), (0, pad_w)), constant_values=np.nan)
+
+    valid_rad = np.where(rad >= 0, rad, np.nan)
+    blocks = valid_rad.reshape(target_h, factor, target_w, factor)
+
+    valid_count = np.sum(np.isfinite(blocks), axis=(1, 3))
+    valid_sum = np.nansum(blocks, axis=(1, 3))
+    result = np.full((target_h, target_w), np.nan, dtype=np.float64)
+    np.divide(valid_sum, valid_count, out=result, where=valid_count > 0)
+    return result.astype(np.float32)
+
+
+def load_scene(dataset_root: Path, date_str: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    b02 = np.load(dataset_root / BAND_FOLDERS["B02"] / f"{date_str}.npy")
+    b07 = np.load(dataset_root / BAND_FOLDERS["B07"] / f"{date_str}.npy")
+    b14 = np.load(dataset_root / BAND_FOLDERS["B14"] / f"{date_str}.npy")
+    fire_codes = np.load(dataset_root / FIRE_MASK_FOLDER / f"{date_str}.npy")
+
+    b07 = b07.astype(np.float32)
+    b14 = b14.astype(np.float32)
+    fire_codes = fire_codes.astype(np.int16)
+
+    if b07.shape != b14.shape:
+        raise ValueError(f"B07 y B14 tienen dimensiones incompatibles para {date_str}: {b07.shape} vs {b14.shape}")
+    if fire_codes.shape != b07.shape:
+        raise ValueError(f"Mascara de fuego incompatible para {date_str}: {fire_codes.shape} vs {b07.shape}")
+    if b02.shape != b07.shape:
+        b02 = resample_b02_to_grid(b02.astype(np.float32), b07.shape)
+
+    return b02.astype(np.float32), b07, b14, fire_codes
+
+
+def codes_to_binary_label(fire_codes: np.ndarray) -> np.ndarray:
+    """Mapea los codigos de la mascara FDCF a 0/1 usando unicamente los codigos de fuego reales."""
+    return np.isin(fire_codes, list(FIRE_CODES)).astype(int)
+
+
+def build_scene_samples(
+    b02: np.ndarray,
+    b07: np.ndarray,
+    b14: np.ndarray,
+    fire_codes: np.ndarray,
+    max_samples_per_class: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    valid_mask = np.isfinite(b02) & np.isfinite(b07) & np.isfinite(b14) & np.isfinite(fire_codes)
+    b02, b07, b14, fire_codes = b02[valid_mask], b07[valid_mask], b14[valid_mask], fire_codes[valid_mask]
+
+    y = codes_to_binary_label(fire_codes)
+    X = np.column_stack([b02.ravel(), b07.ravel(), b14.ravel()])
+
+    pos_idx = np.where(y == 1)[0]
+    neg_idx = np.where(y == 0)[0]
+
+    if len(pos_idx) > max_samples_per_class:
+        pos_idx = rng.choice(pos_idx, size=max_samples_per_class, replace=False)
+    if len(neg_idx) > max_samples_per_class:
+        neg_idx = rng.choice(neg_idx, size=max_samples_per_class, replace=False)
+
+    idx = np.concatenate([pos_idx, neg_idx])
+    return X[idx], y[idx]
+
+
+def load_split_dates(split_dir: str | None, split_id: str | None) -> tuple[list[str], str | None, Path | None, Path | None]:
+    if not split_dir:
+        return [], None, None, None
+
+    split_path = Path(split_dir).expanduser().resolve()
+    if not split_path.exists():
+        raise FileNotFoundError(f"No se encontro el directorio de split: {split_path}")
+
+    candidates = sorted(split_path.glob("*_metadata.json"))
+    if not candidates:
+        raise FileNotFoundError(f"No se encontro ninguna metainformacion de split en {split_path}")
+
+    if split_id:
+        selected = [candidate for candidate in candidates if candidate.stem.startswith(f"{split_id}_") or candidate.stem == split_id]
+        if not selected:
+            raise FileNotFoundError(f"No se encontro un split con id '{split_id}' en {split_path}")
+        candidate = selected[0]
+    else:
+        candidate = candidates[0]
+
+    metadata = json.loads(candidate.read_text(encoding="utf-8"))
+    split_name = metadata.get("split_id") or candidate.stem.replace("_metadata", "")
+    train_path = split_path / metadata.get("train_file", f"{split_name}_train_dates.csv")
+    test_path = split_path / metadata.get("test_file", f"{split_name}_test_dates.csv")
+
+    if not train_path.exists() or not test_path.exists():
+        raise FileNotFoundError(f"Split '{split_name}' no tiene train/test csv validos en {split_path}")
+
+    train_dates = pd.read_csv(train_path)["date"].astype(str).tolist()
+    test_dates = pd.read_csv(test_path)["date"].astype(str).tolist()
+    return sorted(train_dates + test_dates), split_name, train_path, test_path
+
+
+def main() -> None:
+    args = parse_args()
+
+    experiment_config = load_yaml_config(args.config)
+    apply_experiment_config(args, experiment_config)
+
+    if isinstance(args.tags, list):
+        args.tags = ",".join(str(tag) for tag in args.tags)
+
+    if args.no_comet:
+        os.environ["COMET_ENABLED"] = "false"
+
+    dataset_root = Path(args.dataset_root).expanduser().resolve()
+    split_dates, split_id, split_train_path, split_test_path = load_split_dates(args.split_dir, args.split_id)
+    if split_dates:
+        dates = split_dates
+    else:
+        dates = args.dates if args.dates else discover_dates(dataset_root)
+
+    rng = np.random.default_rng(args.random_state)
+    X_parts, y_parts, scenes_used, scenes_skipped = [], [], [], []
+
+    for date_str in dates:
+        try:
+            b02, b07, b14, fire_codes = load_scene(dataset_root, date_str)
+        except (FileNotFoundError, ValueError) as exc:
+            scenes_skipped.append(f"{date_str} ({exc})")
+            continue
+        X_scene, y_scene = build_scene_samples(b02, b07, b14, fire_codes, args.max_samples_per_class, rng)
+        if len(X_scene) == 0:
+            scenes_skipped.append(f"{date_str} (sin pixeles validos)")
+            continue
+        X_parts.append(X_scene)
+        y_parts.append(y_scene)
+        scenes_used.append(date_str)
+
+    if not X_parts:
+        raise RuntimeError("Ninguna escena produjo datos utilizables. Revisa dataset-root y dates.")
+
+    X = np.concatenate(X_parts, axis=0)
+    y = np.concatenate(y_parts, axis=0)
+
+    if len(np.unique(y)) < 2:
+        raise ValueError(
+            "El conjunto combinado solo tiene una clase. Con los timestamps/umbral actuales "
+            "no hay ejemplos de fuego (o no hay negativos). Revisa los codigos presentes en las mascaras."
+        )
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=args.test_size, random_state=args.random_state, stratify=y
+    )
+
+    model = DecisionTreeClassifier(
+        random_state=args.random_state,
+        max_depth=args.max_depth,
+        min_samples_leaf=args.min_samples_leaf,
+        class_weight="balanced",
+    )
+
+    experiment_name = args.experiment_name or os.getenv("COMET_EXPERIMENT_NAME") or (
+        f"dt_b02-b07-b14_{len(scenes_used)}scenes_{args.max_depth}d"
+    )
+    os.environ["COMET_EXPERIMENT_NAME"] = experiment_name
+    if args.tags:
+        os.environ["COMET_TAGS"] = args.tags
+
+    tracker = create_tracker(experiment_name=experiment_name)
+    tracker.log_parameters(
+        {
+            "model": "DecisionTreeClassifier",
+            "dataset_root": str(dataset_root),
+            "feature_columns": "b02,b07,b14",
+            "target_definition": "fire_code in {10,11,12,13,14,15,30,31,32,33,34,35}",
+            "scenes_used": ",".join(scenes_used),
+            "n_scenes_used": len(scenes_used),
+            "scenes_skipped": ",".join(scenes_skipped) if scenes_skipped else "none",
+            "max_samples_per_class_per_scene": int(args.max_samples_per_class),
+            "test_size": float(args.test_size),
+            "random_state": int(args.random_state),
+            "max_depth": int(args.max_depth),
+            "min_samples_leaf": int(args.min_samples_leaf),
+            "split_dir": str(args.split_dir) if args.split_dir else "none",
+            "split_id": split_id or "none",
+            "split_train_file": str(split_train_path) if split_train_path else "none",
+            "split_test_file": str(split_test_path) if split_test_path else "none",
+            "n_train": int(len(X_train)),
+            "n_test": int(len(X_test)),
+            "positive_rate": float(y.mean()),
+        }
+    )
+
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    metrics = {
+        "accuracy": accuracy_score(y_test, y_pred),
+        "precision": precision_score(y_test, y_pred, zero_division=0),
+        "recall": recall_score(y_test, y_pred, zero_division=0),
+        "f1": f1_score(y_test, y_pred, zero_division=0),
+    }
+
+    try:
+        cm = confusion_matrix(y_test, y_pred)
+        if hasattr(tracker, "experiment"):
+            tracker.experiment.log_confusion_matrix(cm, labels=[0, 1])
+    except Exception:
+        pass
+
+    tracker.log_metrics(metrics, step=1)
+    tracker.end()
+
+    print(f"Escenas usadas ({len(scenes_used)}): {scenes_used}")
+    if scenes_skipped:
+        print(f"Escenas omitidas: {scenes_skipped}")
+    print(f"Train samples: {len(X_train)} | Test samples: {len(X_test)}")
+    print(f"Tasa de positivos (fuego): {y.mean():.4f}")
+    print("Metrics:")
+    for key, value in metrics.items():
+        print(f"  {key}: {value:.4f}")
+
+
+if __name__ == "__main__":
+    main()

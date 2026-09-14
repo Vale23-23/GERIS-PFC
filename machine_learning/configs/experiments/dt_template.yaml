@@ -1,0 +1,16 @@
+# Plantilla para un nuevo experimento de Decision Tree
+# Copiar este archivo y cambiar solo los valores que importan.
+model: DecisionTreeClassifier
+feature_set: radiometria_directa
+target: target
+random_state: 42
+max_depth: 6
+min_samples_leaf: 5
+train_test_split:
+  test_size: 0.25
+  stratify: true
+experiment_name: dt_template_v1
+tags:
+  - template
+  - decision_tree
+  - fixed_split
