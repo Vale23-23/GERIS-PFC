@@ -3,28 +3,26 @@
 
 # Dataset — nunca subir al repo, usar Hugging Face
 obtencion_imagenes/dataset/
+implementacion/data
+dataset/
+implementacion/dataset/uruguay/
 
 # Archivos de datos
 *.npy
 *.npz
 *.nc
 
-!implementacion/fdca/data/eco_mask.npy
-
-implementacion/data/
-implementacion/dataset/
-implementacion/figures/
-implementacion/results/
-
 # Entorno virtual
 .venv/
+geris
 
 # Checkpoints del modelo
 entrenamiento/checkpoints/
 
-
 # Caché de Python
 __pycache__/
+*.pyc
+*.pyo
 *.py[cod]
 
 # Caché de goes2go (descarga archivos NetCDF localmente)
@@ -38,5 +36,12 @@ goes2go/
 .ipynb_checkpoints/
 prueba.ipynb
 
-geris
+# Resultados y artefactos locales
+results/
+figures/
 
+# Artefactos de experimentación ML
+.comet.config
+comet-logs/
+machine_learning/artifacts/
+machine_learning/checkpoints/
