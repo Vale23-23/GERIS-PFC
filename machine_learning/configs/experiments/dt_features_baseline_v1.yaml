@@ -1,0 +1,21 @@
+model: DecisionTreeClassifier
+features_dir: machine_learning/data/features
+feature_sets_config: machine_learning/configs/feature_sets.yaml
+target: ref_fire
+feature_set: full_v1
+split_dir: machine_learning/splits
+split_id: goes_fire_aware_01
+output_dir: machine_learning/outputs/decision_tree
+random_state: 42
+max_depth: 6
+min_samples_leaf: 5
+criterion: gini
+splitter: best
+class_weight: balanced
+ccp_alpha: 0.0
+max_features: null
+max_leaf_nodes: null
+min_impurity_decrease: 0.0
+train_test_split:
+  test_size: 0.2
+  stratify: true

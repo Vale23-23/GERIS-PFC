@@ -1,23 +1,63 @@
 radiometria_directa:
-  - feature_a
-  - feature_b
+  - bt7
+  - bt14_eff
+  - bt15
+  - albedo
+  - refl
+  - refl2
 
 b07_b14:
-  - feature_a
-  - feature_b
-  - feature_c
-
-full_v1:
-  - feature_a
-  - feature_b
-  - feature_c
-
-contextuales_tabular:
-  - feature_a
-  - feature_b
-  - feature_c
+  - bt7
+  - bt14_eff
+  - diff_bt7_bt14
 
 goes_baseline:
-  - b07
-  - b14
-  - b07_minus_b14
+  - bt7
+  - bt14_eff
+  - diff_bt7_bt14
+
+contextuales_tabular:
+  - bt7_bkg
+  - bt7_bkg_std
+  - bt14_bkg
+  - bt14_bkg_std
+  - albedo_bkg
+  - reflb
+  - std_reflb
+  - bt7_minus_bkg7
+  - bt14_minus_bkg14
+  - refl_minus_reflb
+  - n_passes
+  - rad_diff_sigma
+  - bt7_corr
+  - bt14_corr
+
+full_v1:
+  - bt7
+  - bt14_eff
+  - bt15
+  - albedo
+  - refl
+  - refl2
+  - tpw
+  - sza
+  - lza
+  - glint_angle
+  - emiss7
+  - emiss14
+  - eco_code
+  - diff_bt7_bt14
+  - bt7_bkg
+  - bt7_bkg_std
+  - bt14_bkg
+  - bt14_bkg_std
+  - albedo_bkg
+  - reflb
+  - std_reflb
+  - bt7_minus_bkg7
+  - bt14_minus_bkg14
+  - refl_minus_reflb
+  - n_passes
+  - rad_diff_sigma
+  - bt7_corr
+  - bt14_corr
