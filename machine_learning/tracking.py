@@ -18,6 +18,8 @@ class Tracker(Protocol):
 
     def log_parameters(self, parameters: Mapping[str, object]) -> None: ...
     def log_metrics(self, metrics: Mapping[str, float], step: Optional[int] = None) -> None: ...
+    def log_confusion_matrix(self, y_true: object, y_predicted: object, labels: list[object]) -> None: ...
+    def log_asset(self, path: str | Path, file_name: str | None = None) -> None: ...
     def end(self) -> None: ...
 
 
@@ -29,6 +31,12 @@ class NullTracker:
         return None
 
     def log_metrics(self, metrics: Mapping[str, float], step: Optional[int] = None) -> None:
+        return None
+
+    def log_confusion_matrix(self, y_true: object, y_predicted: object, labels: list[object]) -> None:
+        return None
+
+    def log_asset(self, path: str | Path, file_name: str | None = None) -> None:
         return None
 
     def end(self) -> None:
@@ -47,6 +55,13 @@ class CometTracker:
     def log_metrics(self, metrics: Mapping[str, float], step: Optional[int] = None) -> None:
         kwargs = {"step": step} if step is not None else {}
         self.experiment.log_metrics(dict(metrics), **kwargs)
+
+    def log_confusion_matrix(self, y_true: object, y_predicted: object, labels: list[object]) -> None:
+        self.experiment.log_confusion_matrix(y_true=y_true, y_predicted=y_predicted, labels=labels)
+
+    def log_asset(self, path: str | Path, file_name: str | None = None) -> None:
+        kwargs = {"file_name": file_name} if file_name else {}
+        self.experiment.log_asset(str(path), **kwargs)
 
     def end(self) -> None:
         self.experiment.end()
