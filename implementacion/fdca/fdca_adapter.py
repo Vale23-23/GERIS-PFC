@@ -1118,18 +1118,29 @@ def load_fdca_input(
         rad02_resized = resample_b02_to_grid(rad02, shape)
         kappa0 = load_kappa0(base, timestamp)
         if kappa0 is None:
-            raise FileNotFoundError(
-                f"Falta '{timestamp}_kappa0.json' en "
-                f"{os.path.join(base, 'ABI-L1b-Rad-B02')}.\n"
-                f"kappa0 se guarda por escena (varía ~3.4% en el año por la "
-                f"distancia Tierra-Sol real; ver revision_fdca.md M6), así "
-                f"que cada timestamp necesita su propio archivo. Descargalo con:\n"
-                f"  python pipeline.py download --region {region} "
-                f"--start '{dt.strftime('%Y-%m-%d %H:%M')}' "
-                f"--end '{dt.strftime('%Y-%m-%d %H:%M')}' "
-                f"--products ABI-L1b-Rad-B02"
+            # Try a band-level units.json as a fallback (downloader may
+            # provide a template there). Do not raise — instead warn and
+            # continue without B02 reflectance when truly missing.
+            units_path = os.path.join(base, "ABI-L1b-Rad-B02", "units.json")
+            if os.path.exists(units_path):
+                try:
+                    with open(units_path) as _f:
+                        meta = json.load(_f)
+                    kappa0 = meta.get("kappa0")
+                    if kappa0 is not None:
+                        kappa0 = float(kappa0)
+                except Exception:
+                    kappa0 = None
+
+        if kappa0 is None:
+            print(
+                f"Aviso: no se encontró '{timestamp}_kappa0.json' ni 'ABI-L1b-Rad-B02/units.json'.\n"
+                f"→ Se continuará sin calcular la reflectancia B02 para {timestamp}.\n"
+                f"   Esto degrada umbrales dependientes de reflectancia, pero evita fallo completo."
             )
-        refl2 = rad_b02_to_reflectance(rad02_resized, kappa0)
+            refl2 = None
+        else:
+            refl2 = rad_b02_to_reflectance(rad02_resized, kappa0)
         if verbose:
             print(f"  {'B02 reflectance':<22}: kappa0={kappa0:.6e} "
                   f"(from units.json)")
