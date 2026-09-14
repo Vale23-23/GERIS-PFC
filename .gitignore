@@ -45,3 +45,5 @@ figures/
 comet-logs/
 machine_learning/artifacts/
 machine_learning/checkpoints/
+machine_learning/data/
+machine_learning/outputs/
