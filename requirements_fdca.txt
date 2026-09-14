@@ -1,0 +1,13 @@
+numpy
+pyproj
+matplotlib
+xarray
+netCDF4
+python-dotenv
+Jinja2
+huggingface_hub
+PyYAML
+Pillow
+requests
+Ipykernel
+geopandas

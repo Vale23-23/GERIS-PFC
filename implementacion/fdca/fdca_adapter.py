@@ -1,0 +1,1250 @@
+"""
+fdca_adapter.py
+───────────────
+Convierte los archivos .npy del pipeline de obtención de imágenes en un
+FDCAInput listo para correr el algoritmo FDCA.
+
+El pipeline ya descarga y recorta los datos; este módulo solo hace la
+"traducción" entre el formato del pipeline y el formato que espera el FDCA.
+
+=============================================================================
+TABLA DE UNIDADES Y RANGOS DE REFERENCIA
+=============================================================================
+1. RADIANCIAS CRUDAS (ABI-L1b-Rad-BXX):
+    ABI-L1b-Rad-B02: 
+   - Unidad en archivos netCDF: W * m^-2 * sr^-1 * µm^-1
+    ABI-L1b-Rad-B07, ABI-L1b-Rad-B13,ABI-L1b-Rad-B14, ABI-L1b-Rad-B15: 
+   - Unidad en archivos netCDF: mW * m^-2 * sr^-1 * (cm-1)^-1
+ 
+
+2. TEMPERATURAS DE BRILLO (BT7, BT13, BT14, BT15):
+   - Unidad resultante: Kelvin (K)  [Conversión via Planck Inverso]
+
+
+3. REFLECTANCIA (refl2):
+   - Unidad: Adimensional / Factor de Reflectancia (Rango 0.0 a 1.0)
+   - Cálculo: Radiancia B02 / Radiancia Solar Teórica (ajustada por SZA).
+   - Rangos esperados: 0.02 a 0.35 (Suelo libre de nubes); >0.40 (Nubes/Glint).
+
+4. GEOMETRÍA (SZA, LZA, Glint):
+   - Unidad: Grados sexagesimales (°)
+   - Rangos/Límites del Algoritmo:
+     * SZA (Solar): < 85° para modo Diurno.
+     * LZA (Satélite): < 80° (Límite estricto FDCA), óptimo < 65° (Uruguay: ~31°-41°).
+
+5. TPW (Total Precipitable Water):
+   - Unidad: Milímetros (mm)
+   - Rangos climatológicos Cono Sur: 15 mm (Invierno seco) a 45 mm (Verano húmedo).
+=============================================================================
+
+Qué hace cada sección:
+  1. Lee las radiancias de B07, B14 (y opcionalmente B13, B15, B02)
+  2. Convierte radiancia → BT usando Planck inverso
+  3. Convierte B02 (Rad) → reflectance factor (Rad/Rad_solar)
+  4. Calcula geometría solar (SZA, LZA, glint_angle) a partir de lat/lon y hora
+  5. Reconstruye lat/lon desde el config de región (grilla uniforme aproximada)
+  6. Arma las máscaras de superficie (tierra/agua, land cover, etc.)
+  7. Construye el LUT de corrección TPW
+  8. Empaqueta todo en FDCAInput
+
+Uso:
+  from fdca_adapter import load_fdca_input
+  inp = load_fdca_input("20250905_1500", region="uruguay")
+  # → FDCAInput listo para run_fdca(inp)
+"""
+
+from __future__ import annotations  # permite 'np.ndarray | None' en Python < 3.10
+
+
+import os
+import sys
+import json
+from functools import lru_cache
+import numpy as np
+from pathlib import Path
+from datetime import datetime, timezone
+import pyproj
+
+from dotenv import load_dotenv
+load_dotenv()   # lee .env si existe; no falla si no existe
+
+import xarray as xr
+
+# ── Constantes físicas para conversión de radiancia B02 ──────────────────────
+# Irradiancia solar exoatmosférica para ABI Band 2 (0.64 µm) [W·m⁻²·µm⁻¹]
+def rad_b02_to_reflectance(rad: np.ndarray, kappa0: float) -> np.ndarray:
+    """
+    Convert B02 radiance [W·m⁻²·sr⁻¹·µm⁻¹] to reflectance factor [-]
+    using the ABI L1b ``kappa0`` calibration coefficient, which already
+    includes the annual Earth-Sun distance correction (unlike the
+    hardcoded ESUN_B02 constant this replaces).
+
+    refl = kappa0 * Rad
+    """
+    return np.clip(kappa0 * rad, 0.0, 1.5).astype(np.float32)
+
+# Constantes GOES-19 — SOLO fallback si geometry.json no trae estos campos.
+# IMPORTANTE: compute_latlon_grid() y compute_local_zenith() deben usar los
+# valores reales leídos de geometry.json (lon_0, h, a, b), no estas constantes,
+# para que las coordenadas y los ángulos sean geométricamente consistentes
+# entre sí. Antes este archivo calculaba lat/lon con el elipsoide real del
+# JSON pero el LZA con una fórmula esférica + esta constante hardcodeada:
+# quedaban desacopladas. Ver load_geometry().
+
+GOES19_LON_0_FALLBACK  = -75.0          # longitud subsatelital [deg]
+GOES19_H_FALLBACK      = 35786.023e3    # altura orbital [m]
+GOES19_R_EQ_FALLBACK   = 6378.137e3     # radio ecuatorial [m]
+GOES19_R_POL_FALLBACK  = 6356.7523e3    # radio polar [m]
+
+
+def load_geometry(base_path: str) -> dict:
+    """
+    Única fuente de verdad para los parámetros geométricos del satélite.
+    Lee geometry.json y devuelve lon_0, h, a, b (mismos parámetros que usa
+    compute_latlon_grid para proyectar lat/lon). compute_local_zenith y el
+    cálculo de azimuth DEBEN recibir estos mismos valores, para no volver a
+    quedar desacoplados de las coordenadas.
+    """
+    geom_path = os.path.join(base_path, "geometry.json")
+    if not os.path.exists(geom_path):
+        raise FileNotFoundError(
+            f"No se encontró la geometría de la región en: {geom_path}. "
+            f"Asegúrate de correr el downloader para generar este archivo base."
+        )
+    with open(geom_path, "r") as f:
+        geom_data = json.load(f)
+
+    return {
+        "lon_0": float(geom_data["longitude_of_projection_origin"]),
+        "h":     float(geom_data["perspective_point_height"]),
+        "a":     float(geom_data["semi_major_axis"]),
+        "b":     float(geom_data["semi_minor_axis"]),
+    }
+
+
+# ── Geometría ─────────────────────────────────────────────────────────────────
+
+def compute_latlon_grid(base_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Construye la grilla bidimensional de Latitud y Longitud exacta utilizando
+    la elipsoide y la proyección geoestacionaria (Fixed Grid System) del ABI.
+    Lee los metadatos geométricos fijos generados por el downloader.
+
+    Parameters
+    ----------
+    base_path : str
+        Ruta raíz de la región (ej. "dataset/uruguay") donde reside 'region_geometry.json'.
+
+    Returns
+    -------
+    lat2d, lon2d : arrays [H, W] con coordenadas exactas o np.nan en espacio profundo.
+    """
+    import os
+    import json
+    import pyproj
+    import numpy as np
+
+    # 1. Cargar el JSON geométrico de la región (misma función que usan
+    #    compute_local_zenith / compute_view_geometry más abajo, para que
+    #    coordenadas y ángulos usen siempre el mismo lon_0/h/a/b)
+    geom = load_geometry(base_path)
+
+    geom_path = os.path.join(base_path, "geometry.json")
+    with open(geom_path, "r") as f:
+        geom_data = json.load(f)
+
+    # Convertir listas del JSON a vectores numéricos de NumPy
+    x_vals = np.array(geom_data["x"], dtype=np.float32)
+    y_vals = np.array(geom_data["y"], dtype=np.float32)
+
+    # 2. Configurar la Proyección Geoestacionaria (Fixed Grid) usando los datos del satélite
+    crs_goes = pyproj.CRS.from_dict({
+        "proj": "geos",
+        "lon_0": geom["lon_0"],
+        "h": geom["h"],
+        "a": geom["a"],
+        "b": geom["b"],
+        "sweep": "x",
+    })
+
+    # 3. Configurar el sistema de destino (WGS84 estándar en grados)
+    crs_latlon = pyproj.CRS.from_epsg(4326)
+
+    # 4. Crear el transformador matemático (always_xy=True garantiza orden Long, Lat)
+    transformer = pyproj.Transformer.from_crs(crs_goes, crs_latlon, always_xy=True)
+
+    # 5. Proyectar la malla 2D
+    # ``x``/``y`` del producto ABI están en radianes. PROJ ``geos`` recibe
+    # coordenadas lineales, por lo que hay que multiplicarlas por la distancia
+    # del centro de la Tierra al punto de perspectiva:
+    #   H = perspective_point_height + semi_major_axis.
+    # El downloader usa exactamente esta convención al construir geometry.json.
+    perspective_distance = geom["h"] + geom["a"]
+    x_mesh, y_mesh = np.meshgrid(
+        x_vals * perspective_distance,
+        y_vals * perspective_distance,
+    )
+
+    # Transformación de coordenadas de matriz completa
+    lon2d, lat2d = transformer.transform(x_mesh, y_mesh)
+
+    # 6. Control de bordes (Filtrar píxeles inválidos que caen fuera del disco de la Tierra)
+    lon2d = np.where(np.abs(lon2d) <= 180, lon2d, np.nan)
+    lat2d = np.where(np.abs(lat2d) <= 90, lat2d, np.nan)
+
+    return lat2d.astype(np.float32), lon2d.astype(np.float32)
+
+
+def _solar_position(lat: np.ndarray, lon: np.ndarray, dt: datetime):
+    """
+    Declinación solar y ángulo horario local — factorizado para que
+    compute_solar_zenith y compute_solar_azimuth usen EXACTAMENTE los mismos
+    dec/hour_angle.
+    """
+    doy = dt.timetuple().tm_yday
+    hour_utc = dt.hour + dt.minute / 60.0
+
+    B = np.radians((360.0 / 365.0) * (doy - 81))
+    dec_rad = np.radians(23.45 * np.sin(B))
+
+    # Ecuación del tiempo (corrección de minutos solares)
+    eot = (9.87 * np.sin(2*B) - 7.53 * np.cos(B) - 1.5 * np.sin(B)) / 60.0
+    lstm = 0.0   # hour_utc ya está referido al meridiano de Greenwich
+    tc   = 4.0 * (lon - lstm) + 60.0 * eot
+    hour_local = hour_utc + tc / 60.0
+    hour_angle_rad = np.radians(15.0 * (hour_local - 12.0))
+
+    return dec_rad, hour_angle_rad
+
+
+def compute_solar_zenith(lat: np.ndarray, lon: np.ndarray, dt: datetime) -> np.ndarray:
+    """
+    Ángulo cenital solar [deg] usando la aproximación de Spencer (±0.5°).
+    Suficiente para los tests día/noche del FDCA.
+    """
+    dec_rad, hour_angle_rad = _solar_position(lat, lon, dt)
+    lat_rad = np.radians(lat)
+    cos_sza = (np.sin(lat_rad) * np.sin(dec_rad) +
+               np.cos(lat_rad) * np.cos(dec_rad) * np.cos(hour_angle_rad))
+    cos_sza = np.clip(cos_sza, -1.0, 1.0)
+    return np.degrees(np.arccos(cos_sza)).astype(np.float32)
+
+
+def compute_solar_azimuth(lat: np.ndarray, lon: np.ndarray, dt: datetime) -> np.ndarray:
+    """
+    Azimuth solar [deg, desde el Norte, sentido horario].
+    Usa la misma declinación/ángulo horario que compute_solar_zenith
+    (vía _solar_position) para que ambos ángulos sean consistentes entre sí.
+    Fórmula estándar (NOAA Solar Calculator).
+    """
+    dec_rad, hour_angle_rad = _solar_position(lat, lon, dt)
+    lat_rad = np.radians(lat)
+
+    cos_sza = (np.sin(lat_rad) * np.sin(dec_rad) +
+               np.cos(lat_rad) * np.cos(dec_rad) * np.cos(hour_angle_rad))
+    cos_sza = np.clip(cos_sza, -1.0, 1.0)
+    zenith_rad = np.arccos(cos_sza)
+    sin_zenith_safe = np.where(np.sin(zenith_rad) > 1e-6, np.sin(zenith_rad), 1e-6)
+
+    cos_az = ((np.sin(lat_rad) * np.cos(zenith_rad) - np.sin(dec_rad)) /
+              (np.cos(lat_rad) * sin_zenith_safe))
+    cos_az = np.clip(cos_az, -1.0, 1.0)
+    az = np.degrees(np.arccos(cos_az))
+
+    # Corrección de cuadrante según el signo del ángulo horario (mañana/tarde)
+    az = np.where(hour_angle_rad > 0.0, (az + 180.0) % 360.0, (540.0 - az) % 360.0)
+    return az.astype(np.float32)
+
+
+def geodetic_to_ecef(lat_deg: np.ndarray, lon_deg: np.ndarray,
+                      h_m, a: float, b: float):
+    """
+    Convierte coordenadas geodésicas (lat, lon, altura sobre el elipsoide)
+    a ECEF, usando el MISMO elipsoide (a, b) que compute_latlon_grid lee de
+    geometry.json (antes compute_local_zenith asumía una Tierra esférica
+    y una longitud subsatelital hardcodeada, desacoplada de esto).
+    """
+    lat_r = np.radians(lat_deg)
+    lon_r = np.radians(lon_deg)
+    e2 = 1.0 - (b ** 2) / (a ** 2)
+    N = a / np.sqrt(1.0 - e2 * np.sin(lat_r) ** 2)
+
+    x = (N + h_m) * np.cos(lat_r) * np.cos(lon_r)
+    y = (N + h_m) * np.cos(lat_r) * np.sin(lon_r)
+    z = (N * (1.0 - e2) + h_m) * np.sin(lat_r)
+    return x, y, z
+
+
+def compute_view_geometry(lat: np.ndarray, lon: np.ndarray,
+                           sat_lon_deg: float, sat_height_m: float,
+                           a: float, b: float):
+    """
+    Ángulo cenital local (LZA) y azimuth del satélite [deg], vistos desde
+    cada píxel, calculados con geometría ECEF real. 
+    Recibe lon_0/h/a/b directamente de
+    geometry.json (vía load_geometry), el mismo archivo que usa
+    compute_latlon_grid — así ambos cálculos quedan atados a la misma fuente.
+
+    sat_height_m es la altura del satélite sobre el elipsoide en el punto
+    subsatelital (perspective_point_height de geometry.json).
+    """
+    x_s, y_s, z_s = geodetic_to_ecef(0.0, sat_lon_deg, sat_height_m, a, b)
+    x_g, y_g, z_g = geodetic_to_ecef(lat, lon, 0.0, a, b)
+
+    dx, dy, dz = x_s - x_g, y_s - y_g, z_s - z_g
+    rng = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
+
+    lat_r = np.radians(lat)
+    lon_r = np.radians(lon)
+
+    # Normal geodésica local (vertical local del elipsoide en el píxel)
+    nx = np.cos(lat_r) * np.cos(lon_r)
+    ny = np.cos(lat_r) * np.sin(lon_r)
+    nz = np.sin(lat_r)
+
+    cos_lza = (dx * nx + dy * ny + dz * nz) / rng
+    cos_lza = np.clip(cos_lza, -1.0, 1.0)
+    lza = np.degrees(np.arccos(cos_lza))
+
+    # Vectores locales Este/Norte (ENU) para obtener el azimuth del satélite
+    ex, ey, ez = -np.sin(lon_r), np.cos(lon_r), np.zeros_like(lon_r)
+    nox = -np.sin(lat_r) * np.cos(lon_r)
+    noy = -np.sin(lat_r) * np.sin(lon_r)
+    noz =  np.cos(lat_r)
+
+    e_comp = dx * ex + dy * ey + dz * ez
+    n_comp = dx * nox + dy * noy + dz * noz
+    sat_azimuth = np.degrees(np.arctan2(e_comp, n_comp)) % 360.0
+
+    return lza.astype(np.float32), sat_azimuth.astype(np.float32)
+
+
+def compute_local_zenith(lat: np.ndarray, lon: np.ndarray,
+                          sat_lon_deg: float, sat_height_m: float,
+                          a: float, b: float) -> np.ndarray:
+    """
+    Ángulo cenital local del satélite [deg] (wrapper de compute_view_geometry
+    que devuelve solo el LZA, para no romper otros llamadores).
+    Para GOES-19 (lon_0 ≈ -75°) sobre Uruguay da ~45-55°.
+    """
+    lza, _ = compute_view_geometry(lat, lon, sat_lon_deg, sat_height_m, a, b)
+    return lza
+
+
+def compute_glint_angle(sza: np.ndarray, lza: np.ndarray,
+                         rel_azimuth: np.ndarray) -> np.ndarray:
+    """
+    Ángulo de glint solar [deg].
+    Aproximación plana: ángulo entre el vector solar especular y el satélite.
+    glint_angle ≈ 0 → glint perfecto. El FDCA usa threshold ~10°.
+
+    rel_azimuth debe ser el azimuth relativo REAL (azimuth_satélite -
+    azimuth_solar).
+    """
+    sza_r = np.radians(sza)
+    lza_r = np.radians(lza)
+    az_r  = np.radians(rel_azimuth)
+    cos_glint = (np.cos(sza_r) * np.cos(lza_r) +
+                 np.sin(sza_r) * np.sin(lza_r) * np.cos(az_r))
+    cos_glint = np.clip(cos_glint, -1.0, 1.0)
+    return np.degrees(np.arccos(cos_glint)).astype(np.float32)
+
+
+# ── Conversiones radiométricas ────────────────────────────────────────────────
+
+def rad_to_bt(band: int, rad: np.ndarray) -> np.ndarray: # QUEDA PENDIENTE REVISAR SU USO
+    """
+    Radiancia → Temperatura de Brillo usando Planck inverso.
+    Reutiliza planck_temp del FDCA para consistencia exacta.
+    """
+    from fdca.planck import planck_temp
+    bt = planck_temp(band, np.where(rad > 0, rad, np.nan))
+    return bt.astype(np.float32)
+
+
+def resample_b02_to_grid(rad: np.ndarray, target_shape: tuple[int, int],
+                          max_pixel_slack: int = 4) -> np.ndarray:
+    """Reduce B02 to the 2 km thermal grid using area-block averaging.
+
+    B02 should be exactly `factor`x finer than the thermal grid in each axis
+    (nominally factor=4, since B02 is 0.5 km and B07/14 are 2 km). In
+    practice, per-band crops can be off by a few lines/columns because each
+    band's bounding box gets rounded to its own native pixel size
+    independently upstream. This pads B02 with NaN (ignored by np.nanmean)
+    up to the exact expected size instead of failing outright, as long as
+    the mismatch is small (<= max_pixel_slack pixels per axis).
+    """
+    target_h, target_w = target_shape
+    height, width = rad.shape
+
+    factor_h = round(height / target_h)
+    factor_w = round(width / target_w)
+    if factor_h != factor_w or factor_h < 1:
+        raise ValueError(
+            f"B02 shape {rad.shape} no es compatible con la grilla {target_shape} "
+            f"(factor_h={factor_h}, factor_w={factor_w})"
+        )
+    factor = factor_h
+    expected_h, expected_w = target_h * factor, target_w * factor
+
+    pad_h = expected_h - height
+    pad_w = expected_w - width
+    if pad_h < 0 or pad_w < 0 or max(pad_h, pad_w) > max_pixel_slack:
+        raise ValueError(
+            f"B02 shape {rad.shape} difiere demasiado de lo esperado "
+            f"({expected_h}, {expected_w}) para factor={factor}."
+        )
+    if pad_h or pad_w:
+        rad = np.pad(rad, ((0, pad_h), (0, pad_w)), constant_values=np.nan)
+
+    valid_rad = np.where(rad >= 0, rad, np.nan)
+    blocks = valid_rad.reshape(target_h, factor, target_w, factor)
+
+    # ``np.nanmean`` emits a RuntimeWarning for blocks where every B02 sample
+    # is invalid (typically outside the valid swath).  Compute the mean with an
+    # explicit count instead: valid blocks keep exactly the same average, while
+    # empty blocks remain NaN without treating the warning as a pipeline error.
+    valid_count = np.sum(np.isfinite(blocks), axis=(1, 3))
+    valid_sum = np.nansum(blocks, axis=(1, 3))
+    result = np.full((target_h, target_w), np.nan, dtype=np.float64)
+    np.divide(valid_sum, valid_count, out=result, where=valid_count > 0)
+    return result.astype(np.float32)
+
+
+# ── Static ecosystem/status mask ─────────────────────────────────────────────
+# Packaged data for the fixed 224×303 Uruguay grid.  It contains only the
+# Part I codes 150–153; all other pixels are stored as zero.
+STATIC_ECO_MASK_PATH = Path(__file__).resolve().parent / "data" / "eco_mask.npy"
+
+
+def load_static_eco_mask(shape: tuple[int, int], path: Path = STATIC_ECO_MASK_PATH) -> np.ndarray:
+    """Load and validate the static Part I mask for the fixed scene grid."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No se encontró la máscara estática: {path}")
+
+    mask = np.load(path, allow_pickle=False)
+    if mask.shape != shape:
+        raise ValueError(
+            f"La máscara estática tiene shape {mask.shape}; se esperaba {shape}: {path}"
+        )
+    if not np.issubdtype(mask.dtype, np.integer):
+        raise TypeError(f"La máscara estática debe ser entera, no {mask.dtype}: {path}")
+
+    # Recover 150–153 (and all other codes >127) from the int8 file bytes.
+    return mask.astype(np.uint8, copy=False)
+
+
+
+def load_region_bounds(region_name: str = "uruguay", config_path: str | Path | None = None) -> dict:
+    """Read geographic bounds for a configured region, with a safe fallback."""
+    config_file = Path(config_path) if config_path is not None else Path(__file__).resolve().parent / "config.yaml"
+    defaults = {
+        "uruguay": {"lat_min": -35.5, "lat_max": -29.5, "lon_min": -59.0, "lon_max": -52.0},
+        "rio_de_la_plata": {"lat_min": -38.0, "lat_max": -28.0, "lon_min": -62.0, "lon_max": -48.0},
+    }
+
+    if config_file.exists():
+        try:
+            import yaml
+            with open(config_file, "r", encoding="utf-8") as fh:
+                cfg = yaml.safe_load(fh) or {}
+            region_cfg = (cfg.get("regions") or {}).get(region_name)
+            if isinstance(region_cfg, dict):
+                return region_cfg
+        except Exception:
+            pass
+
+    return defaults.get(region_name, {})
+
+NATURAL_EARTH_URL = (
+    "https://naturalearth.s3.amazonaws.com/10m_cultural/"
+    "ne_10m_admin_0_countries.zip"
+)
+COUNTRY_GEOJSON_FILENAME = "ne_10m_admin_0_countries.geojson"
+# Nombre fijo y único del geojson de países. Se busca en UN solo lugar
+# (base_path/COUNTRY_GEOJSON_FILENAME, ej. dataset/uruguay/ne_110m_admin_0_countries.geojson);
+# si no está ahí, se cae al caché de paquete y, si tampoco existe, se descarga.
+
+NATURAL_EARTH_CACHE_DIR = Path(__file__).resolve().parent / "data" / "natural_earth"
+NATURAL_EARTH_CACHE_FILE = NATURAL_EARTH_CACHE_DIR / COUNTRY_GEOJSON_FILENAME
+
+
+def _resolve_country_geojson_path(base_path: str | Path | None) -> Path | None:
+    """Ruta directa y única al geojson: base_path/<archivo>, o el caché del paquete."""
+    if base_path is not None:
+        candidate = Path(base_path) / COUNTRY_GEOJSON_FILENAME
+        if candidate.exists():
+            return candidate
+    if NATURAL_EARTH_CACHE_FILE.exists():
+        return NATURAL_EARTH_CACHE_FILE
+    return None
+
+def _download_natural_earth_zip(dest_dir: Path) -> Path:
+    """
+    Download the Natural Earth 110m countries shapefile via `requests`,
+    the same pattern used elsewhere in this pipeline (tpw_downloader's GRIB
+    fetch, download_camel_climatology's earthaccess.download) instead of
+    letting GDAL/OGR fetch it internally.
+
+    gpd.read_file(NATURAL_EARTH_URL) delegates the HTTP fetch to GDAL's
+    vsicurl driver, which links against the *system* libcurl. If that
+    libcurl doesn't match the one GDAL was built against (common in conda
+    envs that mix system and conda-forge builds), the failure shows up as a
+    segfault, not a Python exception -- nothing downstream can catch it.
+    Downloading the zip with `requests` keeps the entire HTTP layer in
+    Python; GDAL/geopandas only ever sees a local file.
+    """
+    import requests
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = dest_dir / "ne_10m_admin_0_countries.zip"
+
+    resp = requests.get(NATURAL_EARTH_URL, timeout=60)
+    resp.raise_for_status()
+    zip_path.write_bytes(resp.content)
+    return zip_path
+
+
+def _extract_shapefile(zip_path: Path, extract_dir: Path) -> Path:
+    """Extract the Natural Earth zip and return the path to the .shp file."""
+    import zipfile
+
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(extract_dir)
+
+    shp_matches = list(extract_dir.glob("*.shp"))
+    if not shp_matches:
+        raise FileNotFoundError(
+            f"No .shp file found inside {zip_path} after extraction"
+        )
+    return shp_matches[0]
+
+@lru_cache(maxsize=16)
+def _load_country_geometry(region_name: str, base_path: str | None = None):
+    """Carga el polígono del país desde el geojson del dataset (base_path/
+    ne_110m_admin_0_countries.geojson); si no existe ahí ni en el caché del
+    paquete, lo descarga una vez de Natural Earth."""
+    key = region_name.strip().lower()
+    try:
+        import geopandas as gpd
+    except Exception as exc:
+        raise RuntimeError(
+            "GeoPandas no está instalado en este entorno. "
+            "La máscara de país usa Natural Earth y requiere geopandas. "
+            "Usá el venv del proyecto: ./implementacion/geris/bin/python ."
+        ) from exc
+
+    geojson_path = _resolve_country_geojson_path(base_path)
+    if geojson_path is not None:
+        world = gpd.read_file(str(geojson_path))
+    else:
+        print(
+            f"  ⚠ Natural Earth country boundaries not found locally "
+            f"(looked in dataset root and {NATURAL_EARTH_CACHE_FILE}).\n"
+            f"    Downloading ne_110m_admin_0_countries.zip ...",
+            flush=True,
+        )
+        try:
+            import tempfile
+            import time
+
+            NATURAL_EARTH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            t0 = time.time()
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_dir = Path(tmp_dir)
+                zip_path = _download_natural_earth_zip(tmp_dir)
+                shp_path = _extract_shapefile(zip_path, tmp_dir / "extracted")
+                world = gpd.read_file(str(shp_path))
+            world.to_file(NATURAL_EARTH_CACHE_FILE, driver="GeoJSON")
+            print(
+                f"  ✓ Downloaded and cached at {NATURAL_EARTH_CACHE_FILE} "
+                f"({time.time() - t0:.1f}s)",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"  ❌ Natural Earth download failed: {e!r}", flush=True)
+            return None
+
+    admin_col = "ADMIN" if "ADMIN" in world.columns else "NAME"
+    matches = world[world[admin_col].astype(str).str.lower() == key]
+    if matches.empty:
+        # fallback a substring solo si no hubo match exacto por nombre
+        matches = world[world[admin_col].astype(str).str.contains(key, case=False, na=False)]
+    if matches.empty:
+        return None
+    geometry = matches.iloc[0].geometry
+    if geometry is None:
+        return None
+    return geometry
+
+
+def build_region_mask(lat: np.ndarray, lon: np.ndarray,
+                      region_name: str = "uruguay",
+                      region_cfg: dict | None = None,
+                      base_path: str | Path | None = None) -> np.ndarray:
+    """Return True only for pixels inside the region.
+
+    Prefer a dataset-local country GeoJSON if present (e.g. under the region
+    dataset root), then the Natural Earth cache, and finally the config bounds.
+    """
+    try:
+        geom = _load_country_geometry(region_name, base_path=str(base_path) if base_path is not None else None)
+    except RuntimeError:
+        geom = None
+
+    if geom is not None:
+        import shapely.vectorized
+        return shapely.vectorized.contains(geom, lon, lat)
+
+    if region_cfg is None:
+        region_cfg = load_region_bounds(region_name)
+    if not region_cfg:
+        return np.ones(lat.shape, dtype=bool)
+
+    lat_min = float(region_cfg["lat_min"])
+    lat_max = float(region_cfg["lat_max"])
+    lon_min = float(region_cfg["lon_min"])
+    lon_max = float(region_cfg["lon_max"])
+
+    lat_mask = (lat >= lat_min) & (lat <= lat_max)
+    lon_norm = ((lon + 180.0) % 360.0) - 180.0
+    lon_min_norm = ((lon_min + 180.0) % 360.0) - 180.0
+    lon_max_norm = ((lon_max + 180.0) % 360.0) - 180.0
+
+    if lon_min_norm <= lon_max_norm:
+        lon_mask = (lon_norm >= lon_min_norm) & (lon_norm <= lon_max_norm)
+    else:
+        lon_mask = (lon_norm >= lon_min_norm) | (lon_norm <= lon_max_norm)
+
+    return lat_mask & lon_mask
+
+
+def build_surface_masks(lat: np.ndarray, lon: np.ndarray,
+                         region_name: str = "uruguay",
+                         eco_mask_path: str | Path | np.ndarray | None = None,
+                         base_path: str | Path | None = None) -> dict:
+    """
+    Máscaras de superficie para la región.
+
+    El ROI geográfico se fija desde config.yaml (lat/lon bounds) y no se procesa
+    ningún pixel fuera del dominio de la región. Si el eco-mask estático del
+    dataset coincide con la geometría actual, se usa como fuente autoritativa
+    para distinguir tierra y agua.
+    """
+    H, W = lat.shape
+
+    region_mask = build_region_mask(lat, lon, region_name=region_name, base_path=base_path)
+    land_mask   = region_mask.copy()
+    land_cover  = np.full ((H, W), 8,  dtype=np.int32)   # Wooded grassland
+    desert_mask = np.zeros((H, W),     dtype=np.int32)   # Sin desierto
+    usgs_eco    = np.full ((H, W), 10, dtype=np.int32)   # Grassland/savanna
+
+    eco_mask = None
+    if eco_mask_path is not None:
+        if isinstance(eco_mask_path, np.ndarray):
+            eco_mask = np.asarray(eco_mask_path)
+        else:
+            eco_mask = np.load(eco_mask_path, allow_pickle=False)
+        if eco_mask.shape != (H, W):
+            eco_mask = None
+
+    if eco_mask is None and STATIC_ECO_MASK_PATH.exists():
+        try:
+            eco_mask = load_static_eco_mask((H, W), STATIC_ECO_MASK_PATH)
+        except (FileNotFoundError, ValueError, TypeError):
+            eco_mask = None
+
+    if eco_mask is not None:
+        eco_mask_fixed = eco_mask.astype(np.uint8)
+        # The country/ROI polygon is for output clipping only.  Background
+        # windows must still be able to use valid land outside that polygon.
+        land_mask = (eco_mask_fixed == 0)
+        land_cover[~land_mask] = 0
+        usgs_eco[~land_mask] = 0
+    else:
+        # Para la región río_de_la_plata: el Río de la Plata es agua
+        # Aproximación: lat < -34, lon entre -58 y -52 → zona del estuario
+        if region_name in ("rio_de_la_plata",):
+            water_zone = (lat < -34.0) & (lon > -58.0) & (lon < -52.0)
+            land_mask  [water_zone] = False
+            land_cover [water_zone] = 0    # agua
+            usgs_eco   [water_zone] = 0
+
+    return {
+        "land_mask":   land_mask,
+        "land_cover":  land_cover,
+        "desert_mask": desert_mask,
+        "usgs_eco":    usgs_eco,
+        "region_mask": region_mask,
+    }
+
+
+# ── LUT de corrección TPW ─────────────────────────────────────────────────────
+
+TPW_LUT_PATH = Path(__file__).resolve().parent / "data" / "tpw_lut.csv"
+
+
+def build_tpw_lut(path: Path = TPW_LUT_PATH) -> np.ndarray:
+    """Load the FDCA TPW correction LUT as a 6 × 35 array.
+
+    The CSV stores one record for each combination of TPW bin (1–5) and
+    satellite zenith-angle bin (1–7).  The returned layout is kept compatible
+    with ``part1.py``:
+
+    * row 0: TPW bin label
+    * row 1: zenith-angle bin label
+    * row 2: 4 µm transmittance
+    * row 3: 11 µm transmittance
+    * row 4: 4 µm additive extinction/absorption offset
+    * row 5: 11 µm additive extinction/absorption offset
+
+    The offsets are consumed according to ATBD 3.4.2.8 as additive radiance
+    terms: ``(radiance - offset) / transmittance``.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No se encontró la LUT TPW: {path}")
+
+    table = np.genfromtxt(path, delimiter=",", names=True, dtype=np.float64)
+    expected_columns = (
+        "TPW_bin_dm", "zenith_bin_x10deg", "trans_4um", "trans_11um",
+        "offset_4um", "offset_11um",
+    )
+    if table.dtype.names != expected_columns:
+        raise ValueError(
+            f"Columnas inesperadas en la LUT TPW: {table.dtype.names}; "
+            f"se esperaban {expected_columns}"
+        )
+
+    rows = np.column_stack([table[name] for name in expected_columns])
+    if rows.shape != (35, 6):
+        raise ValueError(f"La LUT TPW debe tener 35 filas y 6 columnas, no {rows.shape}")
+
+    expected_bins = np.array(
+        [(tpw_bin, zenith_bin) for tpw_bin in range(1, 6) for zenith_bin in range(1, 8)],
+        dtype=np.float64,
+    )
+    if not np.array_equal(rows[:, :2], expected_bins):
+        raise ValueError("Los bins de la LUT TPW no están ordenados de 1..5 × 1..7")
+
+    lut = np.zeros((6, 35), dtype=np.float64)
+    lut[0] = rows[:, 0]
+    lut[1] = rows[:, 1]
+    lut[2] = rows[:, 2]
+    lut[3] = rows[:, 3]
+    lut[4] = rows[:, 4]
+    lut[5] = rows[:, 5]
+    return lut
+
+
+def get_tpw_estimate(lat: np.ndarray, lon: np.ndarray,
+                      dt: datetime) -> np.ndarray:
+    """
+    Estimación de TPW [mm] para la región.
+
+    Opciones (en orden de precisión):
+      A) Si tenés ABI-L2-TPWF descargado: leerlo directo (más preciso)
+      B) Climatología mensual para la región (implementada acá)
+      C) Constante 25 mm (fallback)
+
+    La climatología mensual para Uruguay/Cono Sur (aproximada):
+      Verano (dic-feb): ~35-45 mm
+      Otoño  (mar-may): ~25-35 mm
+      Invierno (jun-ago): ~15-25 mm
+      Primavera (sep-nov): ~20-30 mm
+    """
+    month = dt.month
+    if   month in (12, 1, 2):   base_tpw = 40.0
+    elif month in (3, 4, 5):    base_tpw = 30.0
+    elif month in (6, 7, 8):    base_tpw = 20.0
+    else:                        base_tpw = 25.0
+
+    # Gradiente latitudinal suave: más húmedo al norte
+    lat_grad = (lat - lat.min()) / max(lat.max() - lat.min(), 1e-6)
+    tpw = base_tpw + 10.0 * lat_grad   # +10 mm del sur al norte
+
+    return tpw.astype(np.float32)
+
+def get_tpw_real(
+    timestamp_dt: datetime,
+    region_cfg:   dict,
+    base:         str,
+    shape:        tuple[int, int],
+    lat:          np.ndarray,
+    lon:          np.ndarray,
+    verbose:      bool = True,
+) -> np.ndarray:
+    """
+    Real TPW [mm] from NCEP GFS (ATBD 3.4.2.x source), via
+    tpw_downloader.download_and_save(). Falls back to the monthly
+    climatology (get_tpw_estimate) on any failure -- network outage,
+    missing region bbox in config.yaml, GFS cycle not yet published, etc.
+    -- so a single bad scene never blocks a full pipeline run.
+    """
+    from fdca import tpw_downloader
+
+    try:
+        result = tpw_downloader.download_and_save(
+            timestamp=timestamp_dt,
+            region_cfg=region_cfg,
+            output_root=base,
+            goes_shape=shape,
+            goes_latlon=(lat, lon),
+        )
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠ TPW GFS fetch raised {e!r}; falling back to climatology")
+        return get_tpw_estimate(lat, lon, timestamp_dt)
+
+    if result["status"] in ("downloaded", "exists"):
+        tpw = np.load(result["path"]).astype(np.float32)
+        if tpw.shape == shape and np.isfinite(tpw).any():
+            if verbose:
+                print(f"  {'TPW source':<22}: NCEP GFS "
+                      f"({result['status']}, cycle={result.get('gfs_cycle', 'cached')})")
+            return tpw
+        if verbose:
+            print(f"  ⚠ TPW GFS returned shape {tpw.shape} or all-NaN; "
+                  f"falling back to climatology")
+    elif verbose:
+        print(f"  ⚠ TPW GFS download failed "
+              f"({result.get('error', result['status'])}); falling back to climatology")
+
+    return get_tpw_estimate(lat, lon, timestamp_dt)
+
+def load_emissivity_camel(
+    camel_nc_path: str,
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Carga emisividad CAMEL V3 climatología e interpola a bandas ABI 7 y 14.
+    Parameters
+    ----------
+    camel_nc_path : str
+        Ruta al archivo CAM5K30EMCLIM_emis_climatology_MMMonth_V003.nc
+    lat_grid, lon_grid : np.ndarray
+        Grillas de latitud/longitud de la escena ABI (mismo shape)
+    Returns
+    -------
+    emiss7, emiss14 : np.ndarray  (mismo shape que lat_grid)
+        Emisividad interpolada a 3.9 µm y 11.2 µm. np.nan donde no hay dato
+        válido (agua, sin cobertura, fill value, o píxel de espacio).
+    """
+    ds = xr.open_dataset(camel_nc_path)  # decode_cf=True por defecto → NaN + escala ya aplicados
+    wl = ds["wavelength"].values.astype(float)  # µm, longitud = n canales espectrales
+
+    def _nearest_pair(target_um: float) -> tuple[int, int]:
+        idx = np.argsort(np.abs(wl - target_um))[:2]
+        return tuple(sorted(int(i) for i in idx))
+
+    idx7  = _nearest_pair(3.9)
+    idx14 = _nearest_pair(11.2)
+
+    # Dimensión espectral: la que tiene el mismo largo que 'wavelength'
+    # (no se asume un nombre fijo, por si difiere del producto mensual)
+    spectral_dim = next(d for d in ds["camel_emis"].dims if ds.sizes[d] == len(wl))
+    emis = ds["camel_emis"]
+
+    def _interp_band(target_um: float, idx_pair: tuple[int, int]):
+        wl0, wl1 = wl[idx_pair[0]], wl[idx_pair[1]]
+        e0 = emis.isel({spectral_dim: idx_pair[0]})
+        e1 = emis.isel({spectral_dim: idx_pair[1]})
+        w = (target_um - wl0) / (wl1 - wl0)
+        return (1 - w) * e0 + w * e1
+
+    emis7_da  = _interp_band(3.9,  idx7)
+    emis14_da = _interp_band(11.2, idx14)
+
+    # ── Selección puntual, con manejo explícito de NaN (píxeles de espacio) ──
+    # .sel(..., method="nearest") no tolera NaN en el indexador — hay que
+    # sacar esos píxeles antes de la selección y reinsertar NaN después.
+    lat_flat = lat_grid.ravel()
+    lon_flat = lon_grid.ravel()
+    valid = ~(np.isnan(lat_flat) | np.isnan(lon_flat))
+
+    emiss7_flat  = np.full(lat_flat.shape, np.nan, dtype=np.float32)
+    emiss14_flat = np.full(lat_flat.shape, np.nan, dtype=np.float32)
+
+    if valid.any():
+        pixel_lat = xr.DataArray(lat_flat[valid], dims="pixel")
+        pixel_lon = xr.DataArray(lon_flat[valid], dims="pixel")
+
+        emiss7_flat[valid]  = emis7_da.sel(
+            latitude=pixel_lat, longitude=pixel_lon, method="nearest"
+        ).values
+        emiss14_flat[valid] = emis14_da.sel(
+            latitude=pixel_lat, longitude=pixel_lon, method="nearest"
+        ).values
+
+    ds.close()
+    return (
+        emiss7_flat.reshape(lat_grid.shape),
+        emiss14_flat.reshape(lat_grid.shape),
+    )
+
+# config.yaml ships inside the fdca package itself — resolve it relative to
+# this file, not the caller's cwd, so `load_fdca_input` works the same way
+# whether invoked from implementacion/, from inside fdca/, or from a Colab notebook
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
+
+# ── Función principal ─────────────────────────────────────────────────────────
+def load_fdca_input(
+    timestamp: str,
+    region:    str   = "uruguay",
+    dataset_root: str | None = None,
+    config_path: str | None  = None,
+    verbose: bool = True,
+) -> "FDCAInput":
+
+    """
+    Carga los .npy del pipeline para un timestamp dado y construye FDCAInput.
+
+    Parameters
+    ----------
+    timestamp    : str   formato "YYYYMMDD_HHMM", ej. "20250905_1500"
+    region       : str   nombre de región del config.yaml
+    dataset_root : str | None  raíz del dataset (donde están las carpetas por banda)
+    config_path  : str | None   ruta al config.yaml; si es None, usa el config.yaml empaquetado junto a fdca_adapter.py
+    verbose      : bool  mostrar resumen de los arrays cargados
+
+    Returns
+    -------
+    FDCAInput   (importado del módulo fdca)
+
+    Raises
+    ------
+    FileNotFoundError  si faltan B07 o B14 (inputs mínimos obligatorios)
+    """
+    
+    if dataset_root is None:
+        from .dataset import default_dataset_root
+        dataset_root = default_dataset_root()
+        
+    if config_path is None:
+        config_path = str(DEFAULT_CONFIG_PATH)
+    import yaml
+    #sys.path.insert(0, str(Path(config_path).parent.parent))
+    from .algorithm import FDCAInput
+
+    # ── Cargar config ──────────────────────────────────────────────────────────
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    region_cfg = cfg["regions"][region]
+    base = os.path.join(dataset_root, region)
+
+    # ── Parsear timestamp ──────────────────────────────────────────────────────
+    #dt = datetime.strptime(timestamp, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc) antes
+    dt = datetime.strptime(timestamp, "%Y%m%d_%H%M")  # sin timezone, fdca.py lo maneja internamente
+
+    # ── Función auxiliar para leer .npy ────────────────────────────────────────
+    def load_band(band_id: str, required: bool = False) -> np.ndarray | None:
+        path = os.path.join(base, band_id, f"{timestamp}.npy")
+        if not os.path.exists(path):
+            if required:
+                raise FileNotFoundError(
+                    f"Input obligatorio no encontrado: {path}\n"
+                    f"Corré: python pipeline.py download --region {region} "
+                    f"--start '{dt.strftime('%Y-%m-%d %H:%M')}' "
+                    f"--end '{dt.strftime('%Y-%m-%d %H:%M')}' "
+                    f"--products {band_id}"
+                )
+            return None
+        return np.load(path)
+    
+   
+    def load_planck_coeffs(base: str, band_id: str, timestamp: str) -> dict | None:
+        """Lee los coeficientes Planck (*_planck.json) generados por downloader.py
+        y los mapea a los nombres esperados por planck_temp_from_coeffs (fk1, fk2, bc1, bc2)."""
+        path = os.path.join(base, band_id, f"{timestamp}_planck.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            raw = json.load(f)
+        return {
+            "fk1": raw["planck_fk1"],
+            "fk2": raw["planck_fk2"],
+            "bc1": raw["planck_bc1"],
+            "bc2": raw["planck_bc2"],
+        }
+    
+    def load_fpt_flag(base: str, timestamp: str) -> float:
+        """Valor escalar de FPT comparable contra FPT_THRESHOLD (ATBD 3.4.2.2)."""
+        path = os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_planck.json")
+        if not os.path.exists(path):
+            return 0.0  # sin dato → no activa la rama híbrida
+        with open(path) as f:
+            raw = json.load(f)
+        exceeded = raw.get("fpt_threshold_exceeded_count", 0)
+        return (FPT_THRESHOLD + 1.0) if exceeded else 0.0
+
+
+    def load_data_quality(base: str, timestamp: str) -> np.ndarray | None:
+        """Load raw B07 L1b DQF, supporting both dataset folder layouts.
+
+        The downloader branch writes this sidecar under
+        ``ABI-L1b-Rad-B07-DFQ/``. Older datasets may have it next to the B07
+        radiance under ``ABI-L1b-Rad-B07/``. Loading is intentionally kept
+        separate from the Part I decisions until the code meanings and their
+        distribution have been audited against TP/FP/FN pixels.
+        """
+        candidates = (
+            os.path.join(base, "ABI-L1b-Rad-B07", f"{timestamp}_dqf.npy"),
+            os.path.join(base, "ABI-L1b-Rad-B07-DFQ", f"{timestamp}_dqf.npy"),
+        )
+        for path in candidates:
+            if os.path.exists(path):
+                return np.load(path)
+        return None
+    
+    def load_kappa0(base: str, timestamp: str) -> float | None:
+        """Read the B02 kappa0 calibration coefficient for this scene.
+
+        kappa0 tracks the Earth-Sun distance of the specific scan (it
+        varies ~3.4% peak-to-peak over the year), so it lives in its own
+        per-timestamp sidecar ("{timestamp}_kappa0.json"), not in the
+        shared units.json -- reusing one scene's kappa0 for every other
+        scene would silently reintroduce the seasonal error this fix is
+        meant to remove. Returns None if the sidecar is missing.
+        """
+        path = os.path.join(base, "ABI-L1b-Rad-B02", f"{timestamp}_kappa0.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            meta = json.load(f)
+        kappa0 = meta.get("kappa0")
+        return float(kappa0) if kappa0 is not None else None
+
+    from fdca.planck import planck_temp_from_coeffs, planck_rad
+
+    ## Calculos de lo necesario para correr el algoritmo
+
+    #Mientras que las bandas térmicas miden el calor emitido por la Tierra (en número de onda), 
+    #la banda B02 mide la luz del Sol reflejada por la superficie y la atmósfera (en longitud de onda).
+
+    # Radiancias crudas tal cual vienen del .nc — SIN conversión manual de unidades.
+    # Su unidad nativa es mW m-2 sr-1 (cm-1)-1, y se invierten a BT usando
+    # los coeficientes Planck propios de cada archivo (planck_temp_from_coeffs).
+    rad7_raw  = load_band("ABI-L1b-Rad-B07", required=True)
+    rad14_raw = load_band("ABI-L1b-Rad-B14", required=True)
+    rad13_raw = load_band("ABI-L1b-Rad-B13")
+    rad15_raw = load_band("ABI-L1b-Rad-B15")
+
+    # Cargar coeficientes Planck para B07/B14 (obligatorios) 
+    coeffs7  = load_planck_coeffs(base, "ABI-L1b-Rad-B07", timestamp)
+    coeffs14 = load_planck_coeffs(base, "ABI-L1b-Rad-B14", timestamp)
+
+    if coeffs7 is None or coeffs14 is None:
+            raise FileNotFoundError(
+                f"Faltan coeficientes Planck (*_planck.json) para {timestamp}.\n"
+                f"Re-descargá B07/B14 con la versión actualizada de downloader.py "
+                f"(borrá los .npy existentes y volvé a correr 'pipeline.py download')."
+            )
+    
+
+    #radiancia cruda del .nc -> temperatura de brillo [K].
+    bt7  = planck_temp_from_coeffs(rad7_raw,  **coeffs7).astype(np.float32)
+    bt14 = planck_temp_from_coeffs(rad14_raw, **coeffs14).astype(np.float32)
+
+
+    coeffs13 = load_planck_coeffs(base, "ABI-L1b-Rad-B13", timestamp)
+    bt13 = (planck_temp_from_coeffs(rad13_raw, **coeffs13).astype(np.float32)
+            if (rad13_raw is not None and coeffs13 is not None) else None)
+
+    coeffs15 = load_planck_coeffs(base, "ABI-L1b-Rad-B15", timestamp)
+    bt15 = (planck_temp_from_coeffs(rad15_raw, **coeffs15).astype(np.float32)
+            if (rad15_raw is not None and coeffs15 is not None) else None)
+
+    
+    # Radiancias crudas tal cual vienen del .nc
+    # Su unidad nativa es W * m^-2 * sr^-1 * µm^-1
+    rad02     = load_band("ABI-L1b-Rad-B02", required=False)
+
+
+    # ── Radiancias en unidad nativa (mW m-2 sr-1 (cm-1)-1) ────────────────
+    # Antes acá se "regeneraban" rad7/rad14/... con planck_rad genérico
+    # (W m-2 sr-1 m-1), lo cual mezclaba dos sistemas de unidades distintos.
+    # Ahora nos quedamos directamente con las radiancias crudas del .nc,
+    # que ya están en la unidad nativa del instrumento — sin reconversión.
+    rad7  = rad7_raw
+    rad14 = rad14_raw
+    rad13 = rad13_raw
+    rad15 = rad15_raw
+
+    if verbose:
+        def band_info(name, arr):
+            if arr is None:
+                return f"  {name:<22}: ✗ no disponible"
+            return f"  {name:<22}: shape={arr.shape}  range=[{np.nanmin(arr):.2f}, {np.nanmax(arr):.2f}]"
+        print(band_info("ABI-L1b-Rad-B07", rad7))
+        print(band_info("ABI-L1b-Rad-B14", rad14))
+        print(band_info("ABI-L1b-Rad-B13", rad13))
+        print(band_info("ABI-L1b-Rad-B15", rad15))
+        print(band_info("ABI-L1b-Rad-B02", rad02))
+
+    shape = rad7.shape
+
+    # ── Grilla lat/lon ────────────────────────────────────────────────────────
+    lat2d, lon2d = compute_latlon_grid(base)
+
+    # ── Geometría del satélite (misma fuente que usó compute_latlon_grid) ────
+    geom = load_geometry(base)
+
+    # ── Geometría solar y satelital ───────────────────────────────────────────
+    sza          = compute_solar_zenith(lat2d, lon2d, dt)
+    solar_az     = compute_solar_azimuth(lat2d, lon2d, dt)
+    lza, sat_az  = compute_view_geometry(
+        lat2d, lon2d,
+        sat_lon_deg=geom["lon_0"], sat_height_m=geom["h"],
+        a=geom["a"], b=geom["b"],
+    )
+    # Azimuth relativo real sol-satélite (antes: constante 120° para toda la imagen)
+    azimuth = (sat_az - solar_az) % 360.0
+    glint   = compute_glint_angle(sza, lza, azimuth)
+
+    if verbose:
+        print(f"\n  {'SZA range [°]':<22}: {sza.min():.1f} – {sza.max():.1f}")
+        print(f"  {'LZA range [°]':<22}: {lza.min():.1f} – {lza.max():.1f}")
+        day_pct = 100 * (sza <= 85).mean()
+        print(f"  {'Píxeles diurnos':<22}: {day_pct:.0f}%")
+
+    # ── Reflectancia B02 ──────────────────────────────────────────────────────
+    if rad02 is not None:
+        # B02 es aproximadamente 4x más fino que la grilla térmica.
+        # El ATBD pide reflectancia muestreada a 2 km: promediar bloques
+        # conserva el promedio espacial y evita interpolar valores inválidos.
+        rad02_resized = resample_b02_to_grid(rad02, shape)
+        kappa0 = load_kappa0(base, timestamp)
+        if kappa0 is None:
+            raise FileNotFoundError(
+                f"Falta '{timestamp}_kappa0.json' en "
+                f"{os.path.join(base, 'ABI-L1b-Rad-B02')}.\n"
+                f"kappa0 se guarda por escena (varía ~3.4% en el año por la "
+                f"distancia Tierra-Sol real; ver revision_fdca.md M6), así "
+                f"que cada timestamp necesita su propio archivo. Descargalo con:\n"
+                f"  python pipeline.py download --region {region} "
+                f"--start '{dt.strftime('%Y-%m-%d %H:%M')}' "
+                f"--end '{dt.strftime('%Y-%m-%d %H:%M')}' "
+                f"--products ABI-L1b-Rad-B02"
+            )
+        refl2 = rad_b02_to_reflectance(rad02_resized, kappa0)
+        if verbose:
+            print(f"  {'B02 reflectance':<22}: kappa0={kappa0:.6e} "
+                  f"(from units.json)")
+    else:
+        refl2 = None
+    if verbose:
+        print(f"\n  {'BT7 range [K]':<22}: {np.nanmin(bt7):.1f} – {np.nanmax(bt7):.1f}")
+        print(f"  {'BT14 range [K]':<22}: {np.nanmin(bt14):.1f} – {np.nanmax(bt14):.1f}")
+        if refl2 is not None:
+            print(f"  {'refl2 range':<22}: {np.nanmin(refl2):.3f} – {np.nanmax(refl2):.3f}")
+
+
+    # ── Emisividad: MEaSUREs CAMEL V3 climatología ───────────────────────────
+    # La descarga es responsabilidad de downloader.py/pipeline.py.
+    # Acá solo se busca localmente el .nc ya descargado; si falta, se avisa y se usa el placeholder usado previamente.
+    import glob
+    camel_dir  = region_cfg.get("camel_emissivity_dir", os.path.join(base, "camel_emissivity"))
+    matches    = glob.glob(os.path.join(camel_dir, f"*{dt.month:02d}Month*.nc"))
+    camel_path = matches[0] if matches else None
+
+    if camel_path is not None:
+        # Preserve NaN/fill values.  Part I maps invalid emissivity to the
+        # ATBD code 160; silently replacing it with 0.95/0.97 would turn bad
+        # ancillary data into apparently valid fire detections.
+        emiss7, emiss14 = load_emissivity_camel(camel_path, lat2d, lon2d)
+        emiss7  = emiss7.astype(np.float32)
+        emiss14 = emiss14.astype(np.float32)
+        if verbose:
+            print(f"  {'Emisividad':<22}: CAMEL V3 clim. provisional "
+                  f"({os.path.basename(camel_path)}; ATBD source is UW BF)")
+    else:
+        # No UW-BF product is currently available in this repository.  Keep
+        # the missing ancillary input explicit instead of using a hidden
+        # constant fallback; Part I will emit code 160 for affected pixels.
+        emiss7  = np.full(shape, np.nan, dtype=np.float32)
+        emiss14 = np.full(shape, np.nan, dtype=np.float32)
+        if verbose:
+            print(f"  {'Emisividad':<22}: ⚠ missing UW BF/CAMEL ancillary "
+                  f"— invalid pixels receive ATBD code 160")
+
+
+
+    # ── TPW ───────────────────────────────────────────────────────────────────
+    tpw = get_tpw_real(dt, region_cfg, base, shape, lat2d, lon2d, verbose=verbose)
+    if verbose:
+        n_nan = int(np.isnan(tpw).sum())
+        nan_note = f"  ({n_nan} NaN px)" if n_nan else ""
+        print(f"  {'TPW range [mm]':<22}: {np.nanmin(tpw):.1f} – {np.nanmax(tpw):.1f}{nan_note}")
+    
+
+    # ── Máscaras de superficie ────────────────────────────────────────────────
+    masks = build_surface_masks(lat2d, lon2d, region_name=region, base_path=base)
+
+    # ── LUT TPW ───────────────────────────────────────────────────────────────
+    # Universal ATBD table, shared across all regions -> lives at the dataset
+    # root, not under base = dataset_root/region, and no longer at the
+    # package-bundled path (fdca/data/tpw_lut.csv is now unused fallback only).
+    tpw_lut_path = os.path.join(dataset_root, "tpw_lut.csv")
+    lut_tpw = build_tpw_lut(tpw_lut_path)
+
+    # ── FPT: Focal Plane Temperature de ABI ──────────────────────────────────
+    # ABI en GOES-19 opera a ~85-87 K (criogénico) → por debajo del umbral 90 K
+    # → no se activa el modo híbrido de B13 (FPT_THRESHOLD = 90 K en constants.py)
+    # ── FPT: Focal Plane Temperature de ABI (ATBD 3.4.2.2) ───────────────────
+    # El L1b de B07 no trae la temperatura literal (telemetría interna, no
+    # pública), pero sí un contador de QC que ya indica si el umbral de 90 K
+    # fue superado en ese escaneo. Lo mapeamos a un valor consistente con el
+    # test `FPT > FPT_THRESHOLD` que usa run_part1().
+    from fdca.constants import FPT_THRESHOLD
+
+    # ── FPT: Focal Plane Temperature de ABI (ATBD 3.4.2.2) ───────────────────
+    FPT = load_fpt_flag(base, timestamp)
+    data_quality = load_data_quality(base, timestamp)
+    # Per-region fixed grid mask, now sourced from the dataset (HF), not
+    # the package-bundled path (fdca/data/eco_mask.npy is unused fallback only).
+    eco_mask_path = os.path.join(base, "eco_mask.npy")
+    eco_mask = load_static_eco_mask(shape, eco_mask_path)
+
+    # The static ecosystem mask is authoritative for background land pixels,
+    # but it must still be constrained to the configured regional ROI.
+    # Codes 150–153 represent invalid ecosystem, sea water, coast fringe,
+    # and inland water; only code 0 is included as land.
+    eco_mask_fixed = eco_mask.astype(np.uint8)
+    region_mask = masks.get("region_mask", np.ones_like(eco_mask_fixed, dtype=bool))
+    # Keep ROI clipping separate from the ancillary land mask.  The latter is
+    # intentionally allowed to include valid land outside Uruguay for windows
+    # centered near the border.
+    masks["land_mask"] = eco_mask_fixed == 0
+
+    # ── Armar FDCAInput ───────────────────────────────────────────────────────
+    inp = FDCAInput(
+        bt7=bt7,   rad7=rad7,
+        bt14=bt14, rad14=rad14,
+        bt13=bt13, rad13=rad13,
+        bt15=bt15, rad15=rad15,
+        refl2=refl2,
+        latitudes=lat2d, longitudes=lon2d,
+        sza=sza, glint_angle=glint,
+        lza=lza, azimuth=azimuth,
+        tpw=tpw, emiss7=emiss7, emiss14=emiss14,
+        lut_tpw=lut_tpw, FPT=FPT,
+        land_cover=masks["land_cover"],
+        land_mask=masks["land_mask"],
+        desert_mask=masks["desert_mask"],
+        usgs_eco=masks["usgs_eco"],
+        coeffs7=coeffs7, coeffs14=coeffs14,
+        coeffs13=coeffs13, coeffs15=coeffs15,
+        scan_time=dt,
+        prev_fire_mask=None,
+        data_quality=data_quality,
+        eco_mask=eco_mask,
+        region_mask=region_mask,
+    )
+
+    if verbose:
+        print(f"\n  ✓ FDCAInput construido — shape {shape}")
+
+    return inp
