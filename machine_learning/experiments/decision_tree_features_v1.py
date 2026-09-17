@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import subprocess
@@ -71,6 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-features", default=None, help="Número, sqrt, log2 o none.")
     parser.add_argument("--max-leaf-nodes", type=int, default=None)
     parser.add_argument("--min-impurity-decrease", type=float, default=None)
+    parser.add_argument("--scene-recall-target", type=float, default=None,
+                        help="Recall mínimo exigido por escena con fuego (default 0.9).")
     parser.add_argument("--test-size", type=float, default=None, help="Sólo se usa sin split por fechas.")
     parser.add_argument("--no-stratify", action="store_true")
     parser.add_argument("--no-comet", action="store_true")
@@ -122,6 +125,8 @@ def apply_config(args: argparse.Namespace, config: dict[str, Any]) -> None:
     args.ccp_alpha = 0.0 if args.ccp_alpha is None else args.ccp_alpha
     args.min_impurity_decrease = 0.0 if args.min_impurity_decrease is None else args.min_impurity_decrease
     args.test_size = 0.2 if args.test_size is None else args.test_size
+    if args.scene_recall_target is None:
+        args.scene_recall_target = float(config.get("scene_recall_target", 0.9))
 
 
 def sha256_file(path: Path) -> str:
@@ -173,7 +178,12 @@ def load_split(args: argparse.Namespace) -> tuple[list[str], list[str], dict[str
 
 
 def read_scene(path: Path, timestamp: str, target: str) -> pd.DataFrame:
-    frame = pd.read_csv(path)
+    if path.suffix == ".parquet":
+        frame = pd.read_parquet(path, engine="pyarrow")
+    elif path.suffix == ".csv":
+        frame = pd.read_csv(path)
+    else:
+        raise ValueError(f"Formato de features no soportado: {path}")
     required = {"timestamp", target}
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -186,6 +196,17 @@ def read_scene(path: Path, timestamp: str, target: str) -> pd.DataFrame:
     if frame.empty:
         raise ValueError(f"{path.name}: no quedaron filas con target binario válido")
     return frame
+
+
+def resolve_scene_path(features_dir: Path, timestamp: str) -> Path | None:
+    """Prefer Parquet and fall back to the legacy CSV representation."""
+    parquet = features_dir / f"{timestamp}.parquet"
+    csv = features_dir / f"{timestamp}.csv"
+    if parquet.exists():
+        return parquet
+    if csv.exists():
+        return csv
+    return None
 
 
 def resolve_features(frame: pd.DataFrame, feature_set: str | None, feature_sets: dict[str, Any], explicit: list[str] | None, target: str) -> list[str]:
@@ -250,6 +271,102 @@ def metric_values(y_true: pd.Series, y_pred: np.ndarray, probabilities: np.ndarr
     return values
 
 
+def confusion_parts(y_true: pd.Series, y_pred: np.ndarray) -> tuple[int, int, int, int]:
+    """Return (tn, fp, fn, tp) forcing both labels so single-class scenes work."""
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    return int(tn), int(fp), int(fn), int(tp)
+
+
+def scene_scores(y_true: pd.Series, y_pred: np.ndarray, probabilities: np.ndarray) -> dict[str, Any]:
+    """Per-scene metrics where undefined values are NaN instead of a misleading 0.
+
+    A scene without reference fire has no recall to speak of, and a scene where
+    the model predicted nothing has no precision.  Collapsing those cases to 0
+    would drag every macro average down.
+    """
+    tn, fp, fn, tp = confusion_parts(y_true, y_pred)
+    positives, predicted = tp + fn, tp + fp
+    recall = tp / positives if positives else math.nan
+    precision = tp / predicted if predicted else math.nan
+    if not positives and not predicted:
+        f1 = math.nan
+    elif math.isnan(recall) or math.isnan(precision) or (recall + precision) == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+    return {
+        "rows": int(len(y_true)),
+        "positive_rows": positives,
+        "predicted_positive_rows": predicted,
+        "true_negatives": tn,
+        "false_positives": fp,
+        "false_negatives": fn,
+        "true_positives": tp,
+        "has_fire": bool(positives),
+        "alarm_raised": bool(predicted),
+        "metrics": {
+            "recall": float(recall),
+            "precision": float(precision),
+            "f1": float(f1),
+            "average_precision": float(average_precision_score(y_true, probabilities)) if positives else math.nan,
+        },
+    }
+
+
+def scene_aggregates(per_scene: dict[str, dict[str, Any]], recall_target: float) -> dict[str, float]:
+    """Scene-level view: every timestamp weighs the same, regardless of pixel count."""
+    scenes = list(per_scene.values())
+    fire = [s for s in scenes if s["has_fire"]]
+    clear = [s for s in scenes if not s["has_fire"]]
+    recalls = [s["metrics"]["recall"] for s in fire]
+    precisions = [s["metrics"]["precision"] for s in scenes if s["predicted_positive_rows"]]
+    false_positives = [s["false_positives"] for s in scenes]
+
+    detected = sum(1 for s in fire if s["alarm_raised"])
+    # Stricter: an alarm somewhere in a burning scene is not the same as hitting
+    # the burning pixel, so count only scenes with at least one true positive.
+    hit = sum(1 for s in fire if s["true_positives"] > 0)
+    false_alarm_scenes = sum(1 for s in clear if s["alarm_raised"])
+    alarm_recall = detected / len(fire) if fire else math.nan
+    alarm_precision = detected / (detected + false_alarm_scenes) if (detected + false_alarm_scenes) else math.nan
+    if math.isnan(alarm_recall) or math.isnan(alarm_precision) or (alarm_recall + alarm_precision) == 0:
+        alarm_f1 = math.nan
+    else:
+        alarm_f1 = 2 * alarm_precision * alarm_recall / (alarm_precision + alarm_recall)
+
+    aggregates = {
+        "scene_count": float(len(scenes)),
+        "scene_count_with_fire": float(len(fire)),
+        "scene_count_without_fire": float(len(clear)),
+        "scene_macro_recall": float(np.mean(recalls)) if recalls else math.nan,
+        "scene_macro_precision": float(np.mean(precisions)) if precisions else math.nan,
+        "scene_worst_recall": float(np.min(recalls)) if recalls else math.nan,
+        "scene_fraction_meeting_recall_target": (
+            float(np.mean([r >= recall_target for r in recalls])) if recalls else math.nan
+        ),
+        "scene_recall_target": float(recall_target),
+        "false_positives_per_scene": float(np.mean(false_positives)) if false_positives else math.nan,
+        "false_positives_per_scene_median": float(np.median(false_positives)) if false_positives else math.nan,
+        "false_positives_per_scene_max": float(np.max(false_positives)) if false_positives else math.nan,
+        "false_positives_per_clear_scene": (
+            float(np.mean([s["false_positives"] for s in clear])) if clear else math.nan
+        ),
+        "scene_alarm_recall": float(alarm_recall),
+        "scene_alarm_precision": float(alarm_precision),
+        "scene_alarm_f1": float(alarm_f1),
+        "scene_alarm_false_alarm_scenes": float(false_alarm_scenes),
+        "scene_alarm_missed_scenes": float(len(fire) - detected),
+        "scene_hit_recall": float(hit / len(fire)) if fire else math.nan,
+        "scene_hit_missed_scenes": float(len(fire) - hit),
+    }
+    return aggregates
+
+
+def finite_only(values: dict[str, float]) -> dict[str, float]:
+    """Comet rejects NaN, so undefined metrics are dropped instead of logged as 0."""
+    return {k: v for k, v in values.items() if not (isinstance(v, float) and not math.isfinite(v))}
+
+
 def git_revision() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True).strip()
@@ -257,8 +374,20 @@ def git_revision() -> str:
         return "unknown"
 
 
+def strip_nan(value: Any) -> Any:
+    """NaN is not valid JSON, so undefined metrics are persisted as null."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: strip_nan(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [strip_nan(item) for item in value]
+    return value
+
+
 def write_json(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    payload = json.dumps(strip_nan(value), indent=2, sort_keys=True, default=str)
+    path.write_text(payload + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -278,8 +407,8 @@ def main() -> None:
     manifest: list[dict[str, Any]] = []
     missing_scenes: list[str] = []
     for timestamp in all_dates:
-        path = features_dir / f"{timestamp}.csv"
-        if not path.exists():
+        path = resolve_scene_path(features_dir, timestamp)
+        if path is None:
             missing_scenes.append(timestamp)
             continue
         frame = read_scene(path, timestamp, args.target)
@@ -288,6 +417,7 @@ def main() -> None:
             "timestamp": timestamp,
             "split": "train" if timestamp in train_dates else "test",
             "file": str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path),
+            "format": path.suffix.lstrip("."),
             "sha256": sha256_file(path),
             "rows": int(len(frame)),
             "positive_rows": int(frame[args.target].sum()),
@@ -357,16 +487,14 @@ def main() -> None:
             scene_y = group[args.target].astype(int)
             scene_pred = pipeline.predict(scene_X)
             scene_prob = pipeline.predict_proba(scene_X)[:, 1]
-            scene_metrics = metric_values(scene_y, scene_pred, scene_prob, "test")
-            per_scene[timestamp] = {
-                "rows": int(len(group)),
-                "positive_rows": int(scene_y.sum()),
-                "positive_rate": float(scene_y.mean()),
-                "metrics": scene_metrics,
-            }
-            for key, value in scene_metrics.items():
-                if key.startswith("test_"):
-                    metrics[f"scene_{timestamp}_{key[5:]}"] = value
+            per_scene[timestamp] = scene_scores(scene_y, scene_pred, scene_prob)
+
+        aggregates = scene_aggregates(per_scene, args.scene_recall_target)
+        metrics.update(aggregates)
+        for timestamp, scene in per_scene.items():
+            for name, value in scene["metrics"].items():
+                metrics[f"scene_{timestamp}_{name}"] = value
+            metrics[f"scene_{timestamp}_false_positives"] = float(scene["false_positives"])
 
         model = pipeline.named_steps["model"]
         importances = {
@@ -411,7 +539,12 @@ def main() -> None:
         }
         write_json(output_dir / "config_resolved.json", resolved)
         write_json(output_dir / "dataset_manifest.json", manifest_payload)
-        write_json(output_dir / "metrics.json", {"global": metrics, "confusion_matrix": matrix, "per_scene": per_scene})
+        write_json(output_dir / "metrics.json", {
+            "global": metrics,
+            "confusion_matrix": matrix,
+            "scene_level": aggregates,
+            "per_scene": per_scene,
+        })
         write_json(output_dir / "feature_importances.json", importances)
         joblib.dump(pipeline, output_dir / "model.joblib")
 
@@ -441,9 +574,12 @@ def main() -> None:
             "splitter": args.splitter,
             "class_weight": args.class_weight,
             "ccp_alpha": float(args.ccp_alpha),
+            "scene_recall_target": float(args.scene_recall_target),
+            "test_scenes_with_fire": int(aggregates["scene_count_with_fire"]),
+            "test_scenes_without_fire": int(aggregates["scene_count_without_fire"]),
             "git_revision": resolved["environment"]["git_revision"],
         })
-        tracker.log_metrics(metrics, step=1)
+        tracker.log_metrics(finite_only(metrics), step=1)
         tracker.log_confusion_matrix(y_test.to_numpy(), y_pred, labels=[0, 1])
         for asset in ("config_resolved.json", "dataset_manifest.json", "metrics.json", "feature_importances.json", "model.joblib"):
             tracker.log_asset(output_dir / asset, file_name=f"{run_id}/{asset}")
@@ -455,10 +591,40 @@ def main() -> None:
     print(f"Features ({len(features)}): {features}")
     print(f"Train scenes/rows: {len(train_dates)}/{len(train)} | positives={int(y_train.sum())}")
     print(f"Test scenes/rows: {len(test_dates)}/{len(test)} | positives={int(y_test.sum())}")
-    print("Metrics:")
-    for name in ("test_accuracy", "test_balanced_accuracy", "test_precision", "test_recall", "test_f1", "test_average_precision"):
+
+    def fmt(value: float) -> str:
+        return "  --  " if isinstance(value, float) and not math.isfinite(value) else f"{value:6.4f}"
+
+    print("\nPor escena (test):")
+    print(f"  {'timestamp':<16}{'pos':>5}{'TP':>5}{'FN':>5}{'FP':>6}  {'recall':>7} {'precision':>9}  alarma")
+    for timestamp, scene in per_scene.items():
+        alarm = "sí" if scene["alarm_raised"] else "no"
+        print(
+            f"  {timestamp:<16}{scene['positive_rows']:>5}{scene['true_positives']:>5}"
+            f"{scene['false_negatives']:>5}{scene['false_positives']:>6}  "
+            f"{fmt(scene['metrics']['recall']):>7} {fmt(scene['metrics']['precision']):>9}  {alarm}"
+        )
+
+    print("\nNivel escena (cada timestamp pesa igual):")
+    print(f"  escenas con fuego / sin fuego : {int(aggregates['scene_count_with_fire'])} / {int(aggregates['scene_count_without_fire'])}")
+    print(f"  recall macro (escenas c/fuego): {fmt(aggregates['scene_macro_recall'])}")
+    print(f"  peor recall de una escena     : {fmt(aggregates['scene_worst_recall'])}")
+    print(f"  escenas que cumplen recall>={aggregates['scene_recall_target']:.2f}: {fmt(aggregates['scene_fraction_meeting_recall_target'])}")
+    print(f"  precision macro               : {fmt(aggregates['scene_macro_precision'])}")
+    print(f"  FP por escena (media/mediana/max): {aggregates['false_positives_per_scene']:.2f} / "
+          f"{aggregates['false_positives_per_scene_median']:.2f} / {int(aggregates['false_positives_per_scene_max'])}")
+    print(f"  FP por escena sin fuego       : {fmt(aggregates['false_positives_per_clear_scene'])}")
+    print(f"  alarma por escena r/p/f1      : {fmt(aggregates['scene_alarm_recall'])} / "
+          f"{fmt(aggregates['scene_alarm_precision'])} / {fmt(aggregates['scene_alarm_f1'])}")
+    print(f"  escenas con acierto real (TP>0): {fmt(aggregates['scene_hit_recall'])}")
+    print(f"  escenas con fuego sin acierto : {int(aggregates['scene_hit_missed_scenes'])}")
+    print(f"  escenas sin fuego con alarma  : {int(aggregates['scene_alarm_false_alarm_scenes'])}")
+
+    print("\nAgregado por pixel (micro, todas las escenas juntas):")
+    for name in ("test_precision", "test_recall", "test_f1", "test_average_precision"):
         if name in metrics:
             print(f"  {name}: {metrics[name]:.4f}")
+    print(f"  confusion_matrix [[TN,FP],[FN,TP]]: {matrix}")
 
 
 if __name__ == "__main__":
