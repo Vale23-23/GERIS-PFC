@@ -178,7 +178,12 @@ def load_split(args: argparse.Namespace) -> tuple[list[str], list[str], dict[str
 
 
 def read_scene(path: Path, timestamp: str, target: str) -> pd.DataFrame:
-    frame = pd.read_csv(path)
+    if path.suffix == ".parquet":
+        frame = pd.read_parquet(path, engine="pyarrow")
+    elif path.suffix == ".csv":
+        frame = pd.read_csv(path)
+    else:
+        raise ValueError(f"Formato de features no soportado: {path}")
     required = {"timestamp", target}
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -191,6 +196,17 @@ def read_scene(path: Path, timestamp: str, target: str) -> pd.DataFrame:
     if frame.empty:
         raise ValueError(f"{path.name}: no quedaron filas con target binario válido")
     return frame
+
+
+def resolve_scene_path(features_dir: Path, timestamp: str) -> Path | None:
+    """Prefer Parquet and fall back to the legacy CSV representation."""
+    parquet = features_dir / f"{timestamp}.parquet"
+    csv = features_dir / f"{timestamp}.csv"
+    if parquet.exists():
+        return parquet
+    if csv.exists():
+        return csv
+    return None
 
 
 def resolve_features(frame: pd.DataFrame, feature_set: str | None, feature_sets: dict[str, Any], explicit: list[str] | None, target: str) -> list[str]:
@@ -391,8 +407,8 @@ def main() -> None:
     manifest: list[dict[str, Any]] = []
     missing_scenes: list[str] = []
     for timestamp in all_dates:
-        path = features_dir / f"{timestamp}.csv"
-        if not path.exists():
+        path = resolve_scene_path(features_dir, timestamp)
+        if path is None:
             missing_scenes.append(timestamp)
             continue
         frame = read_scene(path, timestamp, args.target)
@@ -401,6 +417,7 @@ def main() -> None:
             "timestamp": timestamp,
             "split": "train" if timestamp in train_dates else "test",
             "file": str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path),
+            "format": path.suffix.lstrip("."),
             "sha256": sha256_file(path),
             "rows": int(len(frame)),
             "positive_rows": int(frame[args.target].sum()),

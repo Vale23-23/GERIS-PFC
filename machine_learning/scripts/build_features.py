@@ -1,37 +1,19 @@
 """
-Genera, con UN SOLO COMANDO, un CSV de features por cada timestamp pedido,
-apto para entrenar un modelo de ML. Por adentro corre fdca.run_audit (que ya
-calcula correctamente toda la fisica y el contexto de fondo), pero al usuario
-del script no le importa eso -- solo le da timestamps y le devuelve CSVs.
+Genera, con UN SOLO COMANDO, una tabla de features por cada timestamp pedido,
+apta para entrenar un modelo de ML. Por defecto escribe Parquet comprimido con
+Zstandard; también puede escribir CSV o ambos formatos. Por adentro corre
+fdca.run_audit, que calcula la física y el contexto de fondo.
 
-Es incremental: si ya existe el CSV de un timestamp en --output-dir, no lo
-vuelve a generar (salvo --force). Asi podes ir sumando escenas nuevas sin
-recomputar las que ya tenias.
+Es incremental: si ya existe la salida del timestamp en --output-dir, no la
+vuelve a generar (salvo --force). Así se pueden sumar escenas nuevas sin
+recomputar las existentes.
 
-Columnas descartadas a proposito (ver conversacion): verdict, ref_code (se
+Columnas descartadas a propósito (ver conversación): verdict, ref_code (se
 guarda aparte, solo informativo), pred_code, ref_base_code, pred_base_code,
 base_code, final_code, upgraded_code, stage*, fail_char_*, reached_candidate,
 confirmed_part2, eliminated, elim_reason, detection_policy, policy_*,
 conf_thr*, conf_bkg7_*, conf_bt7c_*, p2_*, mg_*, fire_frac, fire_temp, frp,
 dozier_valid, bt7_min_thr, bt7_refl_thr, is_cloudy, sat_flag, in_roi.
-
-Uso
----
-  # timestamps puntuales:
-  python build_features_csv.py \\
-      --timestamps 20251115_0850,20251116_1200,20251117_1820 \\
-      --dataset-root /Users/valentinachagas/GERIS-PFC/implementacion/dataset \\
-      --output-dir machine_learning/data/features
-
-  # TODOS los timestamps disponibles (sin --timestamps):
-  python build_features_csv.py \\
-      --dataset-root /Users/valentinachagas/GERIS-PFC/implementacion/dataset \\
-      --output-dir machine_learning/data/features
-
-Esto deja:
-  machine_learning/data/features/20251115_0850.csv
-  machine_learning/data/features/20251116_1200.csv
-  machine_learning/data/features/20251117_1820.csv
 
 Requiere correrse en un entorno donde el paquete `fdca` sea importable (este
 script invoca `python -m fdca.run_audit` como subproceso).
@@ -96,10 +78,16 @@ def parse_args() -> argparse.Namespace:
         "(fuegos reales + detecciones propias + candidatos). Sin esto (default) ya viene con la curaduria "
         "de negativos duros que pide model_architecture.md.",
     )
-    parser.add_argument("--output-dir", required=True, help="Carpeta donde queda un CSV por timestamp.")
+    parser.add_argument("--output-dir", required=True, help="Carpeta donde queda una tabla por timestamp.")
+    parser.add_argument(
+        "--output-format",
+        choices=("parquet", "csv", "both"),
+        default="parquet",
+        help="Formato de salida. Default: parquet comprimido con zstd.",
+    )
     parser.add_argument("--audit-raw-output-dir", default="results/audit", help="Carpeta donde run_audit.py escribe su corrida cruda (interno, no es el resultado final).")
     parser.add_argument("--no-download", action="store_true", help="Se pasa a --no-download de run_audit.py.")
-    parser.add_argument("--force", action="store_true", help="Regenera igual los timestamps que ya tengan CSV en --output-dir.")
+    parser.add_argument("--force", action="store_true", help="Regenera igual las salidas que ya existan en el formato elegido.")
     parser.add_argument("--dry-run", action="store_true", help="Solo imprime que haria, sin correr nada.")
     return parser.parse_args()
 
@@ -154,12 +142,32 @@ def select_safe_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[FINAL_COLUMNS].copy()
 
 
-def split_and_write_per_timestamp(clean_df: pd.DataFrame, output_dir: Path) -> list[str]:
+def output_paths(output_dir: Path, timestamp: str, output_format: str) -> list[Path]:
+    suffixes = {
+        "parquet": [".parquet"],
+        "csv": [".csv"],
+        "both": [".parquet", ".csv"],
+    }
+    return [output_dir / f"{timestamp}{suffix}" for suffix in suffixes[output_format]]
+
+
+def split_and_write_per_timestamp(
+    clean_df: pd.DataFrame,
+    output_dir: Path,
+    output_format: str,
+) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for timestamp, group in clean_df.groupby("timestamp"):
-        out_path = output_dir / f"{timestamp}.csv"
-        group.to_csv(out_path, index=False)
+        if output_format in ("csv", "both"):
+            group.to_csv(output_dir / f"{timestamp}.csv", index=False)
+        if output_format in ("parquet", "both"):
+            group.to_parquet(
+                output_dir / f"{timestamp}.parquet",
+                index=False,
+                compression="zstd",
+                engine="pyarrow",
+            )
         written.append(timestamp)
     return sorted(written)
 
@@ -204,7 +212,10 @@ def main() -> None:
         to_generate = requested
         already_have = []
     else:
-        already_have = [t for t in requested if (output_dir / f"{t}.csv").exists()]
+        already_have = [
+            timestamp for timestamp in requested
+            if all(path.exists() for path in output_paths(output_dir, timestamp, args.output_format))
+        ]
         to_generate = [t for t in requested if t not in already_have]
 
     if already_have:
@@ -218,22 +229,26 @@ def main() -> None:
     raw_pixels_csv = run_audit(args, to_generate, run_id)
 
     if args.dry_run:
-        print(f"[dry-run] se hubiera leido {raw_pixels_csv} y escrito un CSV por timestamp en {output_dir}")
+        print(
+            f"[dry-run] se hubiera leído {raw_pixels_csv} y escrito "
+            f"{args.output_format} por timestamp en {output_dir}"
+        )
         return
 
     df = pd.read_csv(raw_pixels_csv)
     clean_df = select_safe_columns(df)
-    written = split_and_write_per_timestamp(clean_df, output_dir)
+    written = split_and_write_per_timestamp(clean_df, output_dir, args.output_format)
 
     missing_after = sorted(set(to_generate) - set(written))
     if missing_after:
         print(f"AVISO: estos timestamps se pidieron pero no aparecieron en pixels.csv (revisar si existen en el dataset): {missing_after}")
 
-    print(f"\nEscribi {len(written)} CSV(s) en {output_dir}:")
+    print(f"\nEscribí {len(written)} tabla(s) en {output_dir} (formato={args.output_format}):")
     for timestamp in written:
         scene_df = clean_df[clean_df["timestamp"] == timestamp]
         n_fire = int(scene_df[TARGET_COLUMN].sum())
-        print(f"  {timestamp}.csv -> {len(scene_df)} filas, {n_fire} positivos")
+        outputs = ", ".join(path.name for path in output_paths(output_dir, timestamp, args.output_format))
+        print(f"  {outputs} -> {len(scene_df)} filas, {n_fire} positivos")
 
     print(f"\nColumnas de feature ({len(SAFE_FEATURE_COLUMNS)}): {SAFE_FEATURE_COLUMNS}")
     print(f"Columna informativa (NO USAR como feature): {INFO_ONLY_COLUMNS}")
