@@ -22,6 +22,31 @@ load_dotenv()   # Reads .env from repo root if it exists; doesn't fail if missin
 
 from tpw_downloader import dedupe_by_cycle, download_and_save
 
+from pathlib import Path
+
+def _default_output_root() -> str:
+    """
+    Same computation as fdca.dataset.default_dataset_root(), duplicated
+    here (rather than imported) to avoid cross-package sys.path issues
+    between obtencion_imagenes/ and implementacion/fdca/. Keep both in
+    sync if the repo layout ever changes.
+
+    Priority: GERIS_OUTPUT_ROOT (explicit override, this downloader only)
+    > GERIS_DATASET_ROOT (shared with the HF path in dataset.py/sync_hf.py)
+    > repo-anchored default. Checked here directly (not just in main())
+    so this function gives the same answer whether it's called from
+    main() or invoked standalone (e.g. for debugging).
+
+    Layout assumed:
+        <repo-root>/obtencion_imagenes/pipeline.py    (this file)
+        <repo-root>/implementacion/dataset/            (fallback root)
+    """
+    load_dotenv()
+    env_root = os.environ.get("GERIS_OUTPUT_ROOT") or os.environ.get("GERIS_DATASET_ROOT")
+    if env_root:
+        return env_root
+    repo_root = Path(__file__).resolve().parents[1]  # obtencion_imagenes -> repo-root
+    return str(repo_root / "implementacion" / "dataset")
 
 def load_config(path="config.yaml"):
     with open(path) as f:
@@ -582,10 +607,14 @@ def main():
 
     print("GERIS_GOES2GO_CACHE =", os.environ.get("GERIS_GOES2GO_CACHE"))
 
-    # Allows each person to redirect downloads to their own disk (e.g. an external drive) by setting these variables
-    # in their local .env, without touching the shared config.yaml. If unset, behavior is unchanged.
-    if os.environ.get("GERIS_OUTPUT_ROOT"):
-        cfg["output_root"] = os.environ["GERIS_OUTPUT_ROOT"]
+    # Priority: GERIS_OUTPUT_ROOT (explicit override, this downloader only)
+    # > GERIS_DATASET_ROOT (shared with the HF path in dataset.py/sync_hf.py)
+    # > the repo-anchored default, identical to fdca.dataset.default_dataset_root()'s
+    #   fallback, so AWS and HF downloads land in the same folder with zero
+    #   .env configuration. config.yaml's own "output_root" is no longer used
+    #   as the default -- set GERIS_OUTPUT_ROOT/GERIS_DATASET_ROOT instead.
+    cfg["output_root"] = _default_output_root()
+
     downloader.configure_goes2go_cache_dir()
 
     if args.command == "download":

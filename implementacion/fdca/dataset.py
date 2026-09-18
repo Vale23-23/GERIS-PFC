@@ -47,15 +47,28 @@ def _flatten_sharded_downloads(dataset_root: str | Path, region: str) -> None:
 def default_dataset_root() -> str:
     """
     Resolve the dataset root independent of which branch checkout the user
-    is standing in (e.g. .../obtencion_imagenes/ vs .../testing-fdca-real/).
+    is standing in (e.g. .../obtencion_imagenes/ vs .../implementacion/),
+    and independent of the cwd the caller was invoked from.
 
-    Follows the same per-machine .env pattern as GERIS_OUTPUT_ROOT /
-    GERIS_GOES2GO_CACHE: if GERIS_DATASET_ROOT is set, both branches can
-    point at one shared physical folder; otherwise falls back to the
-    relative "dataset" folder for simple single-checkout setups.
+    If GERIS_DATASET_ROOT is set, it wins -- lets someone redirect to a
+    separate disk without touching the repo. Otherwise falls back to
+    <repo-root>/implementacion/dataset, anchored via this file's own
+    location rather than a bare relative "dataset" string: a relative path
+    resolves against the process cwd, which differs depending on whether
+    pipeline.py (normally run from obtencion_imagenes/) or an fdca script
+    (normally run from implementacion/) is the caller -- that mismatch is
+    what caused AWS and HF downloads to land in two different folders.
+
+    Layout assumed (fixed since the branches were merged into main):
+        <repo-root>/implementacion/fdca/dataset.py   (this file)
+        <repo-root>/implementacion/dataset/           (fallback root)
     """
     load_dotenv()
-    return os.getenv("GERIS_DATASET_ROOT", "dataset")
+    env_root = os.getenv("GERIS_DATASET_ROOT")
+    if env_root:
+        return env_root
+    implementacion_dir = Path(__file__).resolve().parents[1]  # fdca -> implementacion
+    return str(implementacion_dir / "dataset")
 
 def missing_required_files(timestamp: str, region: str, dataset_root: str | Path) -> list[Path]:
     """Return the files required to construct an FDCA input.
