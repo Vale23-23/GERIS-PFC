@@ -153,6 +153,8 @@ def download_timestamp(
             f"{region}/*/{timestamp}.npy",
             f"{region}/*/{timestamp}_planck.json",
             f"{region}/*/{timestamp}_dqf.npy",
+            f"{region}/*/{timestamp}_kappa0.json",
+            f"{region}/*/units.json",
             f"{region}/geometry.json",
             f"{region}/camel_emissivity/*{month}Month*.nc",
             f"{region}/TPW-GFS/{_cycle_str}.npy",
