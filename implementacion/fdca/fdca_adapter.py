@@ -95,7 +95,7 @@ GOES19_LON_0_FALLBACK  = -75.0          # longitud subsatelital [deg]
 GOES19_H_FALLBACK      = 35786.023e3    # altura orbital [m]
 GOES19_R_EQ_FALLBACK   = 6378.137e3     # radio ecuatorial [m]
 GOES19_R_POL_FALLBACK  = 6356.7523e3    # radio polar [m]
-
+KAPPA0_B02_PLACEHOLDER = np.pi / 1622.088  # ≈ 1.9373e-3
 
 def load_geometry(base_path: str) -> dict:
     """
@@ -1117,35 +1117,40 @@ def load_fdca_input(
         # conserva el promedio espacial y evita interpolar valores inválidos.
         rad02_resized = resample_b02_to_grid(rad02, shape)
         kappa0 = load_kappa0(base, timestamp)
+        kappa0_source = "sidecar"
+
         if kappa0 is None:
-            # Try a band-level units.json as a fallback (downloader may
-            # provide a template there). Do not raise — instead warn and
-            # continue without B02 reflectance when truly missing.
+            # Legacy fallback: older datasets, written before downloader.py
+            # started popping kappa0 out of units.json into its own
+            # per-timestamp sidecar, may still carry it there.
             units_path = os.path.join(base, "ABI-L1b-Rad-B02", "units.json")
             if os.path.exists(units_path):
                 try:
                     with open(units_path) as _f:
                         meta = json.load(_f)
-                    kappa0 = meta.get("kappa0")
-                    if kappa0 is not None:
-                        kappa0 = float(kappa0)
+                    legacy_kappa0 = meta.get("kappa0")
+                    if legacy_kappa0 is not None:
+                        kappa0 = float(legacy_kappa0)
+                        kappa0_source = "legacy units.json"
                 except Exception:
-                    kappa0 = None
+                    pass
 
         if kappa0 is None:
-            print(
-                f"Aviso: no se encontró '{timestamp}_kappa0.json' ni 'ABI-L1b-Rad-B02/units.json'.\n"
-                f"→ Se continuará sin calcular la reflectancia B02 para {timestamp}.\n"
-                f"   Esto degrada umbrales dependientes de reflectancia, pero evita fallo completo."
-            )
-            refl2 = None
-        else:
-            refl2 = rad_b02_to_reflectance(rad02_resized, kappa0)
+            kappa0 = KAPPA0_B02_PLACEHOLDER
+            kappa0_source = "placeholder (no per-scene kappa0 found)"
+            if verbose:
+                print(f"  ⚠ No se encontró '{timestamp}_kappa0.json' ni "
+                      f"kappa0 en 'ABI-L1b-Rad-B02/units.json'; usando "
+                      f"placeholder kappa0={kappa0:.6e} (sin corrección de "
+                      f"distancia Tierra-Sol, error estacional ~3.4%).")
+
+        refl2 = rad_b02_to_reflectance(rad02_resized, kappa0)
         if verbose:
             print(f"  {'B02 reflectance':<22}: kappa0={kappa0:.6e} "
-                  f"(from units.json)")
+                  f"(from {kappa0_source})")
     else:
         refl2 = None
+
     if verbose:
         print(f"\n  {'BT7 range [K]':<22}: {np.nanmin(bt7):.1f} – {np.nanmax(bt7):.1f}")
         print(f"  {'BT14 range [K]':<22}: {np.nanmin(bt14):.1f} – {np.nanmax(bt14):.1f}")
